@@ -25,11 +25,11 @@ class VfsNode:
     ):
         self.name = name                                # semantic name from overrides
         self.category = category                        # semantic category derived from disk index
-        self.parent = parent                            # parent node
+        self.parent = parent                            # parent node (None = Root)
         self.children: list[VfsNode] = []               # children node(s)
 
         self.offset = offset                            # Relative offset into parent
-        self.size = size                                # Size of node (VirtualFile=disk[offset:offset+size])
+        self.size = size                                # Size of node in bytes (VirtualFile=disk[offset:offset+size])
 
         self.header = header                            # raw header
         self.extension = extension                      # extension from override
@@ -40,11 +40,11 @@ class VfsNode:
         self.pending_data: bytes | None = None          # cached data
 
         # Flags; Useful for rebuild and UI
-        self.is_container = False
-        self.is_unpacked = False 
-        self.is_decompressed = False
-        self.is_dirty = False
-        self.is_target = False
+        self.is_physical = False                        # Has physical address
+        self.is_unpacked = False                        # Kods
+        self.is_decompressed = False                    # SLZ
+        self.is_dirty = False                           # Edited
+        self.is_target = False                          # Datacenter
 
         self._handler_data: dict = {}
     
@@ -63,7 +63,7 @@ class VfsNode:
     def hierarchical_id_str(self) -> str:
         '''Return human readable id'''
         return '.'.join(map(str, self._id_path)) if self._id_path else '0'
-    
+
     def row(self) -> int:
         '''Keep track of the children-parent links for tree view'''
         if self.parent:
@@ -88,29 +88,58 @@ class VfsNode:
 
 ###------------------------------------------------------- VFS Manager -----------------------------------------------------###
 
+'''TODO Keep VfsManager lightweight and used for mapping/lookups of the vfs'''
+
+
 class VfsManager:
     '''Virtual File System Manager. Bridge between the dispatcher and node'''
     def __init__(self, root_node: VfsNode):
         self.root = root_node
         # Flat path lookup map
         self.nodes_by_id: dict[Tuple[int, ...], VfsNode] = {}
-        self.abs_offset_map: dict[VfsNode, int] = {}
+        # Physical disk map
+        self.physical_offsets: dict[VfsNode, int] = {}
         # Track modified nodes
         self.dirty_nodes: set[VfsNode] = set()
         # Initialize root with offset 0
         self.register_node(self.root, 0)
 
-    def register_node(self, node: VfsNode, parent_abs_offset: int = 0):
-        abs_disk_offset = parent_abs_offset + node.offset
-
-        self.abs_offset_map[node] = abs_disk_offset
+    def register_node(self, node: VfsNode, relative_offset: int = 0, is_physical: bool = False):
+        '''Register node with HID map'''
         self.nodes_by_id[node.hierarchical_id] = node
 
-        for child in node.children:
-            self.register_node(child, abs_disk_offset)
+        if is_physical:
+            abs_disk_offset = relative_offset + node.offset
+            self.physical_offsets[node] = abs_disk_offset
 
+        for child in node.children:
+            self.register_node(child, relative_offset=0)
+
+    def get_data_for_node(self, node: VfsNode) -> bytes:
+        '''Process nodes until requested node then return it's bytes'''
+        # Return modified data
+        if node.is_dirty:
+            return b'' # TODO node.pending_data
+
+        # NodeManager structure: (root:None, TOC entry:Physical, Kods/SLZ entry:Virtual)
+
+        # Has Physical address
+        if node.is_physical:
+            abs_offset = self.get_absolute_offset(node)
+            return self.active_handler.read_file_data(node, abs_offset)
+        
+        # Has Virtual Address
+        parent_buffer = self.get_data_for_node(node.parent)
+
+        start = node.offset
+        end = start + node.size
+
+        if end > len(parent_buffer):
+            logger.warning(f'Slice out of bounds for {node.name}')
+        return provider_buffer[start:end]
+        
     def get_absolute_offset(self, node: VfsNode) -> int:
-        return self.abs_offset_map.get(node, 0)
+        return self.physical_offsets.get(node, 0)
 
     def get_node_by_id(self, hid: Tuple[int, ...]) -> Optional[VfsNode]:
         '''Node lookup: manager.get_node_by_id((0, 3, 1))'''

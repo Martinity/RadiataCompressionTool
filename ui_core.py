@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import QMainWindow, QStackedWidget, QMessageBox, QWidget, Q
 from PyQt6.QtGui import QAction
 from pathlib import Path
 from core.dispatcher import Dispatcher
-from core.registry import Registry, ActionResolver
+from core.registry import Registry
+from core.resolver import ActionResolver
 from plugins.logger import LoggingWindow
 from ui.tree_model import VfsCategoryProxyModel, VfsCategoryModel, VfsTreeModel
 from plugins.hex_editor import HexEditorWidget
@@ -107,7 +108,6 @@ class WorkspaceController:
     def __init__(self, workspace: WorkspaceWidget, dispatcher: Dispatcher):
         self.view = workspace
         self.dispatcher = dispatcher
-        self._wire_signals()
 
     def init_workspace(self, root_node):
         source_model = VfsTreeModel(root_node)
@@ -119,13 +119,18 @@ class WorkspaceController:
         self.view.tree_model = source_model
         self.view.category_proxy_model = proxy_model
 
-        self.view.category_view.clicked.disconnect()
-        self.view.tree_view.selectionModel().currentChanged.disconnect()
-        self.view.tree_view.customContextMenuRequested.disconnect()
+        self.view.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
-        self.view.category_view.blockSignals(True)
+        try:
+            self.view.category_view.clicked.disconnect()
+            self.view.tree_view.customContextMenuRequested.disconnect()
+        except TypeError:
+            pass
+
+        # self.view.category_view.blockSignals(True)
         self.view.category_view.clicked.connect(self.handle_category_select)
-        self.view.category_view.blockSignals(False)
+        # self.view.category_view.blockSignals(False)
+        self.view.tree_view.customContextMenuRequested.connect(self.handle_context_menu)
 
         tree_selection = self.view.tree_view.selectionModel()
         tree_selection.currentChanged.connect(self.handle_tree_select)
@@ -181,7 +186,7 @@ class WorkspaceController:
         supported_actions = ActionResolver.get_supported_actions(node)
         for action_name in supported_actions:
             action = menu.addAction(action_name)
-            action.triggered.connect(lambda checked=False, a=action_name, n=node: self.dispatcher.execute_node_action(n, a))
+            action.triggered.connect(lambda checked=False, a=action_name, n=node: self.route_action(n, a))
         
         global_pos = self.view.tree_view.viewport().mapToGlobal(position)
         menu.exec(global_pos)
@@ -190,7 +195,7 @@ class WorkspaceController:
 
         new_editor = editor_class()
 
-        raw_bytes = self.dispatcher.read_node_bytes(node) # enforced in contract
+        raw_bytes = self.dispatcher.get_node_data(node) # enforced in contract
         new_editor.load_node(node, raw_bytes) # enforced in contract
 
         self.view.set_center_widget(new_editor)
@@ -201,6 +206,13 @@ class WorkspaceController:
         if action_name == 'Hex View':
             editor_class = Registry.get_editor_for(node)
             self.launch_editor(node, editor_class)
+        elif action_name == 'Properties':
+            '''TODO add get_properties for handlers'''
+        elif action_name == 'Unpack node':
+            self.dispatcher.load_source(node)
+            self.view.tree_view.expandAll()
+        else:
+            self.dispatcher.execute_node_action(node, action_name)
 
 ###-------------------------------------- Welcome Page --------------------------------------###
 

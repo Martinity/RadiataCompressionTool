@@ -1,13 +1,13 @@
 from PyQt6.QtWidgets import QPlainTextEdit, QVBoxLayout, QMessageBox
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
-from core.contracts import BaseEditorWidget
+from core.contracts import BaseEditor
 from core.registry import Registry
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
 @Registry.register(name='Hex Editor', extensions=(), magics=(), is_fallback=True)
-class HexEditorWidget(BaseEditorWidget):
+class HexEditorWidget(BaseEditor):
     data_modified = pyqtSignal(object, bytes)
 
     def __init__(self, parent=None):

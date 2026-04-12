@@ -4,7 +4,7 @@
 - Utility widgets (logger, properties) inherit QWidget
 '''
 from __future__ import annotations
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Union, Optional, Any
 
 from pathlib import Path
 import io
@@ -13,6 +13,9 @@ from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import pyqtSignal
 if TYPE_CHECKING:
     from core.node import VfsNode
+
+import logging
+logger = logging.getLogger(f'radiata.{__name__}')
 
 
 ###---------------------------------------------- Base Handler contracts ------------------------------------------------###
@@ -24,14 +27,18 @@ class BaseHandler(abc.ABC):
     @abstractmethod rebuild_file_data\n
     get_identity is suggested for debugging
     '''
-    def __init__(self, source: Union[Path, io.BufferedIOBase, bytes]):
+    def __init__(self, source: Union[Path, io.BufferedIOBase, bytes], parent_node: Optional['VfsNode'] = None):
         '''Initialize the root handle'''
         self.path = source if isinstance(source, Path) else None
+        self.parent_node = parent_node
+        self.owns_handle = False
 
         if isinstance(source, Path):
             self.handle = open(source, 'rb')
+            self.owns_handle = True
         elif isinstance(source, bytes):
             self.handle = io.BytesIO(source)
+            self.owns_handle = True
         else:
             self.handle = source
 
@@ -49,8 +56,14 @@ class BaseHandler(abc.ABC):
     
     @staticmethod
     def get_supported_actions() -> list[str]:
-        '''Returns a list of format-specific actions.'''
+        '''Override to Return a list of format-specific actions.'''
+        logger.warning(f'{__class__.__name__} has not defined supported actions.')
         return []
+    
+    def execute_action(self, node: 'VfsNode', action_name: str) -> Optional[Any]:
+        '''Override to handle custom logic'''
+        logger.warning(f'{self.__class__.__name__} has not implemented action: {action_name}')
+        return None
 
     @abc.abstractmethod
     def get_file_tree(self) -> VfsNode:
@@ -58,14 +71,17 @@ class BaseHandler(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def read_file_data(self, node: VfsNode, absolute_offset: int) -> bytes:
-        '''Return the original node data using the absolute offset. Bypass pending edits'''
-        pass
-
-    @abc.abstractmethod
-    def rebuild_file_data(self, output_path: Path, virtual_tree: VfsNode):
+    def rebuild_file_data(self, node: VfsNode) -> bytes:
         '''Rebuild the container using pending edits'''
         pass
+
+    def read_file_data(self, node: VfsNode, offset: int) -> bytes:
+        '''Override to Return the original node data using the offset. Bypass pending edits
+           Defaults to seek and read from raw handle'''
+        if not self.handle or self.handle.closed:
+            return b''
+        self.handle.seek(offset)
+        return self.handle.read(node.size)
 
     def get_identity(self) -> str:
         '''Override for build name'''
@@ -73,7 +89,7 @@ class BaseHandler(abc.ABC):
 
     def close(self):
         '''Close the handle'''
-        if hasattr(self, 'handle') and not self.handle.closed:
+        if hasattr(self, 'handle') and self.owns_handle and not self.handle.closed:
             self.handle.close()
 
 ###---------------------------------------------- Widget contract ----------------------------------------------###
@@ -82,7 +98,7 @@ class _ABCMetaQtMeta(type(QWidget), abc.ABCMeta):
     '''Merge PyQt6 widget metaclass with ABC metaclass'''
     pass
 
-class BaseEditorWidget(QWidget, metaclass=_ABCMetaQtMeta):
+class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     '''
     Abstract Base Class for editors. All editor widgets inherit from this class and must implement:\n
     @abstractmethod load_node\n

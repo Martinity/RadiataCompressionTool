@@ -9,7 +9,7 @@ class VfsTreeModel(QAbstractItemModel):
     def __init__(self, root_node, parent=None):
         super().__init__(parent)
         self.root_node = root_node
-        self.columns = ["File Name", "LBA", "Size (Sectors)", "Extension"]
+        self.columns = ["File Name", "Size (Bytes)", "Extension"]
 
     # Build the grid for rendering
     def columnCount(self, parent=QModelIndex()):
@@ -70,9 +70,8 @@ class VfsTreeModel(QAbstractItemModel):
         if role == Qt.ItemDataRole.DisplayRole:
             col = index.column()
             if col == 0: return node.name  # noqa: E701
-            if col == 1: return str(node.offset)  # noqa: E701
-            if col == 2: return str(node.size)  # noqa: E701
-            if col == 3: return node.extension  # noqa: E701
+            if col == 1: return str(node.size)  # noqa: E701
+            if col == 2: return node.extension  # noqa: E701
 
         # Critical: Return the node itself if the context menu asks for it!
         if role == Qt.ItemDataRole.UserRole:

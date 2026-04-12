@@ -4,15 +4,16 @@ from pathlib import Path
 from core.registry import Registry
 from core.contracts import BaseHandler
 from core.node import VfsNode
+from typing import Optional, Any
 
 ###------------------------------------ Wrapper -------------------------------------------###
 
-@Registry.register(
-    name='Tri-Ace Ps2 Compressed File',
-    extensions=('.slz', '.sle'),
-    magics=(b'SLZ', b'SLE')
-)
+@Registry.register(name='Tri-Ace Ps2 Compression Handler',extensions=('.slz', '.sle'))
 class CompressorHandler(BaseHandler):
+    def __init__(self, source, parent):
+        super().__init__(source)
+        self.handler_parent = parent
+
     def get_file_tree(self) -> VfsNode:
         '''Return a node for the compressed file'''
         self.handle.seek(0)
@@ -21,14 +22,13 @@ class CompressorHandler(BaseHandler):
         inner_name = self.path.stem
         node = VfsNode(
             name=inner_name,
-            category='compressed data',
+            category=self.handler_parent.category,
             size=uncompressed_size,
             header=header,
-            parent=None
+            parent=self.handler_parent,
         )
-        node.is_container = True
         return node
-    
+
     def read_file_data(self, node: VfsNode) -> bytes:
         '''Decompress on the fly'''
         self.handle.seek(0)
@@ -48,6 +48,20 @@ class CompressorHandler(BaseHandler):
 
         with open(output_path, 'wb') as f:
             f.write(compressed_output)
+
+    def get_properties(self, node: VfsNode) -> tuple[str, ...]:
+        '''TODO get file properties found in header/raw bytes'''
+        return ('',)
+
+    @staticmethod
+    def get_supported_actions() -> list[str]:
+        return ['Decompress', 'Properties']
+    
+    def execute_action(self, node: VfsNode, action_name: str) -> Optional[Any]:
+        if action_name == 'Decompress':
+            return self.read_file_data(node)
+        elif action_name == 'Properties':
+            return self.get_properties(node)
 
 ###------------------------------------ Compressor ------------------------------------------###
         

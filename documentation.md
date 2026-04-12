@@ -5,49 +5,30 @@ Post 2.0 the tool handles the filesystem automatically in memory. The goal is to
 ## Key components
 
 ### Logic
-- **Dispatcher**: Coordinator between UI - Registry - Active Handler
-- **Contracts**: Structure plugins must adhear to (BaseHandler - Data logic, BaseEditor - UI)
-- **Registry**: Plugin delared profiles, used to determine when a plugin can be called
+- **Dispatcher**: Manages the active I/O stream, maintains the _buffer_cache for virtual layers, and performs recursive data retrieval. It acts as the "Stateless Factory" for handlers.
+- **Contracts**: Interace definitions. `BaseHandler` manages format-specific logic (Unpacking/Rebuilding) while `BaseEditor` handles the data-viewing UI.
+- **Registry**: Global lookup service for matching file signatures/extensions to their respective Handlers and Editors.
 - **VfsNode**: Holds the data of the node
-- **VfsManager**: Manages the relational data of the node
+- **VfsManager**: Tracks node relationships (HID), physical disk offsets, and Dirty State (pending modifications). It does not perform I/O.
+- **ActionResolver**: Determines context-aware capabilities by merging global actions with format-specific handler actions.
 
 ### UI
 - **MainWindow**: Initializes the `QMainWindow`, separates concerns, and contacts dispatcher for iso
 - **MenuBar**: Create and handles the menu bar for the main window (may be separated by UI - Logic in future)
 - **WelcomePage**: All logic for the welcome page
-- **WorkspaceController**: Signals for the workspace page -> routed to dispatcher or resolver
+- **WorkspaceController**: Signals for the workspace page -> Translates user interactions into commands for the `ActionResolver` and `Dispatcher`.
 - **WorkspaceWidget**: UI for the workspace page
-- **TreeModel**: Contains the node data to display in the `tree_view` widget
+- **TreeModel**: Contains read-only node data to display in the `tree_view` widget
 - **CategoryModel**: Contains the data to display in category widget
 - **CategoryProxyModel**: Contains the proxy data for the category applied to `tree_view`
 
-### Utility (Bypass the contracts)
-- **Logger**: Pyqt signal from logging. Displayed in log window with level - color
+### Utility
+- **Logger**: Logging system using PyQt signals to bridge standard Python logging into the UI console. With level to color output.
 
-## Execution
 
-### UI:
-1. Start with welcome page where it askes for an ISO (takes the whole window)
-2. **a.** ISO failed to load -> back to step 1
-   **b.** ISO successfully loaded
-3. Expandable list of categories on the left. Tree View of the nodes or selected category nodes on the left after the list of categories. Log on the bottom of the window with a clear button. Hex Editor on the right side of the window for the current selected node
-4. **a.** Right click on tree view for context window of actions to perform on that node.
-   **b.** Click on the hex editor to select a position to write or replace hex.
-   **c.** Click on clear log button to clear the log.
-   **d.** Click on a category to view only the associated nodes
-5. **a.** tree view is expanded based on the new nodes that are unpacked
-   **b.** Custom editor is opened over the current window
-6. Click on commit changes
-7. Rebuilding ISO in progress... With log of rebuild status
-
-### Logic:
-1. Node gets triggered from UI
-2. Dispatcher connects node to handler and registry
-3. **a.** Node handler is recieved for data processing
-   **b.** Node registry is recieved for editor (contains handlers for formats, or generic byte handler)
-4. **a.** New node gets registered in VfsNode and VfsManager
-   **b.** Previously registered node's data is sent to editor
-   
+### Rebuild:
+**Recursion** Post order
+**Files** Front to back
 
 ## Finished TODO list:
 
@@ -71,7 +52,7 @@ Post 2.0 the tool handles the filesystem automatically in memory. The goal is to
 
 - Redefine concerns for Dispatch/Node/Registry/Contract/Resolver -> `/core/`
 - Rewrite tree proxy signal handling and widget init currently scuffy -> `/ui_core.py`
-- Fully implement the resolvers -> `/logic_core.py`
+- Fully implement the context resolver -> `/core/registry.py.ActionResolver`
 - Context Router for UI menu options -> `/ui/context_router.py`
 - Add mounting system in dispatcher for depth diving -> `/core/dispatcher.py`
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
@@ -81,6 +62,8 @@ Post 2.0 the tool handles the filesystem automatically in memory. The goal is to
 
 ## Future TODO list:
 
+- Separate ui_core/models if needed -> `/ui_core.py` & `/ui/tree_model.py`
+- Search tree view -> `/ui_core.py`
 - Non standard compressed format support. Chainded/Packed archives -> `/core/handler/compression_handler.py`
 - Custom UI for hex editor so that it functions as intended (hex stays in place/edits have visible feedback) -> `/ui/widgets/hex_editor.py`
 - Importing kods archiving including datacenter targeting -> `/core/handlers/kods_handler.py`
@@ -92,8 +75,17 @@ Post 2.0 the tool handles the filesystem automatically in memory. The goal is to
 - ~~Iso dump~~
 - ~~Logging~~
 - ~~Hex Editor~~
-- Compressor
-- Iso rebuilding
+- Decompression
 - Kods Unpacking
+- Iso rebuilding
+- Compression
 - Kods Packing
   
+# Fully finished features
+
+- Qt Window
+- Iso Handler
+- Compressor Handler
+- Kods Handler
+- Hex Editor
+- ~~Logger~~

@@ -6,7 +6,7 @@ from hashlib import sha1
 from typing import Any
 from core.name_overrides import generate_name_overrides
 from core.extension_overrides import generate_ext_overrides
-from core.node import VfsNode, VfsManager
+from core.node import VfsNode
 from core.contracts import BaseHandler 
 from core.registry import Registry
 import logging
@@ -14,7 +14,7 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 ###------------------------------ ISO HANDLER ------------------------------------###
 
-@Registry.register(name='Radiata Stories iso', extensions=('.iso',))
+@Registry.register(name='Radiata Stories ISO Handler', extensions=('.iso',))
 class IsoHandler(BaseHandler):
     '''Responsible for loading the ISO and TOC related operations'''
     @dataclass(slots=True)
@@ -65,7 +65,7 @@ class IsoHandler(BaseHandler):
             return "Unknown"
 
 
-    def __init__(self, iso_path: Path):
+    def __init__(self, iso_path: Path, parent=None):
         '''Initialize iso properties'''
         super().__init__(iso_path)
         logger.info(f"IsoHandler initialized for {iso_path.name}")
@@ -82,8 +82,6 @@ class IsoHandler(BaseHandler):
         '''Returns the root node of the VFS (the disk)'''
         logger.debug("Building VFS tree from TOC")
         root = VfsNode(name='Radiata Stories ISO')
-        root.is_container = True
-        manager = VfsManager(root)
         logger.info(f"Tree built — {len(self.toc)} valid files")
 
         semantic_names: dict[int, str] = generate_name_overrides()
@@ -102,13 +100,13 @@ class IsoHandler(BaseHandler):
                 name=semantic_name,
                 category=category,
                 offset=entry['offset'],
-                size=entry['size'],
+                size=(entry['size'] * self.params.sector_size),
                 parent=root,
                 header=header,
                 extension=ext
             )
+            node.is_physical = True  # Set as reference node for all file processes
             root.append_child(node)
-            manager.register_node(node, parent_abs_offset=0)
         return root
 
     def _load_toc(self) -> bytes:
@@ -147,13 +145,14 @@ class IsoHandler(BaseHandler):
     def read_file_data(self, node: VfsNode, absolute_offset) -> bytes:
         """The UI calls this ONLY when it needs the bytes for Hex view/export."""
         self.handle.seek(absolute_offset)
-        data = self.handle.read(node.size * self.params.sector_size)
+        data = self.handle.read(node.size)
 
         logger.debug(f'Read {len(data)} bytes from offset {absolute_offset}')
         return data
 
-    def rebuild_file_data(self, output_path: Path, virtual_tree: VfsNode):
+    def rebuild_file_data(self, node: VfsNode) -> bytes:
         '''TODO'''
+        return b''
 
     def verify_iso_integrity(self) -> str:
         '''Verify radiata iso. Check what version of the disk is running.'''
@@ -181,3 +180,4 @@ class IsoHandler(BaseHandler):
 
     def get_identity(self) -> str:
         return 'ISO detected'
+    

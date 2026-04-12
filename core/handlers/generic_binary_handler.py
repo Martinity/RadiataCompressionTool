@@ -16,5 +16,6 @@ class GenericBinaryHandler(BaseHandler):
     def get_file_tree(self) -> VfsNode:
         return VfsNode(name='raw_data')
 
-    def rebuild_file_data(self, output_path: Path, virtual_tree: VfsNode):
-        pass
+    def rebuild_file_data(self, node: VfsNode) -> bytes:
+        return b''
+    

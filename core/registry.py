@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Type, TYPE_CHECKING, Optional
+from typing import Type, TYPE_CHECKING, Optional, Union
 from pathlib import Path
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ class Registry:
                 profile = FormatProfile(
                     name=name,
                     extensions=extensions,
-                    magics=magics,
+                    magics=magics, # TODO remove or keep and implement in get_profile_for_nore
                     handler_class=cls_or_func,
                     categories=categories,
                     is_fallback=is_fallback
@@ -67,7 +67,7 @@ class Registry:
         return None
                 
     @classmethod
-    def get_handler_class_for(cls, target: Type['VfsNode']|Path) -> Type['BaseHandler'] | None:
+    def get_handler_class_for(cls, target: Union['VfsNode', Path]) -> Type['BaseHandler'] | None:
         if isinstance(target, Path): # is path
             return cls._get_handler_for_physical_file(target)
         # is node
@@ -100,21 +100,3 @@ class Registry:
         from plugins.hex_editor import HexEditorWidget
         return HexEditorWidget
 
-###------------------------------------------ Resolvers --------------------------------------------------###
-
-class ActionResolver:
-    @staticmethod
-    def get_supported_actions(node: 'VfsNode') -> list[str]:
-        '''Return supported actions for node'''
-        profile = Registry.get_profile_for_node(node)
-
-        actions = ['Properties', 'Hex View'] # Basic global actions
-
-        if profile:
-            if hasattr(profile.handler_class, 'get_supported_actions'):
-                actions.extend(profile.handler_class.get_supported_actions())
-
-            if node.is_container:
-                actions.append('Unpack node')
-
-        return list(set(actions))
