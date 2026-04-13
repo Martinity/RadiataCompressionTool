@@ -203,16 +203,7 @@ class WorkspaceController:
 
     def route_action(self, node, action_name):
         logger.debug(f'User requested "{action_name}" on {node.name}')
-        if action_name == 'Hex View':
-            editor_class = Registry.get_editor_for(node)
-            self.launch_editor(node, editor_class)
-        elif action_name == 'Properties':
-            '''TODO add get_properties for handlers'''
-        elif action_name == 'Unpack node':
-            self.dispatcher.load_source(node)
-            self.view.tree_view.expandAll()
-        else:
-            self.dispatcher.execute_node_action(node, action_name)
+        self.dispatcher.execute_node_action(node, action_name)
 
 ###-------------------------------------- Welcome Page --------------------------------------###
 

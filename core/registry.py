@@ -4,7 +4,7 @@ from pathlib import Path
 
 if TYPE_CHECKING:
     from core.node import VfsNode
-    from core.contracts import BaseEditorWidget, BaseHandler
+    from core.contracts import BaseEditor, BaseHandler
 
 import logging
 logger = logging.getLogger('radiata')
@@ -18,7 +18,7 @@ class FormatProfile:
     handler_class: Type['BaseHandler']
     extensions: tuple[str, ...] = ()
     magics: tuple[bytes, ...] = ()
-    editor_class: Type['BaseEditorWidget'] | None = None
+    editor_class: Type['BaseEditor'] | None = None
     categories: tuple[str, ...] = ()
     is_fallback: bool = False
 
@@ -92,7 +92,7 @@ class Registry:
         return None
 
     @classmethod
-    def get_editor_for(cls, node: 'VfsNode') -> Type['BaseEditorWidget']:
+    def get_editor_for(cls, node: 'VfsNode') -> Type['BaseEditor']:
         profile = cls.get_profile_for_node(node)
         if profile and profile.editor_class:
             return profile.editor_class

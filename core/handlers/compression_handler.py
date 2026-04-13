@@ -6,6 +6,9 @@ from core.contracts import BaseHandler
 from core.node import VfsNode
 from typing import Optional, Any
 
+import logging
+logger = logging.getLogger(f'radiata.{__name__}')
+
 ###------------------------------------ Wrapper -------------------------------------------###
 
 @Registry.register(name='Tri-Ace Ps2 Compression Handler',extensions=('.slz', '.sle'))
@@ -27,9 +30,10 @@ class CompressorHandler(BaseHandler):
             header=header,
             parent=self.handler_parent,
         )
+        node.is_decompressed = True
         return node
 
-    def read_file_data(self, node: VfsNode) -> bytes:
+    def process_node(self, node: VfsNode) -> bytes:
         '''Decompress on the fly'''
         self.handle.seek(0)
         compressed_bytes = self.handle.read()
@@ -37,9 +41,9 @@ class CompressorHandler(BaseHandler):
         compressor = RadiCompressor(compressed_bytes)
         return compressor.decompress()
     
-    def rebuild_file_data(self, output_path: Path, virtual_tree: VfsNode):
+    def rebuild_node(self, output_path: Path, virtual_tree: VfsNode):
         '''Compress the bytes back to SLZ/SLE'''
-        raw_bytes = virtual_tree.pending_data or self.read_file_data(virtual_tree)
+        raw_bytes = virtual_tree.pending_data or self.process_node(virtual_tree)
 
         target_mode = self.handle.read(4)[3]
 
@@ -49,9 +53,19 @@ class CompressorHandler(BaseHandler):
         with open(output_path, 'wb') as f:
             f.write(compressed_output)
 
-    def get_properties(self, node: VfsNode) -> tuple[str, ...]:
-        '''TODO get file properties found in header/raw bytes'''
-        return ('',)
+    def get_properties(self, node: VfsNode):
+        ''' TODO Pass a dedicated signal to the ui with deeper information on the compressed file
+            For now pass log signal'''
+        mode = node.header[3]
+        compressed_size = int.from_bytes(node.header[4:8], 'little')
+        decompressed_size = int.from_bytes(node.header[8:12], 'little')
+        next_file = int.from_bytes(node.header[12:16] , 'little')
+
+        next_file_str = 'No Chained Files.' if not next_file else str(next_file)
+        ratio = compressed_size / decompressed_size
+
+        logger.info(f'Compressed File Properties:\nMode:{mode} | Compressed File Size:{compressed_size} '
+                f'| Decompressed File Size:{decompressed_size} | Offset to next chained file:{next_file_str} | Compression ratio={(ratio*100):.02f}%')
 
     @staticmethod
     def get_supported_actions() -> list[str]:
@@ -59,7 +73,7 @@ class CompressorHandler(BaseHandler):
     
     def execute_action(self, node: VfsNode, action_name: str) -> Optional[Any]:
         if action_name == 'Decompress':
-            return self.read_file_data(node)
+            return self.process_node(node)
         elif action_name == 'Properties':
             return self.get_properties(node)
 

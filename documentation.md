@@ -50,19 +50,18 @@ Post 2.0 the tool handles the filesystem automatically in memory. The goal is to
 
 ## Current TODO list:
 
-- Redefine concerns for Dispatch/Node/Registry/Contract/Resolver -> `/core/`
-- Rewrite tree proxy signal handling and widget init currently scuffy -> `/ui_core.py`
+- Connect CompressorHandler -> `/core/handlers/compression_handler.py`
+- Connect KodsHandler -> `/core/handlers/kods_handler.py`
 - Fully implement the context resolver -> `/core/registry.py.ActionResolver`
-- Context Router for UI menu options -> `/ui/context_router.py`
-- Add mounting system in dispatcher for depth diving -> `/core/dispatcher.py`
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
-- Connect compressor class -> `/core/compression_handler.py` & `logic_core.py`
-- Type check + comments and docstrings -> Everywhere
+- Rewrite tree proxy signal handling and widget init currently scuffy -> `/ui_core.py`
+- (For recursive virtual files. Wait until after all single level kods/slz is implemented)Redefine concerns for Dispatch/Node/Registry/Contract/Resolver -> `/core/`
 - Staging/Commiting for edits. -> `/core/dispatcher.py`
 
 ## Future TODO list:
 
-- Separate ui_core/models if needed -> `/ui_core.py` & `/ui/tree_model.py`
+- Smart cache for recursive virtual files -> `/core/dispatcher.py`
+- Separate ui_core/models as needed/prefered -> `/ui_core.py` & `/ui/tree_model.py`
 - Search tree view -> `/ui_core.py`
 - Non standard compressed format support. Chainded/Packed archives -> `/core/handler/compression_handler.py`
 - Custom UI for hex editor so that it functions as intended (hex stays in place/edits have visible feedback) -> `/ui/widgets/hex_editor.py`

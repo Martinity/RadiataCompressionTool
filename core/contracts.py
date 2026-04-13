@@ -22,9 +22,9 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 class BaseHandler(abc.ABC):
     '''Abstract Base Class for all handlers. Classes that inherit from this must implement:\n
-    @abstractmethod read_file_tree\n
-    @abstractmethod read_file_data\n
-    @abstractmethod rebuild_file_data\n
+    @abstractmethod get_file_tree: Get metadata for tree_view\n
+    @abstractmethod process_node: Process raw node data\n
+    @abstractmethod rebuild_node: Rebuild the raw node data\n
     get_identity is suggested for debugging
     '''
     def __init__(self, source: Union[Path, io.BufferedIOBase, bytes], parent_node: Optional['VfsNode'] = None):
@@ -61,7 +61,8 @@ class BaseHandler(abc.ABC):
         return []
     
     def execute_action(self, node: 'VfsNode', action_name: str) -> Optional[Any]:
-        '''Override to handle custom logic'''
+        '''Entry points for custom logic can have various returns, something like get properties might want to pass a signal for the ui,
+        something like decompression would probably want to return the raw bytes.'''
         logger.warning(f'{self.__class__.__name__} has not implemented action: {action_name}')
         return None
 
@@ -71,11 +72,12 @@ class BaseHandler(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def rebuild_file_data(self, node: VfsNode) -> bytes:
+    def rebuild_node(self, node: VfsNode) -> bytes:
         '''Rebuild the container using pending edits'''
         pass
 
-    def read_file_data(self, node: VfsNode, offset: int) -> bytes:
+    @abc.abstractmethod
+    def process_node(self, node: VfsNode, offset: int) -> bytes:
         '''Override to Return the original node data using the offset. Bypass pending edits
            Defaults to seek and read from raw handle'''
         if not self.handle or self.handle.closed:

@@ -43,7 +43,6 @@ class VfsNode:
         self.is_physical = False                        # Has physical address
         self.is_unpacked = False                        # Kods
         self.is_decompressed = False                    # SLZ
-        self.is_dirty = False                           # Edited
         self.is_target = False                          # Datacenter
 
         self._handler_data: dict = {}
@@ -73,12 +72,10 @@ class VfsNode:
     def mark_dirty(self, new_data: bytes):
         self.pending_data = new_data
         self.status = NodeStatus.MODIFIED
-        self.is_dirty = True
 
     def clear_pending(self):
         self.pending_data = None
         self.status = NodeStatus.UNMODIFIED
-        self.is_dirty = False
 
     def __repr__(self) -> str:
         return (f"<VfsNode '{self.name}' "
@@ -87,9 +84,6 @@ class VfsNode:
                 f"dirty={self.is_dirty}>")
 
 ###------------------------------------------------------- VFS Manager -----------------------------------------------------###
-
-'''TODO Keep VfsManager lightweight and used for mapping/lookups of the vfs'''
-
 
 class VfsManager:
     '''Virtual File System Manager. Bridge between the dispatcher and node'''
@@ -114,31 +108,9 @@ class VfsManager:
 
         for child in node.children:
             self.register_node(child, relative_offset=0)
-
-    def get_data_for_node(self, node: VfsNode) -> bytes:
-        '''Process nodes until requested node then return it's bytes'''
-        # Return modified data
-        if node.is_dirty:
-            return b'' # TODO node.pending_data
-
-        # NodeManager structure: (root:None, TOC entry:Physical, Kods/SLZ entry:Virtual)
-
-        # Has Physical address
-        if node.is_physical:
-            abs_offset = self.get_absolute_offset(node)
-            return self.active_handler.read_file_data(node, abs_offset)
         
-        # Has Virtual Address
-        parent_buffer = self.get_data_for_node(node.parent)
-
-        start = node.offset
-        end = start + node.size
-
-        if end > len(parent_buffer):
-            logger.warning(f'Slice out of bounds for {node.name}')
-        return provider_buffer[start:end]
-        
-    def get_absolute_offset(self, node: VfsNode) -> int:
+    def get_offset(self, node: VfsNode) -> int:
+        '''Get physical disk offsets'''
         return self.physical_offsets.get(node, 0)
 
     def get_node_by_id(self, hid: Tuple[int, ...]) -> Optional[VfsNode]:
@@ -148,5 +120,4 @@ class VfsManager:
     def mark_dirty(self, node: VfsNode, new_data: bytes):
         node.pending_data = new_data
         node.status = NodeStatus.MODIFIED
-        node.is_dirty = True
         self.dirty_nodes.add(node)

@@ -12,13 +12,10 @@ class ActionResolver:
         '''Return supported actions for node'''
         profile = Registry.get_profile_for_node(node)
 
-        actions = ['Properties', 'Hex View'] # Basic global actions
+        actions = ['Properties'] # Basic global actions
 
         if profile:
             if hasattr(profile.handler_class, 'get_supported_actions'):
                 actions.extend(profile.handler_class.get_supported_actions())
-
-            if node.extension:
-                actions.append('Unpack node')
 
         return list(set(actions))
