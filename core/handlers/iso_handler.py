@@ -142,12 +142,12 @@ class IsoHandler(BaseHandler):
                 })
         return structured
 
-    def process_node(self, node: VfsNode, absolute_offset) -> bytes:
+    def get_raw_node(self, node: 'VfsNode') -> bytes:
         """The UI calls this ONLY when it needs the bytes for Hex view/export."""
-        self.handle.seek(absolute_offset)
+        self.handle.seek(node.offset)
         data = self.handle.read(node.size)
 
-        logger.debug(f'Read {len(data)} bytes from offset {absolute_offset}')
+        logger.debug(f'Read {len(data)} bytes from offset {node.offset}')
         return data
 
     def rebuild_node(self, node: VfsNode) -> bytes:

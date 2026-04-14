@@ -65,10 +65,13 @@ class VfsNode:
 
     def row(self) -> int:
         '''Keep track of the children-parent links for tree view'''
-        if self.parent:
+        if self.parent is None:
+            return 0
+        try:
             return self.parent.children.index(self)
-        return 0
-    
+        except (ValueError, AttributeError):
+            return 0    
+        
     def mark_dirty(self, new_data: bytes):
         self.pending_data = new_data
         self.status = NodeStatus.MODIFIED
@@ -80,8 +83,7 @@ class VfsNode:
     def __repr__(self) -> str:
         return (f"<VfsNode '{self.name}' "
                 f"id={self._id_path} "
-                f"size={self.size} "
-                f"dirty={self.is_dirty}>")
+                f"size={self.size}>")
 
 ###------------------------------------------------------- VFS Manager -----------------------------------------------------###
 

@@ -26,6 +26,33 @@ Post 2.0 the tool handles the filesystem automatically in memory. The goal is to
 - **Logger**: Logging system using PyQt signals to bridge standard Python logging into the UI console. With level to color output.
 
 
+# Data flow
+#### 1. File System Expansion (Modifying the Tree)
+Used for: ISO mounting, Archive unpacking (`.kod`), and Decompression (`.slz`).
+1.   **Trigger**: `WorkspaceController::route_action` intercepts a UI event ('Unpack' or 'Decompress').
+2.   **Request**: `Dispatcher::load_source` identifies the correct `BaseHandler` via the Registry.
+3.   **Execution**:
+     1.   **Physical File**: Instantiates and keeps the handler open as `active_handler` for the life of the workspace
+     2.   **Virtual File**: Instantiate a temp handler inside a `with` for memory management
+4.   **Blueprint**: `BaseHandler::get_file_tree` parses the container metadata and returns a "detached" `VfsNode` tree.
+5.   **Notarization**: `Dispatcher` integrates these nodes into the main tree and registers them with the `VfsManager` to track physical/virtual relationships.
+6.   **Refresh**: 
+     1.   **Full Reset**:`WorkspaceController` notifies the Qt Model (`layoutChanged`) to re-draw the tree.
+     2.   **Node Insertion**: `WorkspaceController` passes nodes to `VfsTreeModel::add_nodes` wrapping the mutation in `beginInsertRows` and `endInsertRows` for memory management.
+
+#### 2. Data Retrieval (Opening an Editor)
+Used for: Hex View.
+1.   **Trigger**: A `BaseEditor` variant is initialized and requests data for its target node.
+2.   **Mediation**: `Dispatcher::get_node_data` checks the Priority Gate:
+    *   **Level 1**: If `node.pending_data` exists (unsaved edits), return that immediately.
+    *   **Level 2**: If not, call `BaseHandler::process_node` to fetch the bytes.
+3.   **Extraction**: `BaseHandler` performs the physical I/O (seek/read) or logical transformation (decryption).
+4.   **Delivery**: `Dispatcher` passes the resulting bytes to the `BaseEditor`.
+5.   **Display**: `BaseEditor::load_node` populates the UI widgets with the data.
+
+#### 3. Data Commit (Rebuilding ISO)
+Used for: Pushing editor changed to ISO
+...
 ### Rebuild:
 **Recursion** Post order
 **Files** Front to back

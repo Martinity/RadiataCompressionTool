@@ -53,16 +53,10 @@ class BaseHandler(abc.ABC):
 
     def __str__(self):
         return self.get_identity()
-    
-    @staticmethod
-    def get_supported_actions() -> list[str]:
-        '''Override to Return a list of format-specific actions.'''
-        logger.warning(f'{__class__.__name__} has not defined supported actions.')
-        return []
-    
+        
     def execute_action(self, node: 'VfsNode', action_name: str) -> Optional[Any]:
-        '''Entry points for custom logic can have various returns, something like get properties might want to pass a signal for the ui,
-        something like decompression would probably want to return the raw bytes.'''
+        '''Entry points for custom handler logic
+           something like get "Properties" might want to pass a signal for the ui'''
         logger.warning(f'{self.__class__.__name__} has not implemented action: {action_name}')
         return None
 
@@ -73,16 +67,15 @@ class BaseHandler(abc.ABC):
 
     @abc.abstractmethod
     def rebuild_node(self, node: VfsNode) -> bytes:
-        '''Rebuild the container using pending edits'''
+        '''Return the rebuilt container using pending edits'''
         pass
 
     @abc.abstractmethod
-    def process_node(self, node: VfsNode, offset: int) -> bytes:
-        '''Override to Return the original node data using the offset. Bypass pending edits
-           Defaults to seek and read from raw handle'''
+    def get_raw_node(self, node: VfsNode) -> bytes:
+        '''Return the raw original node data from the relative offset of the parent. Bypass pending edits'''
         if not self.handle or self.handle.closed:
             return b''
-        self.handle.seek(offset)
+        self.handle.seek(node.offset)
         return self.handle.read(node.size)
 
     def get_identity(self) -> str:

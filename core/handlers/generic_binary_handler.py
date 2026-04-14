@@ -9,7 +9,7 @@ class GenericBinaryHandler(BaseHandler):
     def __init__(self, source: Union[Path, io.BufferedIOBase, bytes]):
         super().__init__(source)
 
-    def read_file_data(self, node: VfsNode) -> bytes:
+    def get_raw_node(self, node: VfsNode) -> bytes:
         self.handle.seek(node.offset)
         return self.handle.read(node.size)
 

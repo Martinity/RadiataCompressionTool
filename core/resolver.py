@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from core.registry import Registry
@@ -7,15 +8,13 @@ if TYPE_CHECKING:
 ###------------------------------------------ Resolvers --------------------------------------------------###
 
 class ActionResolver:
+    '''Resolves the actions available for a node.'''
     @staticmethod
-    def get_supported_actions(node: 'VfsNode') -> list[str]:
+    def get_supported_actions(node: VfsNode) -> list[str]:
         '''Return supported actions for node'''
-        profile = Registry.get_profile_for_node(node)
-
-        actions = ['Properties'] # Basic global actions
+        profile = Registry.get_profile(node)
 
         if profile:
-            if hasattr(profile.handler_class, 'get_supported_actions'):
-                actions.extend(profile.handler_class.get_supported_actions())
-
-        return list(set(actions))
+            return list(set(profile.supported_actions))
+        
+        return ['Properties'] # Global handler action.

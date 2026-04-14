@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from core.registry import Registry
 from core.contracts import BaseHandler
+from core.extension_overrides import generate_ext_overrides
 from core.node import VfsNode
 from typing import Optional, Any
 
@@ -11,7 +12,9 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 ###------------------------------------ Wrapper -------------------------------------------###
 
-@Registry.register(name='Tri-Ace Ps2 Compression Handler',extensions=('.slz', '.sle'))
+@Registry.register(name='Tri-Ace Ps2 Compression Handler',
+                   extensions=('.slz', '.sle'),
+                   supported_actions=('Decompress', 'Properties'))
 class CompressorHandler(BaseHandler):
     def __init__(self, source, parent):
         super().__init__(source)
@@ -22,28 +25,34 @@ class CompressorHandler(BaseHandler):
         self.handle.seek(0)
         header = self.handle.read(16)
         uncompressed_size = int.from_bytes(header[8:12], 'little')
-        inner_name = self.path.stem
+        decomp_name = self.handler_parent.name + '_decompressed'
+
+        extension_dict: dict[bytes, str] = generate_ext_overrides()
+        ext = next((ext for signature, ext in extension_dict.items() if header.startswith(signature)), '.bin')
         node = VfsNode(
-            name=inner_name,
+            name=decomp_name,
             category=self.handler_parent.category,
             size=uncompressed_size,
             header=header,
+            extension=ext,
             parent=self.handler_parent,
         )
         node.is_decompressed = True
         return node
 
-    def process_node(self, node: VfsNode) -> bytes:
-        '''Decompress on the fly'''
+    def get_raw_node(self, node: VfsNode) -> bytes:
         self.handle.seek(0)
         compressed_bytes = self.handle.read()
 
+        logger.debug(f'Starting decompression for file size {int.from_bytes(compressed_bytes[4:8], 'little')}')
         compressor = RadiCompressor(compressed_bytes)
-        return compressor.decompress()
+        decompressed_bytes = compressor.decompress()
+        logger.debug(f'Successfully finished decompressrion, new size {len(decompressed_bytes)}')
+        return decompressed_bytes
     
     def rebuild_node(self, output_path: Path, virtual_tree: VfsNode):
         '''Compress the bytes back to SLZ/SLE'''
-        raw_bytes = virtual_tree.pending_data or self.process_node(virtual_tree)
+        raw_bytes = virtual_tree.pending_data or self.get_raw_node(virtual_tree)
 
         target_mode = self.handle.read(4)[3]
 
@@ -67,10 +76,6 @@ class CompressorHandler(BaseHandler):
         logger.info(f'Compressed File Properties:\nMode:{mode} | Compressed File Size:{compressed_size} '
                 f'| Decompressed File Size:{decompressed_size} | Offset to next chained file:{next_file_str} | Compression ratio={(ratio*100):.02f}%')
 
-    @staticmethod
-    def get_supported_actions() -> list[str]:
-        return ['Decompress', 'Properties']
-    
     def execute_action(self, node: VfsNode, action_name: str) -> Optional[Any]:
         if action_name == 'Decompress':
             return self.process_node(node)
@@ -434,7 +439,7 @@ class RadiCompressor():
 
         decompressed = decompressed[:expected_size]
         if len(decompressed) != expected_size:
-            print(f"Size mismatch! Header uncompressed={hex(expected_size)}, "
+            logger.warning(f"Size mismatch! Header uncompressed={hex(expected_size)}, "
                 f"produced={hex(len(decompressed))}")
         return bytes(decompressed)
 
