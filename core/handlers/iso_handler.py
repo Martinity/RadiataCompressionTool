@@ -1,4 +1,6 @@
 '''Handle ISO related processing. Extraction, rebuilding, TOC parsing, disk verification'''
+from __future__ import annotations
+
 import struct
 from pathlib import Path
 from dataclasses import dataclass
@@ -63,7 +65,32 @@ class IsoHandler(BaseHandler):
                 if index in index_range:
                     return name
             return "Unknown"
-
+        
+    class DatacenterTargets:
+        '''Kods datacenter targets'''
+        _TARGETS = { # format: [disk index]:(subarchive target, subarchive starting index)
+        186: (0, 0), 204: (1, 0),
+        **{i: (2, 1206) for i in range(1206, 1511)},
+        **{i: (3, 1511) for i in range(1511, 1682)},
+        **{i: (4, 1688) for i in range(1688, 1939)},
+        **{i: (5, 1939) for i in range(1939, 2126)},
+        **{i: (6, 2126) for i in range(2126, 2426)},
+        185: (7, 0),  181: (8, 0),  187: (9, 0),
+        203: (10, 0), 189: (11, 0), 190: (12, 0),
+        191: (13, 0), 192: (14, 0), 193: (15, 0),
+        194: (16, 0), 195: (17, 0), 196: (18, 0),
+        197: (19, 0), 198: (20, 0), 199: (21, 0),
+        200: (22, 0), 201: (23, 0), 206: (25, 0),
+        179: (26, 0), 178: (27, 0), 177: (28, 0),
+        176: (29, 0), 180: (30, 0), 188: (31, 0)
+    }
+        @classmethod
+        def get_target(cls, index: int) -> int | None:
+            '''Return the datacenter for the Kods archive'''
+            for datacenter, target in cls._TARGETS.items():
+                if index in target:
+                    return datacenter
+            return None
 
     def __init__(self, iso_path: Path, parent=None):
         '''Initialize iso properties'''
@@ -94,6 +121,7 @@ class IsoHandler(BaseHandler):
             header = self.handle.read(32)
             ext = next((ext for signature, ext in extension_dict.items() if header.startswith(signature)), '.bin')
             category = self.FileCategories.get_category(disk_index)
+            target = self.DatacenterTargets.get_target(disk_index)
             semantic_name = semantic_names.get(disk_index, entry['name'])
             
             node = VfsNode(
@@ -103,7 +131,8 @@ class IsoHandler(BaseHandler):
                 size=(entry['size'] * self.params.sector_size),
                 parent=root,
                 header=header,
-                extension=ext
+                extension=ext,
+                target=target
             )
             node.is_physical = True  # Set as reference node for all file processes
             root.append_child(node)
@@ -142,7 +171,7 @@ class IsoHandler(BaseHandler):
                 })
         return structured
 
-    def get_raw_node(self, node: 'VfsNode') -> bytes:
+    def get_raw_node(self, node: VfsNode) -> bytes:
         """The UI calls this ONLY when it needs the bytes for Hex view/export."""
         self.handle.seek(node.offset)
         data = self.handle.read(node.size)

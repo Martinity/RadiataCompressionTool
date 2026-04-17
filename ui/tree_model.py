@@ -83,7 +83,7 @@ class VfsTreeModel(QAbstractItemModel):
             if col == 0: 
                 return node.name
             if col == 1: 
-                return self._human_radable_size(node.size)
+                return self._human_redable_size(node.size)
             if col == 2: 
                 return node.extension
 
@@ -94,7 +94,7 @@ class VfsTreeModel(QAbstractItemModel):
         return None
 
     @staticmethod
-    def _human_radable_size(size: int | None) -> str:
+    def _human_redable_size(size: int | None) -> str:
         '''Convert size to human readable strin'''
         if size is None or size < 0:
             return '-'

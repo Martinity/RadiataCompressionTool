@@ -28,7 +28,7 @@ class HexEditorWidget(BaseEditor):
         super().load_node(node, data)
         self.current_node = node
 
-        MAX_SIZE = 1_048_576
+        MAX_SIZE = 1_048_576 # TODO Move to different thread or optimize the byte load in
         display_data = data[:MAX_SIZE]
 
         if not data:

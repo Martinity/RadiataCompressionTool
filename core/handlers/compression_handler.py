@@ -16,6 +16,7 @@ logger = logging.getLogger(f'radiata.{__name__}')
                    extensions=('.slz', '.sle'),
                    supported_actions=('Decompress', 'Properties'))
 class CompressorHandler(BaseHandler):
+    '''Wrapper for Compressor class'''
     def __init__(self, source, parent):
         super().__init__(source)
         self.handler_parent = parent
@@ -25,7 +26,10 @@ class CompressorHandler(BaseHandler):
         self.handle.seek(0)
         header = self.handle.read(16)
         uncompressed_size = int.from_bytes(header[8:12], 'little')
-        decomp_name = self.handler_parent.name + '_decompressed'
+        decomp_name = self.handler_parent.name + ' decompressed'
+
+        decompressed_bytes = self.get_raw_node(None)
+        header = decompressed_bytes[:16]
 
         extension_dict: dict[bytes, str] = generate_ext_overrides()
         ext = next((ext for signature, ext in extension_dict.items() if header.startswith(signature)), '.bin')
@@ -63,7 +67,7 @@ class CompressorHandler(BaseHandler):
             f.write(compressed_output)
 
     def get_properties(self, node: VfsNode):
-        ''' TODO Pass a dedicated signal to the ui with deeper information on the compressed file
+        ''' TODO Pass a dedicated signal to the ui
             For now pass log signal'''
         mode = node.header[3]
         compressed_size = int.from_bytes(node.header[4:8], 'little')
@@ -78,14 +82,14 @@ class CompressorHandler(BaseHandler):
 
     def execute_action(self, node: VfsNode, action_name: str) -> Optional[Any]:
         if action_name == 'Decompress':
-            return self.process_node(node)
+            return self.get_raw_node(node)
         elif action_name == 'Properties':
             return self.get_properties(node)
 
 ###------------------------------------ Compressor ------------------------------------------###
         
 class RadiCompressor():
-    '''Compressor class for all compression related handling.'''
+    '''Compressor class for all compression related processing.'''
 
     ###-------------------------- Parameters -----------------------###
 

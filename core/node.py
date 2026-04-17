@@ -22,6 +22,7 @@ class VfsNode:
         extension: str = '.bin', 
         parent: Optional['VfsNode'] = None, 
         hid: Tuple[int, ...] = (),
+        target: Optional[int] = None,
     ):
         self.name = name                                # semantic name from overrides
         self.category = category                        # semantic category derived from disk index
@@ -30,6 +31,7 @@ class VfsNode:
 
         self.offset = offset                            # Relative offset into parent
         self.size = size                                # Size of node in bytes (VirtualFile=disk[offset:offset+size])
+        self.target = target                            # Datacenter for the node
 
         self.header = header                            # raw header
         self.extension = extension                      # extension from override
@@ -43,7 +45,6 @@ class VfsNode:
         self.is_physical = False                        # Has physical address
         self.is_unpacked = False                        # Kods
         self.is_decompressed = False                    # SLZ
-        self.is_target = False                          # Datacenter
 
         self._handler_data: dict = {}
     

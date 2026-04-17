@@ -5,11 +5,11 @@ Post 2.0 the tool handles the filesystem automatically in memory. The goal is to
 ## Key components
 
 ### Logic
-- **Dispatcher**: Manages the active I/O stream, maintains the _buffer_cache for virtual layers, and performs recursive data retrieval. It acts as the "Stateless Factory" for handlers.
-- **Contracts**: Interace definitions. `BaseHandler` manages format-specific logic (Unpacking/Rebuilding) while `BaseEditor` handles the data-viewing UI.
-- **Registry**: Global lookup service for matching file signatures/extensions to their respective Handlers and Editors.
+- **Dispatcher**: Manages the active I/O stream, maintains the _buffer_cache for virtual layers, and performs recursive data retrieval. It acts as the "Stateless Factory" for handlers. Type 1. `active_handler` = handler for physical files. Type 2. `temp_handler` = handler for virtual files. The distinction is made because `active_handler` stays open from ISO mount while `temp_handler` is only open during transactions.2
+- **Contracts**: Interace definitions. `BaseHandler` manages format-specific logic (Unpacking/Rebuilding...) while `BaseEditor` handles the data-viewing UI. The **only** place for performing I/O
+- **Registry**: Global lookup service for matching file signatures/extensions as well as actions to their respective Handlers and Editors.
 - **VfsNode**: Holds the data of the node
-- **VfsManager**: Tracks node relationships (HID), physical disk offsets, and Dirty State (pending modifications). It does not perform I/O.
+- **VfsManager**: Tracks node relationships (HID), physical disk offsets, and Dirty State (pending modifications).
 - **ActionResolver**: Determines context-aware capabilities by merging global actions with format-specific handler actions.
 
 ### UI
@@ -74,16 +74,19 @@ Used for: Pushing editor changed to ISO
 - ~~Go over iso_handler for deprecated code and better node handoff -> `/core/handlers/iso_handler.py`~~
 - ~~Change hierarchy logging str to tuple -> `/models/vfs_node.py`~~
 - ~~Rewrite windowing system For stack try others `QTabWidget`, `QTabBar`, `QStackedWidget`~~
+- ~~Connect CompressorHandler -> `/core/handlers/compression_handler.py`~~
+- ~~Fully implement the context resolver -> `/core/registry.py.ActionResolver`~~
+- ~~Rewrite tree proxy signal handling and widget init currently scuffy -> `/ui_core.py`~~
+- ~~Redefine concerns for Dispatch/Node/Registry/Contract/Resolver -> `/core/`~~
 
 ## Current TODO list:
 
-- Connect CompressorHandler -> `/core/handlers/compression_handler.py`
+- Improved `active_handler` and `temp_handler` distinction -> `/core/dispatcher.py`
 - Connect KodsHandler -> `/core/handlers/kods_handler.py`
-- Fully implement the context resolver -> `/core/registry.py.ActionResolver`
+- Chained/Packed Compression parsing -> `/core/handlers/compression_handler.py`
+- Targeted Kods Archiving -> `/core/handlers/kods_handler.py`
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
-- Rewrite tree proxy signal handling and widget init currently scuffy -> `/ui_core.py`
-- (For recursive virtual files. Wait until after all single level kods/slz is implemented)Redefine concerns for Dispatch/Node/Registry/Contract/Resolver -> `/core/`
-- Staging/Commiting for edits. -> `/core/dispatcher.py`
+- Staging/Commiting for edits. -> `/core/dispatcher.py` & `/core/node.py`
 
 ## Future TODO list:
 
@@ -101,7 +104,7 @@ Used for: Pushing editor changed to ISO
 - ~~Iso dump~~
 - ~~Logging~~
 - ~~Hex Editor~~
-- Decompression
+- ~~Decompression~~
 - Kods Unpacking
 - Iso rebuilding
 - Compression

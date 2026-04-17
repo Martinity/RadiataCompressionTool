@@ -57,6 +57,8 @@ class BaseHandler(abc.ABC):
     def execute_action(self, node: 'VfsNode', action_name: str) -> Optional[Any]:
         '''Entry points for custom handler logic
            something like get "Properties" might want to pass a signal for the ui'''
+        if action_name == 'Properties':
+            logger.info('Properties not yet implemented for selected node forat')
         logger.warning(f'{self.__class__.__name__} has not implemented action: {action_name}')
         return None
 

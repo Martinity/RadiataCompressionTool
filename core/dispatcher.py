@@ -79,9 +79,11 @@ class Dispatcher:
         if self.active_handler is None:
             logger.error('Physical Handler not found. Either ISO has not yet been initialized or handler was closed preemptively.')
             return b''
-
+        logger.debug(f'Requesting data for node {node.hierarchical_id_str}')
         # Has physical address
-        return self.active_handler.get_raw_node(node)
+        raw_data = self.active_handler.get_raw_node(node)
+        self._buffer_cache[node.hierarchical_id_str] = raw_data
+        return raw_data
         
     def execute_node_action(self, node: VfsNode, action_name: str) -> None:
         '''Route action to format handler'''
