@@ -316,9 +316,8 @@ class MainMenuBar:
             self.window.attempt_load_iso(file_path)
 
     def _handle_close(self) -> None:
-        if self.dispatcher.active_handler:
-            self.dispatcher.active_handler.close()
-            self.window.stack.setCurrentIndex(0)
+        self.dispatcher.close()
+        self.window.stack.setCurrentIndex(0)
 
     def _handle_exit(self) -> None:
         if self.dispatcher.active_handler:

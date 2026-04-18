@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import struct
-import re
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import Any
 
 from core.contracts import BaseHandler
 from core.extension_overrides import generate_ext_overrides
@@ -44,7 +42,7 @@ class KodsHandler(BaseHandler):
         )
 
         for i, file in enumerate(new_nodes):
-            if not file:
+            if not file or offsets[i] == -1:
                 continue
 
             header = file[:8]
@@ -52,7 +50,7 @@ class KodsHandler(BaseHandler):
 
             node = VfsNode(
                 name=f"{getattr(self.handler_parent, 'name', 'Unknown')} {i:04d} Unpacked",
-                offset=offsets[i] if i < len(offsets) else 0,
+                offset=offsets[i],
                 size=len(file),
                 header=header,
                 extension=ext,
@@ -65,8 +63,10 @@ class KodsHandler(BaseHandler):
         
     
     def get_raw_node(self, node: VfsNode) -> bytes:
-
-        return b''
+        offset = node.offset
+        end = offset + node.size
+        logger.info(f'Requested offset {offset} of size {end}')
+        return self.raw_kods[offset:end]
 
     def rebuild_node(self, node: VfsNode) -> bytes:
         return b''
@@ -79,7 +79,7 @@ class KodsHandler(BaseHandler):
                     f'| Compression shift: {p.shift} | Entry mode: {mode_str} '
                     f'| Secondary table present: {p.has_second_table} | Size of Pre-Payload data: {p.data_region_start}')
     
-    def execute_action(self, node: VfsNode, action_name: str) -> Any | None:
+    def execute_action(self, node: VfsNode, action_name: str) -> Any:
         if action_name == 'Unpack':
             return self.get_file_tree()
         elif action_name == 'Properties':

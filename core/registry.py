@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from core.contracts import BaseEditor, BaseHandler
 
 import logging
-logger = logging.getLogger('radiata')
+logger = logging.getLogger(f'radiata.{__name__}')
     
 ###---------------------------------------- Registry ------------------------------------------------###
 
@@ -92,6 +92,7 @@ class Registry:
             logger.debug(f'Attempting to get handler for node {source.name}')
             profile = cls.get_profile(source)
             if profile:
+                logger.debug(f'Found handler {profile.handler_class.__name__}')
                 return profile.handler_class
         logger.warning('No handler found...')
         return None
