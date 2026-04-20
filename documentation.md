@@ -78,24 +78,29 @@ Used for: Pushing editor changed to ISO
 - ~~Fully implement the context resolver -> `/core/registry.py.ActionResolver`~~
 - ~~Rewrite tree proxy signal handling and widget init currently scuffy -> `/ui_core.py`~~
 - ~~Redefine concerns for Dispatch/Node/Registry/Contract/Resolver -> `/core/`~~
+- ~~Improved `active_handler` and `temp_handler` distinction -> `/core/dispatcher.py`~~
+- ~~Connect KodsHandler -> `/core/handlers/kods_handler.py`~~
+- ~~Implement node hidding from UI -> `/core/node.py` & `/ui/tree_model.py`~~
+- ~~Chained Compression parsing -> `/core/handlers/compression_handler.py`~~
 
 ## Current TODO list:
 
-- Improved `active_handler` and `temp_handler` distinction -> `/core/dispatcher.py`
-- Connect KodsHandler -> `/core/handlers/kods_handler.py`
-- Chained/Packed Compression parsing -> `/core/handlers/compression_handler.py`
 - Targeted Kods Archiving -> `/core/handlers/kods_handler.py`
+- Improved naming pattern -> `/core/handlers/`
+- memoryview for improved performance -> `/core/handlers/`
+- node metadata for get_tree -> `/core/handler/`
+- Packed Compression parsing -> `/core/handlers/compression_handler.py`
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
 - Staging/Commiting for edits. -> `/core/dispatcher.py` & `/core/node.py`
 
 ## Future TODO list:
 
-- Smart cache for recursive virtual files -> `/core/dispatcher.py`
+- Smart cache for editors -> `/core/dispatcher.py`
+- .pk support -> `/core/handler/iso_handler.py` & `/core/extension_overrides.py`
+- Clean up semantic names for UI readability -> `/core/name_overrides.py`
 - Separate ui_core/models as needed/prefered -> `/ui_core.py` & `/ui/tree_model.py`
 - Search tree view -> `/ui_core.py`
-- Non standard compressed format support. Chainded/Packed archives -> `/core/handler/compression_handler.py`
 - Custom UI for hex editor so that it functions as intended (hex stays in place/edits have visible feedback) -> `/ui/widgets/hex_editor.py`
-- Importing kods archiving including datacenter targeting -> `/core/handlers/kods_handler.py`
 - UI improvements (settings, standardized theme.......)
 
 # Rough Roadmap

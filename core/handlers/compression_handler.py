@@ -20,36 +20,67 @@ class CompressorHandler(BaseHandler):
     def __init__(self, source, parent):
         super().__init__(source)
         self.handler_parent = parent
-
+        self.raw_source = memoryview(self.handle.read())
+    
     def get_file_tree(self) -> VfsNode:
         '''Return a node for the compressed file'''
-        self.handle.seek(0)
-        header = self.handle.read(16)
-        uncompressed_size = int.from_bytes(header[8:12], 'little')
-        decomp_name = self.handler_parent.name + ' decompressed'
-
-        decompressed_bytes = self.get_raw_node(None)
-        header = decompressed_bytes[:16]
-
-        extension_dict: dict[bytes, str] = generate_ext_overrides()
-        ext = next((ext for signature, ext in extension_dict.items() if header.startswith(signature)), '.bin')
-        node = VfsNode(
-            name=decomp_name,
-            category=self.handler_parent.category,
-            size=uncompressed_size,
-            header=header,
-            extension=ext,
+        root = VfsNode(
+            name=f"{getattr(self.handler_parent, 'name', 'SLZ')}_contents",
+            category=getattr(self.handler_parent, 'category', 'Unknown'),
             parent=self.handler_parent,
         )
-        node.is_decompressed = True
-        return node
+
+        extension_dict: dict[bytes, str] = generate_ext_overrides()
+        current_offset = 0
+        chunk_idx = 0
+
+        while current_offset < len(self.raw_source):
+            header_view = self.raw_source[current_offset: current_offset + 16]
+            if len(header_view) < 16 or header_view[:3] not in [b'SLZ', b'SLE']:
+                break
+            
+            header = bytes(header_view)
+            compressed_size = int.from_bytes(header[4:8], 'little')
+            uncompressed_size = int.from_bytes(header[8:12], 'little')
+            next_file = int.from_bytes(header[12:16], 'little')
+
+            chunk_view = self.raw_source[current_offset : current_offset + compressed_size + 16]
+            compressor = RadiCompressor(chunk_view) # slice out header bytes for node
+            inline_header = compressor.decompress(get_header=True)
+
+            decomp_name = self.handler_parent.name + ' decompressed'
+
+            ext = next((ext for sig, ext in extension_dict.items() if inline_header[:len(sig)] == sig), '.bin')
+            node = VfsNode(
+                name=decomp_name,
+                offset=current_offset,
+                category=self.handler_parent.category,
+                size=uncompressed_size,
+                header=inline_header,
+                extension=ext,
+                parent=root,
+            )
+            node.compressed_header = header
+            root.append_child(node)
+
+            if next_file == 0:
+                break
+            current_offset += next_file
+            chunk_idx += 1
+        return root
 
     def get_raw_node(self, node: VfsNode) -> bytes:
-        self.handle.seek(0)
-        compressed_bytes = self.handle.read()
+        '''Return a specific raw node'''
+        if hasattr(node, 'compressed_header'):
+            compressed_size = int.from_bytes(node.compressed_header[4:8], 'little')
+        else:
+            logger.warning(f'No compressed header for {node.hierarchical_id_str} implement get header from parent')
+            return b''
+        
+        compressed_view = self.raw_source[node.offset : node.offset + compressed_size + 16]
 
-        logger.debug(f'Starting decompression for file size {int.from_bytes(compressed_bytes[4:8], 'little')}')
-        compressor = RadiCompressor(compressed_bytes)
+        logger.debug(f'Starting decompression for file size {len(compressed_view)}')
+        compressor = RadiCompressor(compressed_view)
         decompressed_bytes = compressor.decompress()
         logger.debug(f'Successfully finished decompressrion, new size {len(decompressed_bytes)}')
         return decompressed_bytes
@@ -58,27 +89,30 @@ class CompressorHandler(BaseHandler):
         '''Compress the bytes back to SLZ/SLE'''
         raw_bytes = virtual_tree.pending_data or self.get_raw_node(virtual_tree)
 
-        target_mode = self.handle.read(4)[3]
+        origin_header = self.raw_source[:16] if len(self.raw_source) >= 16 else b'\0' * 16
+        target_mode = origin_header[3]
+        is_encrypted = origin_header[:3] == b'SLE'
 
-        compressor = RadiCompressor(raw_bytes, target_mode=target_mode)
+
+        compressor = RadiCompressor(memoryview(raw_bytes), target_mode=target_mode, target_is_encrypted=is_encrypted)
         compressed_output = compressor.compress()
-
-        with open(output_path, 'wb') as f:
-            f.write(compressed_output)
+        return compressed_output
 
     def get_properties(self, node: VfsNode):
         ''' TODO Pass a dedicated signal to the ui
             For now pass log signal'''
-        mode = node.header[3]
-        compressed_size = int.from_bytes(node.header[4:8], 'little')
-        decompressed_size = int.from_bytes(node.header[8:12], 'little')
-        next_file = int.from_bytes(node.header[12:16] , 'little')
+        if not node.children:
+            node = self.get_file_tree()
+        for child in node.children:
+            mode = child.compressed_header[3]
+            compressed_size = int.from_bytes(child.compressed_header[4:8], 'little')
+            decompressed_size = int.from_bytes(child.compressed_header[8:12], 'little')
+            next_file = int.from_bytes(child.compressed_header[12:16] , 'little')
+            next_file_str = 'No Chained Files.' if not next_file else str(next_file)
+            ratio = compressed_size / decompressed_size
 
-        next_file_str = 'No Chained Files.' if not next_file else str(next_file)
-        ratio = compressed_size / decompressed_size
-
-        logger.info(f'Compressed File Properties:\nMode:{mode} | Compressed File Size:{compressed_size} '
-                f'| Decompressed File Size:{decompressed_size} | Offset to next chained file:{next_file_str} | Compression ratio={(ratio*100):.02f}%')
+            logger.info(f'Compressed File Properties:\nMode:{mode} | Compressed File Size:{compressed_size} '
+                    f'| Decompressed File Size:{decompressed_size} | Offset to next chained file:{next_file_str} | Compression ratio={(ratio*100):.02f}%')
 
     def execute_action(self, node: VfsNode, action_name: str) -> Optional[Any]:
         if action_name == 'Decompress':
@@ -138,18 +172,19 @@ class RadiCompressor():
     SCRAMBLE_KEY = [0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7, 
                     0xE7, 0xD5, 0x1E, 0x4B, 0x7B, 0xA4, 0x1C, 0x7D]
 
-    def __init__(self, data: bytes, target_mode: int = 3):
+    def __init__(self, data: memoryview, target_mode: int = 3, target_is_encrypted: bool = False):
         '''
         Initializes the compressor/decompressor.
         If an SLZ/SLE header is detected, it ignores target_mode and sets up for decompression.
         Otherwise, it sets up for compression using the target_mode.
         '''
-        self.data: bytes = data
+        self.data = data
         self.hash_bits: int = 15
         self.hash_size: int = 1 << self.hash_bits
+        self.is_encrypted = target_is_encrypted
 
         # Auto-detection
-        if self.data.startswith(b'SLZ') or self.data.startswith(b'SLE'):
+        if self.data[:3] == b'SLZ' or self.data[:3] == b'SLE':
             self.mode = self.MODES.get(self.data[3], self.MODES[0])
             self.is_compressed = True
             self.is_chained: bool = False #TODO
@@ -186,12 +221,12 @@ class RadiCompressor():
 
     def _encode_header(self, compressed_payload_length: int, uncompressed_length: int, key_offset: int = 0) -> bytes:
         '''Write the header for the compressed output'''
-        header = bytearray()
-        header.extend(b'SLZ')
-        header.append(self.mode.mode & 0xFF)
-        header.extend(compressed_payload_length.to_bytes(4, 'little'))
-        header.extend(uncompressed_length.to_bytes(4, 'little'))
-        header.extend(key_offset.to_bytes(4, 'little')) # always 0, chains get written in start_compression
+        header = bytearray(16)
+        header[:3] = b'SLZ'
+        header[3] = (self.mode.mode & 0xFF)
+        header[4:8] = compressed_payload_length.to_bytes(4, 'little')
+        header[8:12] = (uncompressed_length.to_bytes(4, 'little'))
+        header[12:16] = (key_offset.to_bytes(4, 'little'))
         return bytes(header)
 
     def _hash3(self, pos) -> int:
@@ -261,7 +296,7 @@ class RadiCompressor():
         flag_count = 0
 
         if self.mode.word_aligned and n % 2 != 0:
-            self.data += b'\x00'
+            self.data = memoryview(bytes(self.data) + b'\x00')
             n += 1
 
         head = [-1] * self.hash_size
@@ -330,37 +365,40 @@ class RadiCompressor():
         compressed.extend(sentinel_flag)
 
         header = self._encode_header(len(compressed), original_size)
-        if self.is_encrypted:   
+        
+        if self.is_encrypted: # Convert SLEs back to SLE
             compressed = self._scramble_slz_payload(compressed)
+            header = header[:2] + b'E' + header[3:] 
 
         return bytes(header + compressed)
 
-    def _scramble_slz_payload(self, data) -> bytes:
+    def _scramble_slz_payload(self, data: bytes) -> bytes:
         '''Scramble the compressed'''
-        KEY = [ 0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7, 
-                0xE7, 0xD5, 0x1E, 0x4B, 0x7B, 0xA4, 0x1C, 0x7D ]
+        KEY = self.SCRAMBLE_KEY
         scrambled = bytearray()
         mod_value = 0x03
 
-        for i, byte in enumerate(self.data[16:]):
+        for i, byte in enumerate(data):
             key_value = KEY[i%16]
             scrambled_byte = (byte ^ key_value) & 0xFF
             modified_byte = (scrambled_byte + mod_value) & 0xFF
             scrambled.append(modified_byte)
-            mod_value = (mod_value +0x03) & 0xFF
+            mod_value = (mod_value + 0x03) & 0xFF
         
-        return bytes(self.data[:2] + b'E' + self.data[3:16] + scrambled) # change header to sle
+        return bytes(scrambled)
 
     ###------------------------- Decompress --------------------------###
 
-    def decompress(self) -> bytes:
-        '''Unpack compressed data'''
-        if self.data.startswith(b'SLE'): # Decryption
+    def decompress(self, get_header: bool = False) -> bytes:
+        '''Unpack compressed data get_header for limited metadata decompression'''
+        if self.data[:3] == b'SLE': # Decryption
             self.data = self._unscramble_slz_payload()
 
         if self.mode.name == 'STORE': # STORE mode
             return self.data[16:]
         
+        compressed_size = int.from_bytes(self.data[4:8], 'little')
+        expected_size = int.from_bytes(self.data[8:12], 'little')
         pos = 16
         decompressed = bytearray()
         
@@ -388,11 +426,12 @@ class RadiCompressor():
             bits_remaining -= 1
             return bit
 
+        max_size = compressed_size + 16
+        if get_header: # Metadata toggle gate
+            max_size = 64
         current_flags = []
-        compressed_size = int.from_bytes(self.data[4:8], 'little')
-        expected_size = int.from_bytes(self.data[8:12], 'little')    
         # loop over compressed payload and stop when hit expected size (else 0s from flag will pad EOF)
-        while pos < compressed_size + 16:        
+        while pos < max_size:        
             is_literal = (get_next_flag_bit() == 1)
             current_flags.append(1 if is_literal else 0)
             if len(current_flags) == self.mode.flag_bits:
@@ -442,16 +481,14 @@ class RadiCompressor():
                 break
 
         decompressed = decompressed[:expected_size]
-        if len(decompressed) != expected_size:
+        if len(decompressed) != expected_size and not get_header:
             logger.warning(f"Size mismatch! Header uncompressed={hex(expected_size)}, "
                 f"produced={hex(len(decompressed))}")
         return bytes(decompressed)
 
     def _unscramble_slz_payload(self) -> bytes:
         '''Decrypt compressed payload.'''
-        KEY = [
-            0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7, 
-            0xE7, 0xD5, 0x1E, 0x4B, 0x7B, 0xA4, 0x1C, 0x7D ]
+        KEY = self.SCRAMBLE_KEY
         comp_size = int.from_bytes(self.data[4:8], 'little')
         payload = self.data[16:]
         unscrambled = bytearray()
@@ -464,5 +501,5 @@ class RadiCompressor():
             unscrambled.append(unscrambled_byte)
             mod_value = (mod_value + 0x03) & 0xFF
 
-        return bytes(self.data[:2] + b'Z' + self.data[3:16] + unscrambled) # change header to SLZ
-
+        updated = bytes(self.data[:2]) + b'Z' + bytes(self.data[3:16]) + bytes(unscrambled)
+        return memoryview(updated)

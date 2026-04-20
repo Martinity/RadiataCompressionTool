@@ -50,6 +50,7 @@ HEADERS = {
     # Unknown / Descriptor
     b'RCP'    : '.rcp',     # Unknown Table of grouped IDs        | 0%
     b'RCAD'   : '.rcad',    #
+    (0x89504E47).to_bytes(4, 'big'): ".png", # image
 }
 
 def generate_ext_overrides() -> dict[bytes, str]:
