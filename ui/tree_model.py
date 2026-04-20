@@ -19,7 +19,7 @@ class VfsTreeModel(QAbstractItemModel):
             raise TypeError(f"VfsTreeModel expected VfsNode, got {type(root_node).__name__}")
         
         self.root_node = root_node
-        self.columns = ["File Name", "Size", "Extension"]
+        self.columns = ["ID", "File Name", "Size", "Extension"]
 
     ###---------------------------------------- Qt API --------------------------------------###
 
@@ -80,11 +80,13 @@ class VfsTreeModel(QAbstractItemModel):
         # What text to display in the UI cells
         if role == Qt.ItemDataRole.DisplayRole:
             col = index.column()
-            if col == 0: 
-                return node.name
+            if col == 0:
+                return node.hierarchical_id_str
             if col == 1: 
-                return self._human_redable_size(node.size)
+                return node.name
             if col == 2: 
+                return self._human_redable_size(node.size)
+            if col == 3: 
                 return node.extension
 
         # Critical: Return the node itself if the context menu asks for it!
@@ -188,14 +190,17 @@ class VfsCategoryProxyModel(QSortFilterProxyModel):
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
-        if self.active_category == 'All' or self.active_category is None:
-            return True
-        
         index = self.sourceModel().index(source_row, 0 , source_parent)
         node = index.data(Qt.ItemDataRole.UserRole)
 
         from core.node import VfsNode
-        if isinstance(node, VfsNode):
-            return node.category == self.active_category
+        if not isinstance(node, VfsNode):
+            return False
         
-        return False
+        if getattr(node, 'is_hidden', False):
+            return False
+
+        if self.active_category == 'All' or self.active_category is None:
+            return True
+        
+        return node.category == self.active_category

@@ -1,4 +1,4 @@
-
+from __future__ import annotations
 from enum import Enum, auto
 from typing import Optional, Tuple
 
@@ -20,9 +20,9 @@ class VfsNode:
         size: int = 0, 
         header: bytes = b'', 
         extension: str = '.bin', 
-        parent: Optional['VfsNode'] = None, 
+        parent: Optional[VfsNode] = None, 
         hid: Tuple[int, ...] = (),
-        target: Optional[int] = None,
+        target: Optional[list[tuple]] = None,
     ):
         self.name = name                                # semantic name from overrides
         self.category = category                        # semantic category derived from disk index
@@ -44,11 +44,12 @@ class VfsNode:
         # Flags; Useful for rebuild and UI
         self.is_physical = False                        # Has physical address
         self.is_unpacked = False                        # Kods
-        self.is_decompressed = False                    # SLZ
+        self.compressed_header: bytes = b''             # SLZ
+        self.is_hidden = False                          # Hide node in UI (file system related or null nodes by default)
 
         self._handler_data: dict = {}
     
-    def append_child(self, child: 'VfsNode'):
+    def append_child(self, child: VfsNode):
         '''Allow children nodes'''
         self.children.append(child)
         child.parent = self
@@ -63,6 +64,10 @@ class VfsNode:
     def hierarchical_id_str(self) -> str:
         '''Return human readable id'''
         return '.'.join(map(str, self._id_path)) if self._id_path else '0'
+    
+    @property
+    def visible_children(self) -> list[VfsNode]:
+        return [child for child in self.children if not getattr(child, 'is_hidden', False)]
 
     def row(self) -> int:
         '''Keep track of the children-parent links for tree view'''
@@ -117,8 +122,46 @@ class VfsManager:
         return self.physical_offsets.get(node, 0)
 
     def get_node_by_id(self, hid: Tuple[int, ...]) -> Optional[VfsNode]:
-        '''Node lookup: manager.get_node_by_id((0, 3, 1))'''
+        '''Node lookup for known registered nodes.'''
         return self.nodes_by_id.get(hid)
+    
+    def resolve_nodes(self, hids: list[Tuple[int, ...]], expansion_callback=None) -> list[VfsNode]:
+        '''Resolve list of HIDs. expansion_callback for resolving yet registered nodes'''
+        resolved: list[VfsNode] = []
+        for hid in hids:
+            node = self._resolve_single_hid(hid, expansion_callback)
+            if node:
+                resolved.append(node)
+        return resolved
+
+    def _resolve_single_hid(self, hid: Tuple[int, ...], expansion_callback=None) -> Optional[VfsNode]:
+        '''Find the nearest node for HID from currently registered nodes
+        If expansion_callback is provided expand on the fly to HID'''
+        if hid in self.nodes_by_id:
+            return self.nodes_by_id[hid]
+        
+        current = self.root
+        for i in range(1, len(hid) + 1):
+            path = hid[:i]
+            next_node = self._find_child_by_path(current, path)
+
+            if not next_node:
+                if expansion_callback:
+                    expansion_callback(current)
+                    next_node = self._find_child_by_path(current, path)
+
+            if not next_node:
+                return None
+
+            current = next_node
+            self.register_node(current)
+        return current
+
+    def _find_child_by_path(self, parent: VfsNode, target_path: Tuple[int,...]) -> Optional[VfsNode]:
+        for child in parent.children:
+            if child.hierarchical_id == target_path:
+                return child
+            return None
     
     def mark_dirty(self, node: VfsNode, new_data: bytes):
         node.pending_data = new_data
