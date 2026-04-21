@@ -20,7 +20,10 @@ class CompressorHandler(BaseHandler):
     def __init__(self, source, parent):
         super().__init__(source)
         self.handler_parent = parent
-        self.raw_source = memoryview(self.handle.read())
+        if hasattr(self.handle, 'read'):
+            self.raw_source = memoryview(self.handle.read())
+        else:
+            self.raw_source = memoryview(self.handle)
     
     def get_file_tree(self) -> VfsNode:
         '''Return a node for the compressed file'''
@@ -183,7 +186,7 @@ class RadiCompressor():
         self.hash_size: int = 1 << self.hash_bits
         self.is_encrypted = target_is_encrypted
 
-        # Auto-detection
+        # Auto-detection TODO in this sections is for rebuilding
         if self.data[:3] == b'SLZ' or self.data[:3] == b'SLE':
             self.mode = self.MODES.get(self.data[3], self.MODES[0])
             self.is_compressed = True
