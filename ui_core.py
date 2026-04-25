@@ -118,7 +118,7 @@ class WorkspaceController:
         self.category_proxy_model: VfsCategoryProxyModel | None = None
 
     def init_workspace(self, root_node: VfsNode) -> None:
-        source_model = VfsTreeModel(root_node)
+        source_model = VfsTreeModel(self.dispatcher.vfs)
         proxy_model = VfsCategoryProxyModel()
         proxy_model.setSourceModel(source_model)
 
@@ -211,21 +211,16 @@ class WorkspaceController:
         logger.info(f'Opened "{node.name}" in {editor_class.__name__}')
 
     def route_action(self, node: VfsNode, action_name: str) -> None:
-        '''Route action
-        Type 1: For new tree nodes
-        Type 2: For node editors/properties'''
-        if action_name in ('Unpack', 'Decompress'): # Type 1
-            logger.debug(f'User requested new node(s) with "{action_name}" on {node.name}')
+        '''Route action to the dispatcher'''
+        logger.debug(f'User requested new node(s) with "{action_name}" on {node.name} (Datacenter={getattr(node, 'target', None)})')
+        if action_name in ('Unpack', 'Decompress'): # Type 1: produce new nodes
             new_nodes = self.dispatcher.load_source(node)
 
             if new_nodes and self.tree_model and self.category_proxy_model:
                 source_index = self.tree_model.index_for_node(node)
-                self.tree_model.add_children_to_node(source_index, new_nodes)
-
                 proxy_idx = self.category_proxy_model.mapFromSource(source_index)
                 self.view.tree_view.expand(proxy_idx)
-        else: # Type 2
-            logger.debug(f'User requested node information with "{action_name}" on {node.name}')
+        else: # Type 2: info / editor actions
             self.dispatcher.execute_node_action(node, action_name)
 
 ###-------------------------------------- Welcome Page --------------------------------------###

@@ -1,6 +1,10 @@
 from __future__ import annotations
 from enum import Enum, auto
 from typing import Optional, Tuple
+from PyQt6.QtCore import pyqtSignal, QObject
+
+import logging
+logger = logging.getLogger(f'radiata.{__name__}')
 
 
 ###--------------------------------------------- VFS Node ------------------------------------------------------###
@@ -93,9 +97,14 @@ class VfsNode:
 
 ###------------------------------------------------------- VFS Manager -----------------------------------------------------###
 
-class VfsManager:
+class VfsManager(QObject):
     '''Virtual File System Manager. Bridge between the dispatcher and node'''
+    insert_start = pyqtSignal(VfsNode, int, int) # (VfsNode, start_row, end_row)
+    insert_finished = pyqtSignal()
+
     def __init__(self, root_node: VfsNode):
+        super().__init__()
+
         self.root = root_node
         # Flat path lookup map
         self.nodes_by_id: dict[Tuple[int, ...], VfsNode] = {}
@@ -116,6 +125,28 @@ class VfsManager:
 
         for child in node.children:
             self.register_node(child, relative_offset=0)
+
+    def insert_children(self, parent_node: VfsNode, new_children: list[VfsNode], relative_offset: int = 0) -> None:
+        '''Update the node and signal to the tree model'''
+        if not new_children:
+            return
+        
+        start_row = len(parent_node.children)
+        end_row = start_row + len(new_children) - 1
+
+        self.insert_start.emit(parent_node, start_row, end_row)
+        for child in new_children:
+            parent_node.append_child(child)
+            self._silent_register(child, relative_offset)
+        self.insert_finished.emit()
+        
+    def _silent_register(self, node: VfsNode, relative_offset: int = 0) -> None:
+        '''Register node with HID map'''
+        self.nodes_by_id[node.hierarchical_id] = node
+        if node.is_physical:
+            self.physical_offsets[node] = relative_offset + node.offset
+        for child in node.children:
+            self._silent_register(child, relative_offset=0)
         
     def get_offset(self, node: VfsNode) -> int:
         '''Get physical disk offsets'''
@@ -126,17 +157,20 @@ class VfsManager:
         return self.nodes_by_id.get(hid)
     
     def resolve_nodes(self, hids: list[Tuple[int, ...]], expansion_callback=None) -> list[VfsNode]:
-        '''Resolve list of HIDs. expansion_callback for resolving yet registered nodes'''
+        '''Resolve list of HIDs. expansion_callback for resolving yet registered nodes recursively'''
         resolved: list[VfsNode] = []
+        logger.debug(f'Resolving {hids} with {expansion_callback}')
+
         for hid in hids:
             node = self._resolve_single_hid(hid, expansion_callback)
             if node:
                 resolved.append(node)
+        if not resolved:
+            logger.warning(f'No nodes resolved for {hids}')
         return resolved
 
     def _resolve_single_hid(self, hid: Tuple[int, ...], expansion_callback=None) -> Optional[VfsNode]:
-        '''Find the nearest node for HID from currently registered nodes
-        If expansion_callback is provided expand on the fly to HID'''
+        '''Recursively expand physical -> target'''
         if hid in self.nodes_by_id:
             return self.nodes_by_id[hid]
         
@@ -146,22 +180,25 @@ class VfsManager:
             next_node = self._find_child_by_path(current, path)
 
             if not next_node:
-                if expansion_callback:
-                    expansion_callback(current)
-                    next_node = self._find_child_by_path(current, path)
-
-            if not next_node:
-                return None
-
+                if expansion_callback is None:
+                    logger.warning(f'Cannot expand path {path}, no callback')
+                    return None
+                
+                expansion_callback(current)
+                next_node = self._find_child_by_path(current, path)
+                if not next_node:
+                    logger.warning(f'Expansion of {current.name}({current.hierarchical_id_str}) did not create the target child {path}')
+                    return None
+               
             current = next_node
-            self.register_node(current)
+        logger.debug(f'Resolved {current.name} from {hid}')
         return current
 
     def _find_child_by_path(self, parent: VfsNode, target_path: Tuple[int,...]) -> Optional[VfsNode]:
         for child in parent.children:
             if child.hierarchical_id == target_path:
                 return child
-            return None
+        return None
     
     def mark_dirty(self, node: VfsNode, new_data: bytes):
         node.pending_data = new_data

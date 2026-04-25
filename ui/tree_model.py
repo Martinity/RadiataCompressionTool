@@ -4,22 +4,22 @@ from __future__ import annotations
 from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel, QStringListModel
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from core.node import VfsNode
+    from core.node import VfsNode, VfsManager
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
 class VfsTreeModel(QAbstractItemModel):
-    '''Responsible for all tree gui graphics'''
-    def __init__(self, root_node, parent=None):
-        super().__init__(parent)
-
-        from core.node import VfsNode
-        if not isinstance(root_node, VfsNode):
-            raise TypeError(f"VfsTreeModel expected VfsNode, got {type(root_node).__name__}")
-        
-        self.root_node = root_node
+    '''Responsible for all tree gui data/graphics'''
+    def __init__(self, vfs_manager: VfsManager, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vfs_manager = vfs_manager
+        self.root_node = self.vfs_manager.root
         self.columns = ["ID", "File Name", "Size", "Extension"]
+
+        # Catch VfsManager signals for updating tree
+        self.vfs_manager.insert_start.connect(self.start_insert)
+        self.vfs_manager.insert_finished.connect(self.insert_finished)
 
     ###---------------------------------------- Qt API --------------------------------------###
 
@@ -85,7 +85,7 @@ class VfsTreeModel(QAbstractItemModel):
             if col == 1: 
                 return node.name
             if col == 2: 
-                return self._human_redable_size(node.size)
+                return self._human_readable_size(node.size)
             if col == 3: 
                 return node.extension
 
@@ -96,7 +96,7 @@ class VfsTreeModel(QAbstractItemModel):
         return None
 
     @staticmethod
-    def _human_redable_size(size: int | None) -> str:
+    def _human_readable_size(size: int | None) -> str:
         '''Convert size to human readable strin'''
         if size is None or size < 0:
             return '-'
@@ -122,52 +122,26 @@ class VfsTreeModel(QAbstractItemModel):
             return self.columns[section]
         return None
 
-    ###----------------------------------------- Insertion ------------------------------------###
-
-    def add_children_to_node(self, parent_index: QModelIndex, child_nodes: list[VfsNode]):
-        """Insert new children under the parent index"""
-        if not child_nodes:
-            return
-        
-        parent_node = self.get_node(parent_index)
-        logger.debug(f"Inserting {len(child_nodes)} children under {parent_node.name}")
-
-        start_row = len(parent_node.children)
-        end_row = start_row + len(child_nodes) - 1
-
-        self.beginInsertRows(parent_index, start_row, end_row)
-        for node in child_nodes:
-            parent_node.append_child(node)
-        self.endInsertRows()
-
-        logger.info(f"Tree updated — node {parent_node.name} now has {len(parent_node.children)} children")
-
-    def index_for_node(self, target_node: VfsNode, parent_index=QModelIndex()) -> QModelIndex:
-        '''Find the QModelIndex (metadata) for a given VfsNode'''
-        if target_node == self.root_node: # recursive bound check
-            return QModelIndex()
-        
-        # Iterate through children
-        rows = self.rowCount(parent_index)
-        for r in range(rows):
-            idx = self.index(r, 0, parent_index)
-            node = self.get_node(idx)
-
-            if node == target_node: # Match
-                return idx
-            
-            if self.rowCount(idx) > 0:
-                result = self.index_for_node(target_node, idx)
-                if result.isValid():
-                    return result
-                
-        return QModelIndex()
-
     def set_root(self, new_root_node: VfsNode):
         '''Build the entire tree'''
         self.beginResetModel()
         self.root_node = new_root_node
         self.endResetModel()
+
+    def start_insert(self, parent_node: VfsNode, start_row: int, end_row: int) -> None:
+        parent_index = self.index_for_node(parent_node)
+        if not parent_index.isValid() and parent_node != self.root_node:
+            return
+        self.beginInsertRows(parent_index, start_row, end_row)
+
+    def insert_finished(self) -> None:
+        self.endInsertRows()
+
+    def index_for_node(self, target_node: VfsNode) -> QModelIndex:
+        '''Get the QModelIndex for a node'''
+        if target_node is None or target_node == self.root_node:
+            return QModelIndex()
+        return self.createIndex(target_node.row(), 0, target_node)
 
 ###--------------------------------------------- Category View ----------------------------------------------------###
 

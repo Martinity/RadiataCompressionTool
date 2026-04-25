@@ -122,7 +122,10 @@ class CompressorHandler(BaseHandler):
             return self.get_raw_node(node)
         elif action_name == 'Properties':
             return self.get_properties(node)
-
+    
+    def get_identity(self) -> str:
+        return 'Compressed File'
+    
 ###------------------------------------ Compressor ------------------------------------------###
         
 class RadiCompressor():

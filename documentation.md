@@ -29,26 +29,29 @@ Post 2.0 the tool handles the filesystem automatically in memory. The goal is to
 # Data flow
 #### 1. File System Expansion (Modifying the Tree)
 Used for: ISO mounting, Archive unpacking (`.kod`), and Decompression (`.slz`).
-1.   **Trigger**: `WorkspaceController::route_action` intercepts a UI event ('Unpack' or 'Decompress').
-2.   **Request**: `Dispatcher::load_source` identifies the correct `BaseHandler` via the Registry.
-3.   **Execution**:
-     1.   **Physical File**: Instantiates and keeps the handler open as `active_handler` for the life of the workspace
-     2.   **Virtual File**: Instantiate a temp handler inside a `with` for memory management
-4.   **Blueprint**: `BaseHandler::get_file_tree` parses the container metadata and returns a "detached" `VfsNode` tree.
-5.   **Notarization**: `Dispatcher` integrates these nodes into the main tree and registers them with the `VfsManager` to track physical/virtual relationships.
-6.   **Refresh**: 
-     1.   **Full Reset**:`WorkspaceController` notifies the Qt Model (`layoutChanged`) to re-draw the tree.
-     2.   **Node Insertion**: `WorkspaceController` passes nodes to `VfsTreeModel::add_nodes` wrapping the mutation in `beginInsertRows` and `endInsertRows` for memory management.
+1. `WorkspaceController::route_action` intercepts a UI event ('Unpack' or 'Decompress').
+2. `Dispatcher::load_source` identifies the correct `BaseHandler` via the Registry.
+3. **Execution**:
+     1. **Physical File**: Instantiates and keeps the handler open as `active_handler` for the life of the workspace
+     2. **Virtual File**: Instantiate a temp handler inside a `with` for memory management
+        1. **Datacenter**: Recursively fetch raw header(s) -> Go to 2.
+4. `BaseHandler::get_file_tree` parses the container metadata and returns a "detached" `VfsNode` tree.
+5. `VfsManager` signals to `VfsTreeModel::on_node_registered` that changes are incoming
+6. `Dispatcher` integrates the children nodes into the main tree and registers them with the `VfsManager` to track physical/virtual relationships.
+7. `VfsManager` signals to `VfsTreeModel::on_node_registered` that changes are finished and to re-draw the UI.
+8. **UI Integration**: 
+     1. **Full Reset**:`WorkspaceController` notifies the Qt Model (`layoutChanged`) to re-draw the tree.
+     2. **Node Insertion**: `WorkspaceController` passes nodes to `VfsTreeModel::add_nodes` wrapping the mutation in `beginInsertRows` and `endInsertRows` for memory management.
 
 #### 2. Data Retrieval (Opening an Editor)
 Used for: Hex View.
-1.   **Trigger**: A `BaseEditor` variant is initialized and requests data for its target node.
-2.   **Mediation**: `Dispatcher::get_node_data` checks the Priority Gate:
-    *   **Level 1**: If `node.pending_data` exists (unsaved edits), return that immediately.
-    *   **Level 2**: If not, call `BaseHandler::process_node` to fetch the bytes.
+1. A `BaseEditor` variant is initialized and requests data for its target node.
+2. `Dispatcher::get_node_data` checks the Priority Gate:
+    * **Level 1**: If `node.pending_data` exists (unsaved edits), return that immediately.
+    * **Level 2**: If not, call `BaseHandler::process_node` to fetch the bytes.
 3.   **Extraction**: `BaseHandler` performs the physical I/O (seek/read) or logical transformation (decryption).
-4.   **Delivery**: `Dispatcher` passes the resulting bytes to the `BaseEditor`.
-5.   **Display**: `BaseEditor::load_node` populates the UI widgets with the data.
+4. `Dispatcher` passes the resulting bytes to the `BaseEditor`.
+5. `BaseEditor::load_node` populates the UI widgets with the data.
 
 #### 3. Data Commit (Rebuilding ISO)
 Used for: Pushing editor changed to ISO
@@ -81,14 +84,16 @@ Used for: Pushing editor changed to ISO
 - ~~Improved `active_handler` and `temp_handler` distinction -> `/core/dispatcher.py`~~
 - ~~Connect KodsHandler -> `/core/handlers/kods_handler.py`~~
 - ~~Implement node hidding from UI -> `/core/node.py` & `/ui/tree_model.py`~~
+- ~~Targeted Kods Archiving -> `/core/handlers/kods_handler.py`~~
 - ~~Chained Compression parsing -> `/core/handlers/compression_handler.py`~~
+- ~~memoryview for improved performance -> `/core/handlers/`~~
+- ~~node metadata for get_tree -> `/core/handler/`~~
 
 ## Current TODO list:
 
-- Targeted Kods Archiving -> `/core/handlers/kods_handler.py`
 - Improved naming pattern -> `/core/handlers/`
-- memoryview for improved performance -> `/core/handlers/`
-- node metadata for get_tree -> `/core/handler/`
+- Code clean pass on dispatcher -> `/core/dispatcher.py`
+- Improve targeted offset melding or change strategy -> `/core/handlers/kods_handler.py`
 - Packed Compression parsing -> `/core/handlers/compression_handler.py`
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
 - Staging/Commiting for edits. -> `/core/dispatcher.py` & `/core/node.py`
@@ -96,10 +101,11 @@ Used for: Pushing editor changed to ISO
 ## Future TODO list:
 
 - Smart cache for editors -> `/core/dispatcher.py`
+- cleanup and revise core code (It is a mess from different ideas) -> `/core/`
 - .pk support -> `/core/handler/iso_handler.py` & `/core/extension_overrides.py`
 - Clean up semantic names for UI readability -> `/core/name_overrides.py`
 - Separate ui_core/models as needed/prefered -> `/ui_core.py` & `/ui/tree_model.py`
-- Search tree view -> `/ui_core.py`
+- Search for tree view -> `/ui_core.py`
 - Custom UI for hex editor so that it functions as intended (hex stays in place/edits have visible feedback) -> `/ui/widgets/hex_editor.py`
 - UI improvements (settings, standardized theme.......)
 

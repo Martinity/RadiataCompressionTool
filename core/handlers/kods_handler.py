@@ -20,64 +20,60 @@ logger = logging.getLogger(f'radiata.{__name__}')
     supported_actions=('Properties', 'Unpack'))
 class KodsHandler(BaseHandler):
     '''Wrapper for Kods archiver class'''
-    def __init__(self, source, parent):
+    def __init__(self, source: bytes, parent: VfsNode, datacenter_headers: list[bytes] | None = None) -> None:
         super().__init__(source)
         self.handler_parent = parent
-        self.handle.seek(0)
-        self.raw_kods = self.handle.read()
-        self.archiver = KodsArchiver(self.raw_kods)
+        if hasattr(self.handle, 'read'):
+            self.payload_view = memoryview(self.handle.read())
+        else:
+            self.payload_view = memoryview(self.handle)
+        self.archiver = KodsArchiver(self.payload_view)
 
+        self.datacenter_headers = datacenter_headers
 
     def get_file_tree(self) -> VfsNode:
-        logger.debug(f'Unpacking Kods archive from {getattr(self.handler_parent, 'name',  'unknown')}')
-
-        new_nodes = self.archiver.unpack_kods()
-        offsets = self.archiver.get_offsets()
-        extensions = generate_ext_overrides()
-
-        root = VfsNode(
-            name=f"{getattr(self.handler_parent, 'name', 'KODS')}_contents",
-            category=getattr(self.handler_parent, 'category', 'Unknown'),
-            parent=self.handler_parent,
-        )
-
-        for i, file in enumerate(new_nodes):
-            if not file or offsets[i] == -1:
-                continue
-
-            header = file[:8]
-            ext = next((ext for signature, ext in extensions.items() if header.startswith(signature)), '.bin')
-
-            node = VfsNode(
-                name=f"{getattr(self.handler_parent, 'name', 'Unknown')} {i:04d} Unpacked",
-                offset=offsets[i],
-                size=len(file),
-                header=header,
-                extension=ext,
-                parent=root,
-            )
-            root.append_child(node)
-
-        logger.info(f'Kods unpacked successfully {len(root.children)} files created')
-        return root
-        
+        return self._create_nodes()
     
     def get_raw_node(self, node: VfsNode) -> bytes:
-        offset = node.offset
-        end = offset + node.size
-        logger.info(f'Requested offset {offset} of size {end}')
-        return self.raw_kods[offset:end]
+        logger.info(f'Requested offset {node.offset} of size {node.size}')
+        if node.offset == -1 or node.size == 0:
+            return b''
+        return self.payload_view[node.offset : node.offset + node.size]
+    
+    def _collect_headers(self) -> list[memoryview]:
+        '''Scans all possible headers for validity'''
+        all_headers: list[memoryview] = []
+        if len(self.payload_view) >= 8: # Check internal header
+            magic = self.payload_view[:4].tobytes()
+            if magic == b'Kods':
+                all_headers.append(self.payload_view)
+            else: # 0-length internal sentinel
+                all_headers.append(memoryview(b''))
+        if self.datacenter_headers: # Check datacenter headers
+            for header in self.datacenter_headers:
+                all_headers.append(memoryview(header))
+
+        return all_headers
 
     def rebuild_node(self, node: VfsNode) -> bytes:
         return b''
 
-    def get_properties(self):
-        p = self.archiver.parse_header()
-        mode_str = '32bit aligned' if not p.mode else '16bit aligned'
+    def get_properties(self) -> None:
+        headers_view = self._collect_headers()
+        logger.info(f'Kods Archive Properties:\nNumber of Headers:{len(headers_view)}')
+        for i, header_view in enumerate(headers_view):
+            if header_view and i == 0: # Check for internal header
+                p = self.archiver.parse_header(header_view, is_internal=True)
+            elif header_view: # Check for external headers
+                p = self.archiver.parse_header(header_view, is_internal=False)
+            else: # 
+                logger.info('No internal Header.')
 
-        logger.info(f'Kods Archive Properties:\nNumber of Entries: {p.num_entries} '
-                    f'| Compression shift: {p.shift} | Entry mode: {mode_str} '
-                    f'| Secondary table present: {p.has_second_table} | Size of Pre-Payload data: {p.data_region_start}')
+            mode_str = '32bit aligned' if not p.mode else '16bit aligned'
+
+            logger.info(f'Header {i}:\nNumber of Entries: {p.num_entries} '
+                        f'| Compression shift: {p.shift} | Entry mode: {mode_str} '
+                        f'| Secondary table present: {p.has_second_table} | Size of Pre-Payload data: {p.payload_offset} bytes')
     
     def execute_action(self, node: VfsNode, action_name: str) -> Any:
         if action_name == 'Unpack':
@@ -88,10 +84,63 @@ class KodsHandler(BaseHandler):
     
     def get_identity(self) -> str:
         return 'Kods Archive'
+    
+    def unpack_with_headers(self, node: VfsNode, header_bytes: list[bytes]) -> VfsNode:
+        '''Called for datacenter unpacks'''
+        self.datacenter_headers = header_bytes
+        logger.info(f'KodsHandler received {len(header_bytes)} datacenter headers for {node.name}')
+        return self._create_nodes()
+    
+    def _create_nodes(self) -> VfsNode:
+        '''helper for creating nodes out of kods data'''
+        logger.debug(f'Unpacking Kods archive from {getattr(self.handler_parent, 'name',  'unknown')}')
 
-###-------------------------------- Archiver -------------------------------------------###
+        headers = self._collect_headers()
+        if not headers:
+            logger.error(f'No valid "Kods" header found for {self.handler_parent.name}')
+            return VfsNode(name='Invalid', parent=self.handler_parent)
+        
+        master_map = self.archiver.get_kods_map(headers)
+        extensions = generate_ext_overrides()
 
-class KodsArchiver():
+        root = VfsNode(
+            name=f"{getattr(self.handler_parent, 'name', 'KODS')}_contents",
+            category=getattr(self.handler_parent, 'category', 'Unknown'),
+            parent=self.handler_parent,
+        )
+
+        for meta in master_map:
+            if not meta.is_valid:
+                dummy_node = VfsNode(
+                    name=f"H{meta.header_index}_sentinel_{meta.node_index:04d}",
+                    offset=-1,
+                    size=0,
+                    parent=root
+                )
+                dummy_node.is_hidden = True
+                root.append_child(dummy_node)
+                continue
+
+            header_bytes = bytes(self.payload_view[meta.offset : meta.offset + 8])
+            ext = next((ext for sig, ext in extensions.items() if header_bytes.startswith(sig)), '.bin')
+
+            node = VfsNode(
+                name=f'H{meta.header_index} {meta.node_index:04d}',
+                offset=meta.offset,
+                size=meta.size,
+                header=header_bytes,
+                extension=ext,
+                parent=root,
+            )
+            root.append_child(node)
+            node.is_hidden = True if not node.size else False
+
+        logger.info(f'Successfully unpacked {len(root.children)} kods nodes from {len(headers)} headers')
+        return root
+
+###----------------------------------------------- Archiver ----------------------------------------------------###
+
+class KodsArchiver:
     '''Archiver class for all kods archive related processing.'''
     @dataclass(slots=True)
     class KodsHeader:
@@ -103,97 +152,83 @@ class KodsArchiver():
         bit30: bool
         sentinel: int
         format: str
+        is_internal: bool
         header_size: int = 0
-        data_region_start: int = 0
+        payload_offset: int = 0
 
-    def __init__(self, data: bytes, target: int | None = None):
-        self.raw_kods = data
-        self.target = target
-        self.header = self.parse_header()
+    @dataclass(slots=True)
+    class FileNodeMeta:
+        ''''Represents a mapped file from any header source'''
+        header_index: int # 0 = internal header -> 1+ = datacenter header
+        node_index: int
+        offset: int       # absolute offset into payload
+        size: int
+        is_valid: bool
 
-    ###--------------------------------- Pack --------------------------------###
+    def __init__(self, payload: bytes | memoryview | bytearray):
+        self.payload_view = memoryview(payload)
+        self.payload_length = len(self.payload_view) # Includes header size if internal header present
 
-    def pack_archive(self):
-        '''TODO: Implement for ISO building support'''
-        raise NotImplementedError('Kodes repacking not implemented yet')
+    
+    def get_kods_map(self, headers: list[memoryview]) -> list[KodsArchiver.FileNodeMeta]:
+        '''Generate a single offset map into the payload from all provided headers'''
+        kods_map: list[KodsArchiver.FileNodeMeta] = []
+        valid_nodes: list[KodsArchiver.FileNodeMeta] = []
+        header_shifts = {}
 
-    ###-------------------------------- Unpack --------------------------------###
-
-    def unpack_kods(self) -> list[bytes]:
-        '''Unpack kods container into list of raw data nodes'''
-        offsets = self.get_offsets()
-        new_files: list[bytes] = []
-
-        for i, offset in enumerate(offsets[:-1]):
-            if offset == -1: 
+        for header_idx, header_view in enumerate(headers): # Get Headers, offsets, and shifts
+            is_internal = True if header_idx == 0 else False
+            header_obj = self.parse_header(header_view, is_internal)
+            if len(header_view) <= 8:
                 continue
-            end = -1
-            for j in range(i+1, len(offsets)):
-                if offsets[j] != -1:
-                    end = offsets[j]
-                    break
-        
-            if end == -1:
-                data_end = len(self.raw_kods)
-                while data_end > offset + 1 and self.raw_kods[data_end - 1] == 0:
-                    data_end -= 1
-                if data_end > offset:
-                    align_mask = (1 << self.header.shift) - 1
-                    aligned = (data_end + align_mask) & ~align_mask
-                    end = self.header.data_region_start + aligned
-                    end = min(end, len(self.raw_kods))
-                else:
-                    end = offset
+            offsets = self._get_offsets(header_view, header_obj)
+            header_shifts[header_idx] = header_obj.shift
 
-            if offset >= end:
-                # No reason to keep or show 0 entry that I know of. Repack happens based on the original.
+            for i, offset in enumerate(offsets): # Get Basic Segment metadata (missing size)
+                is_valid = (offset != -1)
+                node_metadata = self.FileNodeMeta(header_idx, i, offset, 0, is_valid)
+                kods_map.append(node_metadata)
+                if is_valid:
+                    valid_nodes.append(node_metadata)
+
+        # Sort metadata to solve size
+        valid_nodes.sort(key=lambda header: header.offset)
+        valid_nodes.append(self.FileNodeMeta(-1, -1, self.payload_length, 0, False)) # EOF sentinel
+
+        for current_node, next_node in zip(valid_nodes, valid_nodes[1:]): # Calculate valid node sizes
+            if current_node.offset == next_node.offset:
+                # TODO ALIAS
                 continue
 
-            file = self.raw_kods[offset:end]
-            new_files.append(file)
-        
-        return new_files
+            start = current_node.offset
+            end = next_node.offset
 
-    def get_offsets(self) -> list[int]:
-        '''Return list of (offset, alias) for files inside the Kods container'''
-        offsets = []
-        for i in range(self.header.num_entries):
-            offset_pos = self.header.header_size + (i * self.header.stride)
-            raw_offset = struct.unpack_from(self.header.format, self.raw_kods, offset_pos)[0]
-            # Collect offset data
-            if raw_offset == self.header.sentinel:
-                abs_offset = -1
-            elif raw_offset == 0:
-                abs_offset = self.header.data_region_start
-            else:
-                abs_offset = self.header.data_region_start + (raw_offset << self.header.shift)
-            offsets.append(abs_offset)
-        offsets.append(len(self.raw_kods))
-        return offsets
+            # shift = header_shifts[current_node.header_index]
+            # align_mask = (1 << shift) - 1
+            # while end > start and self.payload_view[end - 1] == 0:
+            #     if shift > 0 and (end - 1) & align_mask == 0: # boundary check
+            #         break
+            #     end -= 1
+            
+            current_node.size = end - start
+            if current_node.size <= 0:
+                current_node.is_valid = False
+                current_node.offset = -1
+                current_node.size = 0
 
-###-------------------------------------- Utility ----------------------------------------###
+        valid_nodes.pop()
+        return kods_map
 
-    def get_aliases(self) -> list[int]:
-        '''Return ordered list of aliases'''
-        aliases = []
-        for i in range(self.header.num_entries):
-            # Collect Secondary table data
-            secondary_id = None
-            if self.header.has_second_table:
-                secondary_table_start = ((self.header.data_region_start - 8) // 2) + 8
-                secondary_pos = secondary_table_start + (i * self.header.stride)
-                secondary_id = struct.unpack_from(self.header.format, self.raw_kods, secondary_pos)[0]
-            aliases.append(secondary_id)
-        return aliases
+    ###-------------------------------------------- Helpers --------------------------------------------###
 
-    def parse_header(self) -> KodsHeader:
+    def parse_header(self, header_view: memoryview, is_internal: bool) -> KodsHeader:
         '''Return dataclass with all header definitions'''
-        if len(self.raw_kods) < 8:
-            raise ValueError('Only partial Kods')
+        if len(header_view) < 8:
+            return self.KodsHeader(num_entries=0,shift=0,mode=False,stride=0,has_second_table=False,bit30=False,sentinel=0,format='None',is_internal=True)
 
-        magic, control_word = struct.unpack("<II", self.raw_kods[:8])
+        magic, control_word = struct.unpack_from("<II", header_view, 0)
         if magic != 0x73646F4B: # 'Kods'
-            raise ValueError('Not Kods archive')
+            return self.KodsHeader(num_entries=0,shift=0,mode=False,stride=0,has_second_table=False,bit30=False,sentinel=0,format='None',is_internal=True)
 
         # Bit Field Extraction
         num_entries = control_word & 0xFFFF              # Bits 0-15
@@ -201,14 +236,14 @@ class KodsArchiver():
         mode = (control_word >> 20) & 0x01               # Bits 20
         has_second_table = (control_word >> 29) & 0x01   # Bit 29
         bit30 = (control_word >> 30) & 0x01              # Bit 30
+        
+        # Data alignement
         data_format = "<H" if mode else "<I"
         stride = 2 if mode else 4
         sentinel = 0xFFFF if mode else 0xFFFFFFFF
-
-        # Data alignement
         header_size = 8
         table_count = 2 if has_second_table else 1
-        data_region_start =  header_size + (num_entries * stride * table_count)
+        payload_offset =  header_size + (num_entries * stride * table_count) if is_internal else 0
 
         return self.KodsHeader(
             num_entries,
@@ -219,11 +254,23 @@ class KodsArchiver():
             bool(bit30),
             sentinel,
             data_format,
+            is_internal,
             header_size,
-            data_region_start
+            payload_offset
         )
 
-
-
-
-
+    def _get_offsets(self, header_view: memoryview, header_obj: KodsArchiver.KodsHeader) -> list[int]:
+        '''Return list of (offset, alias) for files inside the Kods container'''
+        offsets = []
+        for i in range(header_obj.num_entries):
+            offset_pos = header_obj.header_size + (i * header_obj.stride)
+            raw_offset = struct.unpack_from(header_obj.format, header_view, offset_pos)[0]
+            # Collect offset data
+            if raw_offset == header_obj.sentinel:
+                abs_offset = -1
+            elif raw_offset == 0:
+                abs_offset = header_obj.payload_offset
+            else:
+                abs_offset = header_obj.payload_offset + (raw_offset << header_obj.shift)
+            offsets.append(abs_offset)
+        return offsets

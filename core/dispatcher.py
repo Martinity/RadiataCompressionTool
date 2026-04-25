@@ -33,7 +33,7 @@ class Dispatcher:
         if not handler_class:
             logger.warning(f'No handler for {source.name}')
             return []
-        
+
         if isinstance(source, Path): # Physical node
             return self._load_physical(handler_class, source)
         else: # Virtual node
@@ -43,11 +43,11 @@ class Dispatcher:
         '''Return the raw bytes of the requested node by unwrapping from the physical layer (to virtual node)'''
         if node.pending_data is not None:
             return node.pending_data
-        
+
         chain = self._build_unwrap_chain(node)
         if not chain:
             logger.warning(f'No physical reference point for node {node.hierarchical_id_str}')
-        
+        logger.debug(f'Resolving data for {node.hierarchical_id_str}')
         return self._unwrap_chain(chain)
 
     def execute_node_action(self, node: VfsNode, action_name: str) -> None:
@@ -59,7 +59,16 @@ class Dispatcher:
 
         logger.debug(f'Routing "{action_name}" to {handler_class.__name__}')
         node_bytes = self.get_node_data(node)
+
+        header_bytes = []
+        if getattr(node, 'target', None) and self.vfs:
+            logger.debug(f'Action requires datacenter headers, resolving {len(node.target)} headers')
+            header_nodes = self.vfs.resolve_nodes(node.target, expansion_callback=self._expand_node)
+            header_bytes = [self.get_node_data(h) for h in header_nodes]
+
         with handler_class(node_bytes, node.parent) as temp_handler:
+            if header_bytes and hasattr(temp_handler, 'datacenter_headers'):
+                temp_handler.datacenter_headers = header_bytes
             if hasattr(temp_handler, 'execute_action'):
                 temp_handler.execute_action(node, action_name)
             else:
@@ -97,15 +106,29 @@ class Dispatcher:
         container_bytes = self.get_node_data(node)
 
         with handler_class(container_bytes, node) as handler:
-            draft_root = handler.get_file_tree()
+            if getattr(node, 'target', None) and hasattr(handler, 'unpack_with_headers') and self.vfs:
+                logger.info(f'Datacenter unpack for {node.name} - resolving {len(node.target)} headers HID:{node.target}')
+                header_nodes = self.vfs.resolve_nodes(node.target, expansion_callback=self._expand_node)
+                header_bytes = [self.get_node_data(h) for h in header_nodes]
+
+                if node.hierarchical_id == (5, 31) or node.parent.hierarchical_id in [(5, 2, 0), (5, 3, 0), (5, 4, 0), (5, 5, 0)]: # slot 32 (final slot) 64-byte alignement
+                    alignement = len(header_bytes[0]) % 64
+                    header_bytes[0] = header_bytes[0] + (b'0'*alignement)
+                    logger.warning(f'Adjusted alignment for raw {node.hierarchical_id_str}')
+
+                draft_root = handler.unpack_with_headers(node, header_bytes)
+            else:
+                draft_root = handler.get_file_tree()
+                
             identity = handler.get_identity()
             new_nodes = draft_root.children or [draft_root]
 
             if self.vfs:
-                for n in new_nodes:
-                    self.vfs.register_node(n, n.offset)
+                logger.debug(f'Registering {node.hierarchical_id_str} with VfsManager')
+                self.vfs.register_node(node)
+                self.vfs.insert_children(node, new_nodes)
             logger.info(f'Inserted {len(new_nodes)} nodes from {node.name} ({identity})')
-            return new_nodes
+            return new_nodes   
 
     def _build_unwrap_chain(self, node: VfsNode) -> list[VfsNode]:
         '''helper for building the path to physical source'''
@@ -129,7 +152,7 @@ class Dispatcher:
         if self.active_handler is None:
             logger.warning('No Physical handler found')
             return b''
-        
+
         current_bytes = self.active_handler.get_raw_node(chain[0])
 
         for i in range(1, len(chain)):
@@ -145,3 +168,36 @@ class Dispatcher:
                 current_bytes = handler.get_raw_node(target)
 
         return current_bytes
+
+    def _handler_datacenter_unpack(self, node: VfsNode) -> None:
+        '''For unpacking nodes that need headers from datacenter'''
+        if not self.vfs or not node.target:
+            logger.warning(f'Cannot unpack datacenter headers for {node.name}')
+            return
+        
+        logger.info(f'Datacenter unpack requested for {node.name} - resolving {len(node.target)} headers')
+        header_nodes = self.vfs.resolve_nodes(node.target, expansion_callback=self._expand_node)
+        header_bytes = [self.get_node_data(h) for h in header_nodes]
+        for h in header_bytes:
+            logger.warning(f'{h}')
+        handler_class = Registry.get_handler(node)
+        if not handler_class:
+            return
+        container_bytes = self.get_node_data(node)
+        with handler_class(container_bytes, node.parent) as handler:
+            if hasattr(handler, 'unpack_with_headers'):
+                if node.hierarchical_id == (5, 31): # 64 byte alignment for tail entry (32nd slot)
+                    header_bytes = header_bytes[:len(header_bytes) - (len(header_bytes) % 64)]
+                new_tree = handler.unpack_with_headers(node, header_bytes)
+            else:
+                logger.warning(f'{handler_class.__name__} missing unpack_with_headers')
+        
+        if self.vfs and new_tree.children:
+            for n in new_tree.children:
+                self.vfs.register_node(n, n.offset)
+    ###------------------------ Callback -----------------------###
+    def _expand_node(self, parent_node: VfsNode) -> None:
+        '''Callback for VfsManager to expand missing nodes'''
+        if not self.vfs:
+            return
+        self.load_source(parent_node)
