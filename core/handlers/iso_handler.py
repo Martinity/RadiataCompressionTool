@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import struct
+import math
 from pathlib import Path
 from dataclasses import dataclass
 from hashlib import sha1
@@ -108,12 +109,14 @@ class IsoHandler(BaseHandler):
         self.params = self.IsoParameters()
         self.status = self.verify_iso_integrity()
 
-        self.toc = self._unscramble(self._load_toc())
+        self.toc = self._process_toc(self._load_toc())
         logger.debug(f"TOC signature verified, {self.params.total_entries} entries")
 
     def __repr__(self) -> str:
         return f'Build:{self.status}'
     
+###------------------------------------ Extract ISO ------------------------------------###
+
     def get_file_tree(self) -> VfsNode:
         '''Returns the root node of the VFS (the disk)'''
         logger.debug("Building VFS tree from TOC")
@@ -125,11 +128,12 @@ class IsoHandler(BaseHandler):
 
         for entry in self.toc:
             disk_index = entry['id']
-            self.handle.seek(entry['offset'])
+            offset = entry['offset'] if disk_index != 0 else self.params.toc_offset
+            self.handle.seek(offset)
             if entry['size'] == 0: # Dummy node
                 dummy_node = VfsNode(
                     name=f'sentinel_{disk_index:04d}',
-                    offset=-1,
+                    offset=offset,
                     size=0,
                     parent=root
                 )
@@ -147,7 +151,7 @@ class IsoHandler(BaseHandler):
             node = VfsNode(
                 name=semantic_name,
                 category=category,
-                offset=entry['offset'],
+                offset=offset,
                 size=(entry['size'] * self.params.sector_size),
                 parent=root,
                 header=header,
@@ -156,52 +160,126 @@ class IsoHandler(BaseHandler):
             )
             node.is_physical = True  # Set as reference node for all file processes
             root.append_child(node)
+            if disk_index in [0, 5]: # Hide file system nodes
+                node.is_hidden = True
         return root
+    
+    def get_raw_node(self, node: VfsNode) -> bytes:
+        """Called for the raw data of a physical node"""
+        self.handle.seek(node.offset)
+        data = self.handle.read(node.size)
+
+        logger.debug(f'Read {len(data) // self.params.sector_size} sectors from offset {hex(node.offset)}')
+        return data
 
     def _load_toc(self) -> bytes:
         """Locate the TOC."""
         self.handle.seek(self.params.toc_offset)
         return self.handle.read(self.params.total_entries * 3 * 4)
 
-    def _unscramble(self, scrambled_toc: bytes) -> list[dict[str, Any]]:
+    def _process_toc(self, scrambled_toc: bytes) -> list[dict[str, Any]]:
         '''Unscramble and structure the TOC data'''
         total = self.params.total_entries
-        key = self.params.seed
-        flat = list(struct.unpack(f"<{total * 3}I", scrambled_toc))
+        toc = list(struct.unpack(f"<{total * 3}I", scrambled_toc))
 
-        for i in range(total):
-            flat[0*total + i] ^= key
-            key ^= (key << 1) & 0xFFFFFFFF
-            flat[1*total + i] ^= key
-            key ^= (~self.params.seed) & 0xFFFFFFFF
-            flat[2*total + i] ^= key    
-            key ^= ((key << 2) ^ self.params.seed) & 0xFFFFFFFF
+        toc = self._scramble(toc[:])
 
         structured = []
         for i in range(total):
-            lba = flat[i]
-            size = flat[total + i]
+            lba = toc[i]
+            size = toc[total + i]
+            logical_id = toc[(total * 2) + i]
             structured.append({
                 "id": i,
                 "lba": lba,
                 "size": size,
                 "offset": lba * self.params.sector_size,
+                'logical_id': logical_id,
                 "name": f"FILE_{i:04d}.bin"
             })
         return structured
 
-    def get_raw_node(self, node: VfsNode) -> bytes:
-        """The UI calls this ONLY when it needs the bytes for Hex view/export."""
-        self.handle.seek(node.offset)
-        data = self.handle.read(node.size)
 
-        logger.debug(f'Read {len(data)} bytes from offset {node.offset}')
-        return data
+###----------------------------------- Build ISO ------------------------------------------###
+ 
+    def rebuild_node(self, root: VfsNode, staged_nodes: list[VfsNode], output_path: Path) -> bool:
+        '''Rebuild the root node, stream segments directly to disk. Only pre-toc is in place'''
+        logger.info(f'Rebuilding ISO to {output_path}')
 
-    def rebuild_node(self, node: VfsNode) -> bytes:
-        '''TODO'''
-        return b''
+        try:
+            toc_size = self.params.total_entries * 3 * 4
+            start_data_offset = self.params.toc_offset + toc_size
+            new_lba_map = {}
+            current_offset = start_data_offset
+            for child in root.children: # map LBAs
+                new_lba_map[child] = current_offset // self.params.sector_size
 
+                if child in staged_nodes and child.pending_data:
+                    size = len(child.pending_data)
+                else:
+                    size = child.size
+
+                if size > 0:
+                    sector_size = (size + (self.params.sector_size - 1)) & ~(self.params.sector_size - 1)
+                    current_offset += sector_size     
+        
+            with open(output_path, 'wb') as f: # write the new ISO
+                self.handle.seek(0)
+                self._stream_copy(self.handle, f, self.params.toc_offset)
+
+                new_toc_bytes = self._build_toc(root.children, staged_nodes, new_lba_map)
+                f.write(new_toc_bytes)
+
+                for child in root.children:
+                    if child.size == 0 and not child.pending_data:
+                        continue
+                    data = child.pending_data if child in staged_nodes else self.get_raw_node(child)
+                    f.write(data)
+                    padding_size = (-len(data)) & (self.params.sector_size -1)
+                    f.write(b'\x00' * padding_size)
+
+            return True
+        
+        except Exception as e:
+            logger.error(f'Rebuild failed: {e}', exc_info=True)
+            return False
+
+    def _stream_copy(self, source_handle, output_obj, length, chunk_size = 1024*1024):
+        '''Helper for writing out one segment or node at a time'''
+        bytes_left = length
+        while bytes_left > 0:
+            chunk = source_handle.read(min(bytes_left, chunk_size))
+            if not chunk:
+                break
+            output_obj.write(chunk)
+            bytes_left -= len(chunk)
+
+    def _build_toc(self, children: list[VfsNode], staged_nodes: list[VfsNode], lba_map: dict) -> bytes:
+        '''Scan Nodes to build new toc'''
+        total = self.params.total_entries
+        toc = [0] * (total * 3)
+
+        for i, child in enumerate(children):
+            if i >= total:
+                break
+            
+            final_lba = lba_map.get(child, 0)
+
+            if child in staged_nodes and child.pending_data:
+                size_bytes = len(child.pending_data)
+            else:
+                size_bytes = child.size
+
+            final_sectors = 0 if size_bytes == 0 else math.ceil(size_bytes / self.params.sector_size)
+            toc[i] = final_lba
+            toc[total + i] = final_sectors
+            toc[2 * total + i] = self.toc[i]['logical_id']
+
+        scrambled = self._scramble(toc)
+        return struct.pack(f'<{total * 3}I', *scrambled)
+
+###---------------------------------- Utility -------------------------------------------###
+ 
     def verify_iso_integrity(self) -> str:
         '''Verify radiata iso. Check what version of the disk is running.'''
         logger.debug("Verifying ISO integrity (SHA-1)")
@@ -229,3 +307,18 @@ class IsoHandler(BaseHandler):
     def get_identity(self) -> str:
         return 'ISO detected'
     
+    def _scramble(self, flat_toc: list) -> list:
+        '''scramble or unscramble the toc'''
+        total = self.params.total_entries
+        key = self.params.seed
+        scramble = flat_toc[:]
+
+        for i in range(total):
+            scramble[0*total + i] ^= key
+            key ^= (key << 1) & 0xFFFFFFFF
+            scramble[1*total + i] ^= key
+            key ^= (~self.params.seed) & 0xFFFFFFFF
+            scramble[2*total + i] ^= key    
+            key ^= ((key << 2) ^ self.params.seed) & 0xFFFFFFFF
+
+        return scramble

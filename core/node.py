@@ -13,6 +13,7 @@ class NodeStatus(Enum):
     '''Hold modification data'''
     UNMODIFIED = auto()
     MODIFIED = auto()
+    STAGED = auto()
 
 class VfsNode:
     '''Pure Data Container. All files whether iso, kods, or raw are all nodes. '''
@@ -50,8 +51,6 @@ class VfsNode:
         self.is_unpacked = False                        # Kods
         self.compressed_header: bytes = b''             # SLZ
         self.is_hidden = False                          # Hide node in UI (file system related or null nodes by default)
-
-        self._handler_data: dict = {}
     
     def append_child(self, child: VfsNode):
         '''Allow children nodes'''
@@ -82,10 +81,6 @@ class VfsNode:
         except (ValueError, AttributeError):
             return 0    
         
-    def mark_dirty(self, new_data: bytes):
-        self.pending_data = new_data
-        self.status = NodeStatus.MODIFIED
-
     def clear_pending(self):
         self.pending_data = None
         self.status = NodeStatus.UNMODIFIED
@@ -199,8 +194,76 @@ class VfsManager(QObject):
             if child.hierarchical_id == target_path:
                 return child
         return None
-    
-    def mark_dirty(self, node: VfsNode, new_data: bytes):
+
+###------------------------------------ Status Tracker ---------------------------------------###
+
+class ModTracker(QObject):
+    '''Modification state tracker'''
+    node_modified = pyqtSignal(VfsNode)
+    node_staged = pyqtSignal(VfsNode)
+    node_unstaged = pyqtSignal(VfsNode)
+    node_reverted = pyqtSignal(VfsNode)
+
+    state_changed = pyqtSignal(int, int) # format: (unstaged_count, staged_count)
+    rebuild_initiated = pyqtSignal(list)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.modified_nodes: set[VfsNode] = set()
+        self.rebuild_queue: set[VfsNode] = set()
+
+    def _emit_state(self):
+        self.state_changed.emit(len(self.modified_nodes), len(self.rebuild_queue))
+
+    def mark_modified(self, node: VfsNode, new_data: bytes) -> None:
         node.pending_data = new_data
         node.status = NodeStatus.MODIFIED
-        self.dirty_nodes.add(node)
+        self.modified_nodes.add(node)
+
+        self.node_modified.emit(node)
+        self._emit_state()
+
+    def stage_node(self, node: VfsNode) -> None:
+        '''Move from cache to staging area'''
+        if node in self.modified_nodes:
+            self.modified_nodes.remove(node)
+            self.rebuild_queue.add(node)
+            node.status = NodeStatus.STAGED
+            self.node_staged.emit(node)
+            self._emit_state()
+
+    def unstage_node(self, node: VfsNode) -> None:
+        '''Move from staging back to cache'''
+        if node in self.rebuild_queue:
+            self.rebuild_queue.remove(node)
+            self.modified_nodes.add(node)
+            node.status = NodeStatus.MODIFIED
+            self.node_unstaged.emit(node)
+            self._emit_state()
+
+    def revert_node(self, node: VfsNode) -> None:
+        '''Discard changes'''
+        self.modified_nodes.discard(node)
+        self.rebuild_queue.discard(node)
+        node.clear_pending()
+        node.status = NodeStatus.UNMODIFIED
+
+        logger.info(f'Reverted changes for node: {node.name}')
+        self.node_reverted.emit(node)
+        self._emit_state()
+
+    def confirm_and_rebuild(self) -> None:
+        '''Triggered by Confirm button in staging page'''
+        if not self.rebuild_queue:
+            # TODO can't trigger button when no edits
+            return
+        
+        staged_nodes = list(self.rebuild_queue)
+        logger.info(f'Initiating rebuild with {len(staged_nodes)} staged files.')
+        self.rebuild_initiated.emit(staged_nodes)
+
+    def clear(self) -> None:
+        '''Clear state when closing an ISO'''
+        self.modified_nodes.clear()
+        self.rebuild_queue.clear()
+        self._emit_state()

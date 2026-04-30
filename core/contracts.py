@@ -68,7 +68,7 @@ class BaseHandler(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def rebuild_node(self, node: VfsNode) -> bytes:
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
         '''Return the rebuilt container using pending edits'''
         pass
 
@@ -101,6 +101,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     @abstractmethod load_node\n
     @abstractmethod get_modified_data
     '''
+    apply_requested = pyqtSignal(object, bytes) # (VfsNode, new raw data for node)
     dataChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None):

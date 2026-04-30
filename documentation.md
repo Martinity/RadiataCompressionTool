@@ -54,40 +54,12 @@ Used for: Hex View.
 5. `BaseEditor::load_node` populates the UI widgets with the data.
 
 #### 3. Data Commit (Rebuilding ISO)
-Used for: Pushing editor changed to ISO
+Used for: Pushing editor changes to ISO
 ...
 ### Rebuild:
 **Recursion** Post order
 **Files** Front to back
 
-## Finished TODO list:
-
-- ~~Decouple UI components from main_window for readability and scalability -> `/ui/widgets/hex_editor.py`~~
-- ~~ISO signature checking -> `/core/iso_handler.py`~~
-- ~~SHA-1 ISO checking for USA, JPN, proto, or Modified -> `core/iso_handler.py`~~
-- ~~Storing header in node for quick information lookup -> `/core/handlers/iso_handler.py` & `/models/vfs_node`~~
-- ~~Debug/log window -> `/ui/widgets/`~~
-- ~~Fix Logging -> `/core/logger.py` & `/ui/widgets/log_page.py`~~
-- ~~Implement debugging repr and str as needed -> Everywhere~~
-- ~~Rewrite windowing system For `QMainWindow` move to `RadiataModTool` only -> `/ui/main_window.py` & `/ui/widgets/workspace_page.py`~~
-- ~~`QListWidget` to toggle tree category -> `/ui_core.py`~~
-- ~~Rewrite the signal system for qt -> `/ui_core.py` & `/ui/`~~
-- ~~Fix Logging exit python-C++ wrapper fighting -> `/core/logger.py`~~
-- ~~Wrap the `self.log_signal.emit` in a `PyQt6.QtCore.QMetaObject.invokeMethod` to ensure the logging doesn't block the main thread logic -> `/core/logger.py`~~
-- ~~Go over iso_handler for deprecated code and better node handoff -> `/core/handlers/iso_handler.py`~~
-- ~~Change hierarchy logging str to tuple -> `/models/vfs_node.py`~~
-- ~~Rewrite windowing system For stack try others `QTabWidget`, `QTabBar`, `QStackedWidget`~~
-- ~~Connect CompressorHandler -> `/core/handlers/compression_handler.py`~~
-- ~~Fully implement the context resolver -> `/core/registry.py.ActionResolver`~~
-- ~~Rewrite tree proxy signal handling and widget init currently scuffy -> `/ui_core.py`~~
-- ~~Redefine concerns for Dispatch/Node/Registry/Contract/Resolver -> `/core/`~~
-- ~~Improved `active_handler` and `temp_handler` distinction -> `/core/dispatcher.py`~~
-- ~~Connect KodsHandler -> `/core/handlers/kods_handler.py`~~
-- ~~Implement node hidding from UI -> `/core/node.py` & `/ui/tree_model.py`~~
-- ~~Targeted Kods Archiving -> `/core/handlers/kods_handler.py`~~
-- ~~Chained Compression parsing -> `/core/handlers/compression_handler.py`~~
-- ~~memoryview for improved performance -> `/core/handlers/`~~
-- ~~node metadata for get_tree -> `/core/handler/`~~
 
 ## Current TODO list:
 
@@ -96,7 +68,8 @@ Used for: Pushing editor changed to ISO
 - Improve targeted offset melding or change strategy -> `/core/handlers/kods_handler.py`
 - Packed Compression parsing -> `/core/handlers/compression_handler.py`
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
-- Staging/Commiting for edits. -> `/core/dispatcher.py` & `/core/node.py`
+- Improved ISO detection -> `/core/handlers/iso_handler.py`
+- Custom UI for hex editor -> `/ui/widgets/hex_editor.py`
 
 ## Future TODO list:
 
@@ -106,7 +79,6 @@ Used for: Pushing editor changed to ISO
 - Clean up semantic names for UI readability -> `/core/name_overrides.py`
 - Separate ui_core/models as needed/prefered -> `/ui_core.py` & `/ui/tree_model.py`
 - Search for tree view -> `/ui_core.py`
-- Custom UI for hex editor so that it functions as intended (hex stays in place/edits have visible feedback) -> `/ui/widgets/hex_editor.py`
 - UI improvements (settings, standardized theme.......)
 
 # Rough Roadmap
@@ -117,8 +89,8 @@ Used for: Pushing editor changed to ISO
 - ~~Hex Editor~~
 - ~~Decompression~~
 - Kods Unpacking
-- Iso rebuilding
-- Compression
+- ~~Iso rebuilding~~
+- ~~Compression~~
 - Kods Packing
   
 # Fully finished features

@@ -2,26 +2,56 @@ from __future__ import annotations
 
 from pathlib import Path
 from core.registry import Registry
-from core.node import VfsManager
+from core.node import VfsManager, ModTracker, VfsNode
+from core.workers import RebuildWorker
 from typing import TYPE_CHECKING, Optional, Union
+from PyQt6.QtCore import pyqtSignal, QObject
 
 if TYPE_CHECKING:
-    from core.node import VfsNode
     from core.contracts import BaseHandler
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
-
 ###----------------------------------------------------- Dispatch -------------------------------------------------###
 
-class Dispatcher:
+class Dispatcher(QObject):
     '''Bridge between UI and logic'''
+    node_changed = pyqtSignal(VfsNode) # Update for TreeView
+    tracking_update = pyqtSignal(int, int) # (modified_count, staged_count)
+    rebuild_requested = pyqtSignal(list) # For MainWindow page swap
+
+    # Rebuild signals TODO invesigate using the logger to convey the messages pros/cons
+    rebuild_progress = pyqtSignal(int) # % completion of rebuild
+    rebuild_log = pyqtSignal(str) # logged rebuild information
+    rebuild_complete = pyqtSignal(bool, str) # (Success/Fail, finish message)
+
     def __init__(self) -> None:
+        super().__init__()
         self.vfs: Optional[VfsManager] = None
+        self.tracker = ModTracker()
         self.active_handler: Optional[BaseHandler] = None
+        self._rebuild_worker: Optional[RebuildWorker] = None
         # cache for editors to keep nodes open TODO
         self.editor_cache: dict[str, bytes] = {} # Format: [hid, bytes]
+        self._setup_proxy_connections()
+
+    def _setup_proxy_connections(self) -> None:
+        '''Relay tracker signals to UI'''
+        self.tracker.node_modified.connect(self.node_changed.emit)
+        self.tracker.node_reverted.connect(self.node_changed.emit)
+        self.tracker.state_changed.connect(self.tracking_update.emit)
+        self.tracker.rebuild_initiated.connect(self.rebuild_requested.emit)
+
+        self.tracker.state_changed.connect(self._relay_tracking_state)
+
+    def apply_edit(self, node: VfsNode, data: bytes):
+        self.tracker.mark_modified(node, data)
+        logger.info(f'System-wide update for node: {node.name}')
+
+    def _relay_tracking_state(self):
+        '''Emit counts so UI doesn't need to recalc'''
+        self.tracking_update.emit(len(self.tracker.modified_nodes), len(self.tracker.rebuild_queue))
 
     def __str__(self) -> str:
         return f"Dispatcher(active_handler={self.active_handler})"
@@ -39,7 +69,7 @@ class Dispatcher:
         else: # Virtual node
             return self._load_virtual(handler_class, source)
 
-    def get_node_data(self, node: 'VfsNode') -> bytes:
+    def get_node_data(self, node: VfsNode) -> bytes:
         '''Return the raw bytes of the requested node by unwrapping from the physical layer (to virtual node)'''
         if node.pending_data is not None:
             return node.pending_data
@@ -49,6 +79,10 @@ class Dispatcher:
             logger.warning(f'No physical reference point for node {node.hierarchical_id_str}')
         logger.debug(f'Resolving data for {node.hierarchical_id_str}')
         return self._unwrap_chain(chain)
+    
+    def apply_node_mod(self, node: VfsNode, new_data: bytes) -> None:
+        '''Editors call this when submitting changes'''
+        self.tracker.mark_modified(node, new_data)
 
     def execute_node_action(self, node: VfsNode, action_name: str) -> None:
         '''Route action to format handler'''
@@ -74,6 +108,37 @@ class Dispatcher:
             else:
                 logger.warning(f'{handler_class.__name__} is missing execute_action')
 
+    def start_iso_rebuild(self, output_path: Path) -> None:
+        if not self.active_handler or not self.vfs:
+            self.rebuild_complete.emit(False, 'No Active ISO.')
+            return
+        
+        staged_nodes = list(self.tracker.rebuild_queue)
+
+        self.rebuild_log.emit(f'Preparing to build {len(self.tracker.rebuild_queue)} staged file(s)')
+
+        try:
+            physical_staged_nodes = self._rollup_virtual_nodes(staged_nodes)
+        except Exception as e:
+            logger.error(f'Roll-up failed: {e}', exc_info=True)
+            self.rebuild_complete.emit(False, f'Virtual File Packing Failed: {e}')
+            return
+
+        self._rebuild_worker = RebuildWorker(self.active_handler, self.vfs.root, physical_staged_nodes, output_path)
+        self._rebuild_worker.progress_updated.connect(self.rebuild_progress.emit)
+        self._rebuild_worker.log_message.connect(self.rebuild_log.emit)
+        self._rebuild_worker.rebuild_finished.connect(self._on_rebuild_finished)
+
+        self._rebuild_worker.start()
+
+    def _on_rebuild_finished(self, success: bool, message: str) -> None:
+        self.rebuild_complete.emit(success, message)
+        if self._rebuild_worker:
+            self._rebuild_worker.deleteLater()
+            self._rebuild_worker = None
+        if success:
+            self.tracker.clear()
+
     def close(self) -> None:
         '''For exiting the dispatch'''
         if self.active_handler:
@@ -81,7 +146,8 @@ class Dispatcher:
         self.editor_cache.clear()
         self.vfs = None
         self.active_handler = None
-        logger.debug('- Dispatcher state reset -')
+        self.tracker.clear()
+        logger.debug('- Dispatcher and Tracker state reset -')
 
     ###------------------------------ Helpers --------------------------------###
 
@@ -110,12 +176,6 @@ class Dispatcher:
                 logger.info(f'Datacenter unpack for {node.name} - resolving {len(node.target)} headers HID:{node.target}')
                 header_nodes = self.vfs.resolve_nodes(node.target, expansion_callback=self._expand_node)
                 header_bytes = [self.get_node_data(h) for h in header_nodes]
-
-                if node.hierarchical_id == (5, 31) or node.parent.hierarchical_id in [(5, 2, 0), (5, 3, 0), (5, 4, 0), (5, 5, 0)]: # slot 32 (final slot) 64-byte alignement
-                    alignement = len(header_bytes[0]) % 64
-                    header_bytes[0] = header_bytes[0] + (b'0'*alignement)
-                    logger.warning(f'Adjusted alignment for raw {node.hierarchical_id_str}')
-
                 draft_root = handler.unpack_with_headers(node, header_bytes)
             else:
                 draft_root = handler.get_file_tree()
@@ -129,6 +189,47 @@ class Dispatcher:
                 self.vfs.insert_children(node, new_nodes)
             logger.info(f'Inserted {len(new_nodes)} nodes from {node.name} ({identity})')
             return new_nodes   
+        
+    def _rollup_virtual_nodes(self, staged_nodes: list[VfsNode]) -> list[VfsNode]:
+        '''Repack children into parents'''
+        logger.info('Initiating virutal node roll-up')
+        current_queue = set(staged_nodes)
+        while True:
+            if all(getattr(node, 'is_physical', False) for node in current_queue):
+                break
+            max_depth = max(len(node.hierarchical_id) for node in current_queue)
+            deepest_nodes = [n for n in current_queue if len(n.hierarchical_id) == max_depth]
+            parent_map: dict[VfsNode, list[VfsNode]] = {}
+
+            for node in deepest_nodes:
+                if node.parent not in parent_map:
+                    parent_map[node.parent] = []
+                parent_map[node.parent].append(node)
+
+            for parent, modified_children in parent_map.items():
+                handler_class = Registry.get_handler(parent)
+                if not handler_class:
+                    logger.error(f'No handler found for {parent.name}')
+                    continue
+                logger.debug(f'Repacking {parent.name} using {handler_class.__name__}')
+
+                parent_bytes = self.get_node_data(parent)
+                header_bytes = []
+                if getattr(parent, 'target', None) and self.vfs:
+                    header_nodes = self.vfs.resolve_nodes(parent.target, expansion_callback=self._expand_node)
+                    header_bytes = [self.get_node_data(h) for h in header_nodes]
+                
+                with handler_class(parent_bytes, parent.parent) as handler:
+                    if header_bytes and hasattr(handler, 'datacenter_headers'):
+                        handler.datacenter_headers = header_bytes
+                    new_parent_bytes = handler.rebuild_node(parent, modified_children)
+                    parent.pending_data = new_parent_bytes
+                    current_queue.add(parent)
+
+            for node in deepest_nodes:
+                current_queue.remove(node)
+        logger.info('Virtual node roll-up complete')
+        return list(current_queue)
 
     def _build_unwrap_chain(self, node: VfsNode) -> list[VfsNode]:
         '''helper for building the path to physical source'''
@@ -186,8 +287,6 @@ class Dispatcher:
         container_bytes = self.get_node_data(node)
         with handler_class(container_bytes, node.parent) as handler:
             if hasattr(handler, 'unpack_with_headers'):
-                if node.hierarchical_id == (5, 31): # 64 byte alignment for tail entry (32nd slot)
-                    header_bytes = header_bytes[:len(header_bytes) - (len(header_bytes) % 64)]
                 new_tree = handler.unpack_with_headers(node, header_bytes)
             else:
                 logger.warning(f'{handler_class.__name__} missing unpack_with_headers')
@@ -201,3 +300,5 @@ class Dispatcher:
         if not self.vfs:
             return
         self.load_source(parent_node)
+
+    
