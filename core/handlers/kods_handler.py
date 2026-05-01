@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from collections import Counter
+
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -33,13 +37,13 @@ class KodsHandler(BaseHandler):
 
     def get_file_tree(self) -> VfsNode:
         return self._create_nodes()
-    
+
     def get_raw_node(self, node: VfsNode) -> bytes:
         logger.info(f'Requested offset {node.offset} of size {node.size}')
         if node.offset == -1 or node.size == 0:
             return b''
         return self.payload_view[node.offset : node.offset + node.size]
-    
+
     def _collect_headers(self) -> list[memoryview]:
         '''Scans all possible headers for validity'''
         all_headers: list[memoryview] = []
@@ -55,8 +59,14 @@ class KodsHandler(BaseHandler):
 
         return all_headers
 
-    def rebuild_node(self, node: VfsNode) -> bytes:
-        return b''
+    def rebuild_node(self, root: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
+        """Rebuilds the Kods archive with modified child nodes."""
+        logger.info(f"Rebuilding Kods archive: {root.name}")
+
+        headers_view = self._collect_headers()
+        if not headers_view or not headers_view[0]:
+            logger.error(f"Cannot rebuild {root.name}: No internal Kods header found.")
+            return b''
 
     def get_properties(self) -> None:
         headers_view = self._collect_headers()
@@ -71,7 +81,8 @@ class KodsHandler(BaseHandler):
 
             mode_str = '32bit aligned' if not p.mode else '16bit aligned'
 
-            logger.info(f'Header {i}:\nNumber of Entries: {p.num_entries} '
+            header = 'Inline' if i == 0 else f'Datacenter Index {i}'
+            logger.info(f'Header {header}:\nNumber of Entries: {p.num_entries} '
                         f'| Compression shift: {p.shift} | Entry mode: {mode_str} '
                         f'| Secondary table present: {p.has_second_table} | Size of Pre-Payload data: {p.payload_offset} bytes')
     
@@ -96,6 +107,8 @@ class KodsHandler(BaseHandler):
         logger.debug(f'Unpacking Kods archive from {getattr(self.handler_parent, 'name',  'unknown')}')
 
         headers = self._collect_headers()
+        self.archiver.analyze_offset_distribution(headers, len(self.payload_view))
+        self.archiver.visualize_kods_coverage_discrete(headers, len(self.payload_view))
         if not headers:
             logger.error(f'No valid "Kods" header found for {self.handler_parent.name}')
             return VfsNode(name='Invalid', parent=self.handler_parent)
@@ -110,11 +123,13 @@ class KodsHandler(BaseHandler):
         )
 
         for meta in master_map:
-            if not meta.is_valid:
+            if not meta.is_valid or meta.size == 0:
+                name = 'Internal sentinel' if meta.header_index == 0 else f'sentinel {meta.node_index:03d}'
                 dummy_node = VfsNode(
-                    name=f"H{meta.header_index}_sentinel_{meta.node_index:04d}",
+                    name=name,
                     offset=-1,
                     size=0,
+                    extension='.sent',
                     parent=root
                 )
                 dummy_node.is_hidden = True
@@ -123,9 +138,10 @@ class KodsHandler(BaseHandler):
 
             header_bytes = bytes(self.payload_view[meta.offset : meta.offset + 8])
             ext = next((ext for sig, ext in extensions.items() if header_bytes.startswith(sig)), '.bin')
+            name = 'Internal header' if meta.header_index == 0 else f'Datacenter header:{meta.header_index - 1} idx:{meta.node_index:03d}'
 
             node = VfsNode(
-                name=f'H{meta.header_index} {meta.node_index:04d}',
+                name=name,#f'H{meta.header_index} {meta.node_index:04d}',
                 offset=meta.offset,
                 size=meta.size,
                 header=header_bytes,
@@ -184,37 +200,39 @@ class KodsArchiver:
             offsets = self._get_offsets(header_view, header_obj)
             header_shifts[header_idx] = header_obj.shift
 
+            header_nodes: list[KodsArchiver.FileNodeMeta] = []
             for i, offset in enumerate(offsets): # Get Basic Segment metadata (missing size)
-                is_valid = (offset != -1)
+                is_valid = (offset != -1) & (offset < self.payload_length)
                 node_metadata = self.FileNodeMeta(header_idx, i, offset, 0, is_valid)
-                kods_map.append(node_metadata)
-                if is_valid:
-                    valid_nodes.append(node_metadata)
+                header_nodes.append(node_metadata)
 
-        # Sort metadata to solve size
-        valid_nodes.sort(key=lambda header: header.offset)
-        valid_nodes.append(self.FileNodeMeta(-1, -1, self.payload_length, 0, False)) # EOF sentinel
+            valid_nodes = [header for header in header_nodes if header.is_valid]
+            # Sort metadata to solve size
+            valid_nodes.sort(key=lambda header: header.offset)
+            valid_nodes.append(self.FileNodeMeta(-1, -1, self.payload_length, 0, False)) # EOF sentinel
 
-        for current_node, next_node in zip(valid_nodes, valid_nodes[1:]): # Calculate valid node sizes
-            if current_node.offset == next_node.offset:
-                # TODO ALIAS
-                continue
+            for current_node, next_node in zip(valid_nodes, valid_nodes[1:]): # Calculate valid node sizes
+                if current_node.offset == next_node.offset:
+                    # TODO ALIAS...
+                    continue
 
-            start = current_node.offset
-            end = next_node.offset
+                start = current_node.offset
+                end = next_node.offset
 
-            # shift = header_shifts[current_node.header_index]
-            # align_mask = (1 << shift) - 1
-            # while end > start and self.payload_view[end - 1] == 0:
-            #     if shift > 0 and (end - 1) & align_mask == 0: # boundary check
-            #         break
-            #     end -= 1
-            
-            current_node.size = end - start
-            if current_node.size <= 0:
-                current_node.is_valid = False
-                current_node.offset = -1
-                current_node.size = 0
+                # shift = header_shifts[current_node.header_index]
+                # align_mask = (1 << shift) - 1
+                # while end > start and self.payload_view[end - 1] == 0:
+                #     if shift > 0 and (end - 1) & align_mask == 0: # boundary check
+                #         break
+                #     end -= 1
+                
+                current_node.size = end - start
+                if current_node.size <= 0:
+                    current_node.is_valid = False
+                    current_node.offset = -1
+                    current_node.size = 0
+
+            kods_map.extend(header_nodes)
 
         valid_nodes.pop()
         return kods_map
@@ -274,3 +292,99 @@ class KodsArchiver:
                 abs_offset = header_obj.payload_offset + (raw_offset << header_obj.shift)
             offsets.append(abs_offset)
         return offsets
+
+
+    def analyze_offset_distribution(self, headers: list[memoryview], payload_length: int) -> None:
+        '''Generates visualizations for offset usage across all interchangeable headers.'''
+        all_offsets = []
+        
+        # 1. Collect every valid offset from every header
+        for header_idx, header_view in enumerate(headers):
+            if len(header_view) <= 8:
+                continue
+                
+            is_internal = True if header_idx == 0 else False
+            header_obj = self.parse_header(header_view, is_internal)
+            offsets = self._get_offsets(header_view, header_obj)
+            
+            # Ignore -1 (empty/invalid nodes)
+            valid_offsets = [off for off in offsets if off != -1]
+            all_offsets.extend(valid_offsets)
+
+        if not all_offsets:
+            print("No valid offsets found to analyze.")
+            return
+
+        # 2. Count references per exact offset
+        offset_counts = Counter(all_offsets)
+        unique_offsets = sorted(offset_counts.keys())
+        reference_counts = [offset_counts[off] for off in unique_offsets]
+
+        # 3. Create the Visualization Figure
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+        fig.canvas.manager.set_window_title('KODS Offset Analysis')
+
+        # --- Plot 1: Exact Reference Counts (Scatter/Stem) ---
+        # This shows EXACTLY which offsets are reused and how many times.
+        ax1.scatter(unique_offsets, reference_counts, color='#e74c3c', alpha=0.7, s=20)
+        ax1.vlines(unique_offsets, 0, reference_counts, color='#e74c3c', alpha=0.3)
+        ax1.set_title('Exact Offset Reference Counts (Cross-Header)')
+        ax1.set_ylabel('Number of References')
+        ax1.set_xlabel('Payload Offset (Bytes)')
+        ax1.grid(True, alpha=0.3)
+
+        # --- Plot 2: Spatial Density Histogram ---
+        # This shows WHERE in the payload the data is most heavily clustered.
+        bins = 100 # Adjust this to change the chunk size
+        ax2.hist(all_offsets, bins=bins, color='#3498db', edgecolor='black', alpha=0.7)
+        ax2.set_title(f'Data Density (Distribution across {bins} Payload Bins)')
+        ax2.set_ylabel('Total References in Bin')
+        ax2.set_xlabel('Payload Offset (Bytes)')
+        ax2.set_xlim(0, payload_length) # Lock to exact payload size
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
+    def visualize_kods_coverage_discrete(self, headers: list[memoryview], payload_length: int) -> None:
+        '''Visualizes the container coverage with unique colors for every file entry.'''
+        fig, ax = plt.subplots(figsize=(14, 8))
+        fig.canvas.manager.set_window_title('KODS Discrete Coverage Map')
+        
+        # Use tab20 colormap for high-contrast categorical coloring
+        cmap = cm.get_cmap('tab20')
+
+        for h_idx, header_view in enumerate(headers):
+            if len(header_view) <= 8:
+                continue
+                
+            # 1. Generate the map for THIS header using the per-header logic
+            node_map = self.get_kods_map([header_view]) 
+            valid_nodes = [n for n in node_map if n.is_valid and n.size > 0]
+            
+            # 2. Plot each node individually to give it a unique color
+            for i, node in enumerate(valid_nodes):
+                # i % 20 ensures we cycle through the distinct tab20 colors
+                node_color = cmap(i % 20)
+                
+                # (start, width), (y_base, height)
+                ax.broken_barh([(node.offset, node.size)], 
+                            (h_idx * 10, 8), 
+                            facecolors=node_color, 
+                            edgecolor='black', # Adds a thin line between adjacent files
+                            linewidth=0.5,
+                            alpha=0.9)
+
+        # 3. Formatting
+        ax.set_ylim(-5, len(headers) * 10 + 5)
+        ax.set_xlim(0, payload_length)
+        ax.set_xlabel('Payload Offset (Bytes)')
+        ax.set_ylabel('Header Index (Lane)')
+        ax.set_title('Discrete File Coverage: Every Block is a Unique Node Reference')
+        ax.grid(True, axis='x', linestyle='--', alpha=0.3)
+        
+        # Background "Dead Zone" indicator
+        ax.axvspan(0, payload_length, color='#f0f0f0', zorder=-1, label='Total Container Size')
+
+        plt.tight_layout()
+        plt.show()

@@ -158,9 +158,15 @@ class VfsCategoryProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.active_category: str | None = 'All'
+        self.show_hidden  = False
 
     def set_category(self, category: str):
         self.active_category = category
+        self.invalidateFilter()
+
+    def set_show_hidden(self, show: bool):
+        '''refreshes view with the hidden toggle'''
+        self.show_hidden = show
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
@@ -171,7 +177,7 @@ class VfsCategoryProxyModel(QSortFilterProxyModel):
         if not isinstance(node, VfsNode):
             return False
         
-        if getattr(node, 'is_hidden', False):
+        if not self.show_hidden and getattr(node, 'is_hidden', False):
             return False
 
         if self.active_category == 'All' or self.active_category is None:

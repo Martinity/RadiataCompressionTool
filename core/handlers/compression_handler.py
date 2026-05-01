@@ -441,12 +441,14 @@ class RadiCompressor():
             nonlocal pos, flags, bits_remaining
             if bits_remaining == 0: # fill flag LZSS8
                 if pos >= len(self.data):
-                    raise EOFError("Ran out of data  while reading flags")
+                    logger.warning("Failed to terminate before EOF. Bailing out")
+                    return 0
                 low = self.data[pos]
                 pos += 1
                 if self.mode.name == 'LZSS16': # fill flag LZSS16
                     if pos >= len(self.data):
-                        raise EOFError("Ran out of data while reading flags")
+                        logger.warning("Failed to terminate before EOF. Bailing out")
+                        return 0
                     high = self.data[pos]
                     pos += 1
                     flags = (high << 8) | low
@@ -476,7 +478,8 @@ class RadiCompressor():
 
             else: # reference
                 if pos + 2 > len(self.data):
-                    raise EOFError("Ran out of self.data for reference")
+                    logger.warning("Failed to terminate before EOF. Bailing out")
+                    return bytes(decompressed)
                 byte1 = self.data[pos]
                 byte2 = self.data[pos+1]
                 pos += 2

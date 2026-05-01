@@ -1,4 +1,4 @@
-from ui_core import MainWindow
+from ui.ui_core import MainWindow
 from core.dispatcher import Dispatcher
 import sys
 from PyQt6.QtWidgets import QApplication
