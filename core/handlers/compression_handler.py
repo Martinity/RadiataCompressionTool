@@ -49,50 +49,51 @@ class CompressorHandler(BaseHandler):
             chunk_view = self.raw_source[current_offset : current_offset + compressed_size + 16]
             compressor = RadiCompressor(chunk_view) # slice out header bytes for node
             inline_header = compressor.decompress(get_header=True)
-
-            decomp_name = self.handler_parent.name + ' decompressed'
-
             ext = next((ext for sig, ext in extension_dict.items() if inline_header[:len(sig)] == sig), '.bin')
+            
             node = VfsNode(
-                name=decomp_name,
+                name=f'{chunk_idx}',
                 offset=current_offset,
-                category=self.handler_parent.category,
+                category=getattr(self.handler_parent, 'category', 'Unknown'),
                 size=uncompressed_size,
                 header=inline_header,
                 extension=ext,
                 parent=root,
             )
             node.compressed_header = header
+
+            # hid = getattr(self.parent_node, 'target', None)
+            # mapped_hid = hid[0] if hid else None
+            # if mapped_hid:
+            #     header_idx = 1 if chunk_idx == 7 else chunk_idx + 1 # SLOT assignement logic from MIPS
+            #     new_target = mapped_hid[:-1] + (header_idx, )
+            #     node.target = [new_target]
+            #     node.extension = '.kods'
+
             root.append_child(node)
 
-            has_potential_bcb = self.raw_source[18:22] == b'1bcb'
-            if next_file == 0 and not has_potential_bcb:
-                break
-            if has_potential_bcb:
+            if inline_header[0:4] == b'1bcb': # bcb size + sector aligned to find next bcb
                 sector_size = 0x800
                 bcb_size = compressed_size + len(header)
                 aligned_size = (bcb_size + sector_size - 1) & ~(sector_size - 1)
                 current_offset += aligned_size
             else:
-                current_offset += next_file
+                current_offset += next_file if next_file > 0 else (compressed_size + 16)
+            
             chunk_idx += 1
         return root
 
     def get_raw_node(self, node: VfsNode) -> bytes:
         '''Return a specific raw node'''
-        if hasattr(node, 'compressed_header'):
-            compressed_size = int.from_bytes(node.compressed_header[4:8], 'little')
-        else:
-            logger.warning(f'No compressed header for {node.hierarchical_id_str} implement get header from parent')
+        if not hasattr(node, 'compressed_header'):
+            logger.warning(f'No compressed header found for {node.name}')
             return b''
         
+        compressed_size = int.from_bytes(node.compressed_header[4:8], 'little')
         compressed_view = self.raw_source[node.offset : node.offset + compressed_size + 16]
 
-        logger.debug(f'Starting decompression for file size {len(compressed_view)}')
         compressor = RadiCompressor(compressed_view)
-        decompressed_bytes = compressor.decompress()
-        logger.debug(f'Successfully finished decompressrion, new size {len(decompressed_bytes)}')
-        return decompressed_bytes
+        return compressor.decompress()
 
     def rebuild_node(self, root: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
         '''Compress the bytes back to SLZ/SLE'''
@@ -131,15 +132,16 @@ class CompressorHandler(BaseHandler):
         if not node.children:
             node = self.get_file_tree()
         for child in node.children:
-            mode = child.compressed_header[3]
-            compressed_size = int.from_bytes(child.compressed_header[4:8], 'little')
-            decompressed_size = int.from_bytes(child.compressed_header[8:12], 'little')
-            next_file = int.from_bytes(child.compressed_header[12:16] , 'little')
-            next_file_str = 'No Chained Files.' if not next_file else str(next_file)
-            ratio = compressed_size / decompressed_size
+            if len(child.compressed_header) == 16:
+                mode = child.compressed_header[3]
+                compressed_size = int.from_bytes(child.compressed_header[4:8], 'little')
+                decompressed_size = int.from_bytes(child.compressed_header[8:12], 'little')
+                next_file = int.from_bytes(child.compressed_header[12:16] , 'little')
+                next_file_str = 'No Chained Files.' if not next_file else str(next_file)
+                ratio = compressed_size / decompressed_size
 
-            logger.info(f'Compressed File Properties:\nMode:{mode} | Compressed File Size:{compressed_size} '
-                    f'| Decompressed File Size:{decompressed_size} | Offset to next chained file:{next_file_str} | Compression ratio={(ratio*100):.02f}%')
+                logger.info(f'Compressed File Properties:\nMode:{mode} | Compressed File Size:{compressed_size} '
+                        f'| Decompressed File Size:{decompressed_size} | Offset to next chained file:{next_file_str} | Compression ratio={(ratio*100):.02f}%')
 
     def execute_action(self, node: VfsNode, action_name: str) -> Optional[Any]:
         if action_name == 'Decompress':
@@ -149,6 +151,39 @@ class CompressorHandler(BaseHandler):
     
     def get_identity(self) -> str:
         return 'Compressed File'
+    
+    def get_buffer_data(self, node: VfsNode) -> memoryview:
+        '''Specialized extraction for composite buffer nodes.'''
+        target = node
+        if not hasattr(target, 'compressed_header'):
+            if node.parent and hasattr(node.parent, 'compressed_header'):
+                target = node.parent
+            else:
+                logger.error(f'Cannot extract buffer: No compression metadata {node.name}')
+                return memoryview(b'')
+            
+        continuous_buffer = bytearray()
+        current_offset = target.offset
+
+        while True:
+            header_view = self.raw_source[current_offset : current_offset + 16]
+            if len(header_view) < 16 or header_view[:3] not in [b'SLZ', b'SLE']:
+                break
+
+            header = bytes(header_view)
+            compressed_size = int.from_bytes(target.compressed_header[4:8], 'little')
+            next_file = int.from_bytes(header[12:16], 'little')
+
+            chunk_view = self.raw_source[current_offset : current_offset + compressed_size + 16]
+            compressor = RadiCompressor(chunk_view)
+            continuous_buffer.extend(compressor.decompress())
+
+            if next_file == 0:
+                break
+
+            current_offset += next_file
+
+        return memoryview(continuous_buffer)
     
 ###------------------------------------ Compressor ------------------------------------------###
         
@@ -214,7 +249,9 @@ class RadiCompressor():
         self.is_encrypted = target_is_encrypted
         self.is_final_payload = is_final_payload
 
-        # Auto-detection TODO in this section is for rebuilding
+        # Auto-detection.
+        # TODO in this section is for rebuilding. 
+        # Flags may need implementation depending on rebuild strategy
         if self.data[:3] == b'SLZ' or self.data[:3] == b'SLE': # Decompress
             self.mode = self.MODES.get(self.data[3], self.MODES[0])
             self.is_compressed = True
@@ -538,4 +575,4 @@ class RadiCompressor():
             mod_value = (mod_value + 0x03) & 0xFF
 
         updated = bytes(self.data[:2]) + b'Z' + bytes(self.data[3:16]) + bytes(unscrambled)
-        return memoryview(updated)
+        return updated

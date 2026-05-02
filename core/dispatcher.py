@@ -4,7 +4,7 @@ from pathlib import Path
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
 from core.workers import RebuildWorker
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any
 from PyQt6.QtCore import pyqtSignal, QObject
 
 if TYPE_CHECKING:
@@ -28,10 +28,10 @@ class Dispatcher(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self.vfs: Optional[VfsManager] = None
+        self.vfs: VfsManager | None = None
         self.tracker = ModTracker()
-        self.active_handler: Optional[BaseHandler] = None
-        self._rebuild_worker: Optional[RebuildWorker] = None
+        self.active_handler: BaseHandler | None = None
+        self._rebuild_worker: RebuildWorker | None = None
         # cache for editors to keep nodes open TODO
         self.editor_cache: dict[str, bytes] = {} # Format: [hid, bytes]
         self._setup_proxy_connections()
@@ -56,7 +56,7 @@ class Dispatcher(QObject):
     def __str__(self) -> str:
         return f"Dispatcher(active_handler={self.active_handler})"
 
-    def load_source(self, source: Union[Path, VfsNode]) -> list[VfsNode]:
+    def load_source(self, source: Path | VfsNode) -> list[VfsNode]:
         '''Get handler class -> VfsNode(s) -> VfsManager'''
         # Handler
         handler_class = Registry.get_handler(source)
@@ -84,29 +84,26 @@ class Dispatcher(QObject):
         '''Editors call this when submitting changes'''
         self.tracker.mark_modified(node, new_data)
 
-    def execute_node_action(self, node: VfsNode, action_name: str) -> None:
+    def execute_node_action(self, node: VfsNode, action_name: str) -> Any:
         '''Route action to format handler'''
         handler_class = Registry.get_handler(node)
         if not handler_class:
             logger.warning(f'No handler found for action "{action_name}" on {node.name}')
-            return
+            return None
 
         logger.debug(f'Routing "{action_name}" to {handler_class.__name__}')
         node_bytes = self.get_node_data(node)
 
-        header_bytes = []
-        if getattr(node, 'target', None) and self.vfs:
-            logger.debug(f'Action requires datacenter headers, resolving {len(node.target)} headers')
-            header_nodes = self.vfs.resolve_nodes(node.target, expansion_callback=self._expand_node)
-            header_bytes = [self.get_node_data(h) for h in header_nodes]
+        header_bytes = self._resolve_data_from_hid(getattr(node, 'target', None))
 
         with handler_class(node_bytes, node.parent) as temp_handler:
             if header_bytes and hasattr(temp_handler, 'datacenter_headers'):
                 temp_handler.datacenter_headers = header_bytes
             if hasattr(temp_handler, 'execute_action'):
-                temp_handler.execute_action(node, action_name)
+                return temp_handler.execute_action(node, action_name)
             else:
                 logger.warning(f'{handler_class.__name__} is missing execute_action')
+                return None
 
     def start_iso_rebuild(self, output_path: Path) -> None:
         if not self.active_handler or not self.vfs:
@@ -169,24 +166,23 @@ class Dispatcher(QObject):
 
     def _load_virtual(self, handler_class, node: VfsNode) -> list[VfsNode]:
         '''helper for loading virtual files, these files need to have passed through a physical handler first'''
+        if not self.vfs:
+            logger.warning('No physical layer detected.')
+            return []
+        
         container_bytes = self.get_node_data(node)
+        header_bytes = self._resolve_data_from_hid(getattr(node, 'target', None))
 
         with handler_class(container_bytes, node) as handler:
-            if getattr(node, 'target', None) and hasattr(handler, 'unpack_with_headers') and self.vfs:
-                logger.info(f'Datacenter unpack for {node.name} - resolving {len(node.target)} headers HID:{node.target}')
-                header_nodes = self.vfs.resolve_nodes(node.target, expansion_callback=self._expand_node)
-                header_bytes = [self.get_node_data(h) for h in header_nodes]
-                draft_root = handler.unpack_with_headers(node, header_bytes)
-            else:
-                draft_root = handler.get_file_tree()
+            if header_bytes and hasattr(handler, 'datacenter_headers'):
+                handler.datacenter_headers = header_bytes
+            draft_root = handler.get_file_tree()
                 
             identity = handler.get_identity()
             new_nodes = draft_root.children or [draft_root]
 
-            if self.vfs:
-                logger.debug(f'Registering {node.hierarchical_id_str} with VfsManager')
-                self.vfs.register_node(node)
-                self.vfs.insert_children(node, new_nodes)
+            self.vfs.register_node(node)
+            self.vfs.insert_children(node, new_nodes)
             logger.info(f'Inserted {len(new_nodes)} nodes from {node.name} ({identity})')
             return new_nodes   
         
@@ -214,10 +210,7 @@ class Dispatcher(QObject):
                 logger.debug(f'Repacking {parent.name} using {handler_class.__name__}')
 
                 parent_bytes = self.get_node_data(parent)
-                header_bytes = []
-                if getattr(parent, 'target', None) and self.vfs:
-                    header_nodes = self.vfs.resolve_nodes(parent.target, expansion_callback=self._expand_node)
-                    header_bytes = [self.get_node_data(h) for h in header_nodes]
+                header_bytes = self._resolve_data_from_hid(getattr(parent, 'target', None))
                 
                 with handler_class(parent_bytes, parent.parent) as handler:
                     if header_bytes and hasattr(handler, 'datacenter_headers'):
@@ -234,7 +227,7 @@ class Dispatcher(QObject):
     def _build_unwrap_chain(self, node: VfsNode) -> list[VfsNode]:
         '''helper for building the path to physical source'''
         chain: list[VfsNode] = []
-        current: Optional[VfsNode] = node
+        current: VfsNode | None = node
 
         while current:
             chain.append(current)
@@ -247,7 +240,7 @@ class Dispatcher(QObject):
         
         chain.reverse()
         return chain
-    
+
     def _unwrap_chain(self, chain: list[VfsNode]) -> bytes:
         '''helper to walk the path from the physical source to virtual requested file'''
         if self.active_handler is None:
@@ -266,39 +259,26 @@ class Dispatcher(QObject):
                 return b''
             with handler_class(current_bytes, container) as handler:
                 logger.debug(f'Unwrapping {target.name} from {container.name} via {handler_class.__name__}')
-                current_bytes = handler.get_raw_node(target)
+                hid = getattr(target, 'target', None)
+                mapped_hid = hid[0] if hid else []
+                if len(mapped_hid) > 2 and hasattr(handler, 'get_buffer_data'):
+                    current_bytes = handler.get_buffer_data(target).tobytes()
+                else:
+                    current_bytes = handler.get_raw_node(target)
 
         return current_bytes
-
-    def _handler_datacenter_unpack(self, node: VfsNode) -> None:
-        '''For unpacking nodes that need headers from datacenter'''
-        if not self.vfs or not node.target:
-            logger.warning(f'Cannot unpack datacenter headers for {node.name}')
-            return
-        
-        logger.info(f'Datacenter unpack requested for {node.name} - resolving {len(node.target)} headers')
-        header_nodes = self.vfs.resolve_nodes(node.target, expansion_callback=self._expand_node)
-        header_bytes = [self.get_node_data(h) for h in header_nodes]
-        for h in header_bytes:
-            logger.warning(f'{h}')
-        handler_class = Registry.get_handler(node)
-        if not handler_class:
-            return
-        container_bytes = self.get_node_data(node)
-        with handler_class(container_bytes, node.parent) as handler:
-            if hasattr(handler, 'unpack_with_headers'):
-                new_tree = handler.unpack_with_headers(node, header_bytes)
-            else:
-                logger.warning(f'{handler_class.__name__} missing unpack_with_headers')
-        
-        if self.vfs and new_tree.children:
-            for n in new_tree.children:
-                self.vfs.register_node(n, n.offset)
+    
+    def _resolve_data_from_hid(self, target_hids: list[tuple] | None) -> list[bytes]:
+        '''Getter for mapped HIDs'''
+        if not self.vfs or not target_hids:
+            return []
+        logger.debug(f'Resolving {len(target_hids)} datacenter headers.')
+        header_nodes = self.vfs.resolve_nodes(target_hids, expansion_callback=self._expand_node)
+        return [self.get_node_data(header) for header in header_nodes]
+    
     ###------------------------ Callback -----------------------###
     def _expand_node(self, parent_node: VfsNode) -> None:
         '''Callback for VfsManager to expand missing nodes'''
         if not self.vfs:
             return
         self.load_source(parent_node)
-
-    

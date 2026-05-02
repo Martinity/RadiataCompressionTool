@@ -88,7 +88,7 @@ class IsoHandler(BaseHandler):
             (2126, 2426, (5, 6, 0), 10),
         ]
         @classmethod
-        def get_target(cls, disk_index: int) -> list[tuple] | None:
+        def get_target(cls, disk_index: int) -> list[tuple[int,...]] | None:
             '''Return the datacenter header HID(s) for the datacenter target'''
             # Single datacenter header
             if disk_index in cls._TARGET_STATIC:

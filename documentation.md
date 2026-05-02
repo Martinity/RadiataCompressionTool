@@ -64,12 +64,11 @@ Used for: Pushing editor changes to ISO
 ## Current TODO list:
 
 - Improved naming pattern -> `/core/handlers/`
-- Code clean pass on dispatcher -> `/core/dispatcher.py`
-- Improve targeted offset melding or change strategy -> `/core/handlers/kods_handler.py`
-- Packed Compression parsing -> `/core/handlers/compression_handler.py`
+- Further investigate the composite Kods unpacking before deciding rebuild strategy -> `/core/handler/kods_handler.py` & `/core/handler/compressor_handler.py` & `/core/dispatcher'py`
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
+- Dataclass metadata instead of raw header for `compressed_header` in `VfsNode` -> `/core/node.py`
 - Improved ISO detection -> `/core/handlers/iso_handler.py`
-- Custom UI for hex editor -> `/ui/widgets/hex_editor.py`
+- Improved UI for hex editor -> `/ui/widgets/hex_editor.py`
 
 ## Future TODO list:
 

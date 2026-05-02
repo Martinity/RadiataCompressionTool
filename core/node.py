@@ -29,28 +29,29 @@ class VfsNode:
         hid: Tuple[int, ...] = (),
         target: Optional[list[tuple]] = None,
     ):
-        self.name = name                                # semantic name from overrides
-        self.category = category                        # semantic category derived from disk index
-        self.parent = parent                            # parent node (None = Root)
-        self.children: list[VfsNode] = []               # children node(s)
+        self.name = name                                    # semantic name from overrides
+        self.category = category                            # semantic category derived from disk index
+        self.parent = parent                                # parent node (None = Root)
+        self.children: list[VfsNode] = []                   # children node(s)
 
-        self.offset = offset                            # Relative offset into parent
-        self.size = size                                # Size of node in bytes (VirtualFile=disk[offset:offset+size])
-        self.target = target                            # Datacenter for the node
+        self.offset = offset                                # Relative offset into parent
+        self.size = size                                    # Size of node in bytes (VirtualFile=disk[offset:offset+size])
+        self.target: list[tuple[int,...]] | None = target   # Header HID for unpacking
 
-        self.header = header                            # raw header
-        self.extension = extension                      # extension from override
+        self.header = header                                # raw header
+        self.extension = extension                          # extension from override
+        self.compressed_header: bytes = b''                 # SLZ source header
 
-        self._id_path: Tuple[int, ...] = hid            # hierarchical id (root, sub, subsub)
+        self._id_path: Tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
 
-        self.status = NodeStatus.UNMODIFIED             # node state
-        self.pending_data: bytes | None = None          # cached data
+        self.status = NodeStatus.UNMODIFIED                 # node state
+        self.pending_data: bytes | None = None              # cached data
 
         # Flags; Useful for rebuild and UI
-        self.is_physical = False                        # Has physical address
-        self.is_unpacked = False                        # Kods
-        self.compressed_header: bytes = b''             # SLZ
-        self.is_hidden = False                          # Hide node in UI (file system related or null nodes by default)
+        self.is_physical = False                            # Has physical address
+        self.is_compressed = False                          # SLZ
+        self.is_unpacked = False                            # Static Kods
+        self.is_hidden = False                              # Hide node in UI (file system related or null nodes by default)
     
     def append_child(self, child: VfsNode):
         '''Allow children nodes'''
