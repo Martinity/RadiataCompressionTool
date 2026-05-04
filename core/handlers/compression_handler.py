@@ -16,6 +16,15 @@ logger = logging.getLogger(f'radiata.{__name__}')
                    supported_actions=('Decompress', 'Properties'))
 class CompressorHandler(BaseHandler):
     '''Wrapper for Compressor class'''
+
+    @dataclass(slots=True)
+    class SlzHeader:
+        magic: str
+        mode: int
+        compressed_size: int
+        decompressed_size: int
+        next_file_offset: int
+
     def __init__(self, source, parent):
         super().__init__(source)
         self.handler_parent = parent
@@ -41,26 +50,30 @@ class CompressorHandler(BaseHandler):
             if len(header_view) < 16 or header_view[:3] not in [b'SLZ', b'SLE']:
                 break
             
-            header = bytes(header_view)
-            compressed_size = int.from_bytes(header[4:8], 'little')
-            uncompressed_size = int.from_bytes(header[8:12], 'little')
-            next_file = int.from_bytes(header[12:16], 'little')
+            raw_header = bytes(header_view)
+            header_obj = self.SlzHeader(
+                magic='SLZ' if raw_header[:3] == b'SLZ' else 'SLE',
+                mode=raw_header[3],
+                compressed_size=int.from_bytes(raw_header[4:8], 'little'),
+                decompressed_size=int.from_bytes(raw_header[8:12], 'little'),
+                next_file_offset=int.from_bytes(raw_header[12:16], 'little')
+            )
 
-            chunk_view = self.raw_source[current_offset : current_offset + compressed_size + 16]
+            chunk_view = self.raw_source[current_offset : current_offset + header_obj.compressed_size + 16]
             compressor = RadiCompressor(chunk_view) # slice out header bytes for node
             inline_header = compressor.decompress(get_header=True)
             ext = next((ext for sig, ext in extension_dict.items() if inline_header[:len(sig)] == sig), '.bin')
             
             node = VfsNode(
-                name=f'{chunk_idx}',
+                name=f'{chunk_idx:04d}{ext}',
                 offset=current_offset,
                 category=getattr(self.handler_parent, 'category', 'Unknown'),
-                size=uncompressed_size,
+                size=header_obj.decompressed_size,
                 header=inline_header,
                 extension=ext,
                 parent=root,
             )
-            node.compressed_header = header
+            node.compressed_header = header_obj
 
             # hid = getattr(self.parent_node, 'target', None)
             # mapped_hid = hid[0] if hid else None
@@ -70,16 +83,17 @@ class CompressorHandler(BaseHandler):
             #     node.target = [new_target]
             #     node.extension = '.kods'
 
-            root.append_child(node)
 
             if inline_header[0:4] == b'1bcb': # bcb size + sector aligned to find next bcb
                 sector_size = 0x800
-                bcb_size = compressed_size + len(header)
+                bcb_size = header_obj.compressed_size + len(raw_header)
                 aligned_size = (bcb_size + sector_size - 1) & ~(sector_size - 1)
                 current_offset += aligned_size
+                node.is_banked = True
             else:
-                current_offset += next_file if next_file > 0 else (compressed_size + 16)
+                current_offset += header_obj.next_file_offset if header_obj.next_file_offset > 0 else (header_obj.compressed_size + 16)
             
+            root.append_child(node)
             chunk_idx += 1
         return root
 
@@ -89,7 +103,7 @@ class CompressorHandler(BaseHandler):
             logger.warning(f'No compressed header found for {node.name}')
             return b''
         
-        compressed_size = int.from_bytes(node.compressed_header[4:8], 'little')
+        compressed_size = node.compressed_header.compressed_size
         compressed_view = self.raw_source[node.offset : node.offset + compressed_size + 16]
 
         compressor = RadiCompressor(compressed_view)
@@ -102,9 +116,8 @@ class CompressorHandler(BaseHandler):
             is_final_payload = i == len(root.children) - 1
             if child in staged_nodes: # Modified child
                 raw_bytes = child.pending_data
-                origin_header = child.compressed_header
-                target_mode = origin_header[3]
-                is_encrypted = origin_header[:3] == b'SLE'
+                target_mode = child.compressed_header.mode
+                is_encrypted = child.compressed_header.magic == 'SLE'
 
                 if raw_bytes[2:6] == b'1bcb':
                     is_final_payload = True # mark (is_final_payload = true) so (next_file_offset = 0). There may be more payloads
@@ -116,8 +129,8 @@ class CompressorHandler(BaseHandler):
                 new_compressed_file += compressed_output + (b'\00' * padding_size)
 
             else: # Unmodified child, TODO check 1bcb for unmodified nodes I am struggling to find good samples
-                compressed_size = int.from_bytes(child.compressed_header[4:8], 'little')
-                next_file_offset = int.from_bytes(child.compressed_header[12:16], 'little')
+                compressed_size = child.compressed_header.compressed_size
+                next_file_offset = child.compressed_header.decompressed_size
                 chunk_size = next_file_offset if next_file_offset > 0 else (compressed_size + 16)
                 original_chunk = bytearray(self.raw_source[child.offset:child.offset + chunk_size])
                 if is_final_payload and next_file_offset != 0:
@@ -132,11 +145,11 @@ class CompressorHandler(BaseHandler):
         if not node.children:
             node = self.get_file_tree()
         for child in node.children:
-            if len(child.compressed_header) == 16:
-                mode = child.compressed_header[3]
-                compressed_size = int.from_bytes(child.compressed_header[4:8], 'little')
-                decompressed_size = int.from_bytes(child.compressed_header[8:12], 'little')
-                next_file = int.from_bytes(child.compressed_header[12:16] , 'little')
+            if child.compressed_header:
+                mode = child.compressed_header.mode
+                compressed_size = child.compressed_header.compressed_size
+                decompressed_size = child.compressed_header.decompressed_size
+                next_file = child.compressed_header.next_file_offset
                 next_file_str = 'No Chained Files.' if not next_file else str(next_file)
                 ratio = compressed_size / decompressed_size
 

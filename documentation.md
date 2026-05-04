@@ -63,21 +63,20 @@ Used for: Pushing editor changes to ISO
 
 ## Current TODO list:
 
-- Improved naming pattern -> `/core/handlers/`
+- Temp file scanning for SLZ / Kods headers with statistics outputting -> `/core/handler/compressor_handler.py` & `/core/handler/kods_handler.py`
+- Better File statistics / display -> `/core/handlers/`
 - Further investigate the composite Kods unpacking before deciding rebuild strategy -> `/core/handler/kods_handler.py` & `/core/handler/compressor_handler.py` & `/core/dispatcher'py`
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
-- Dataclass metadata instead of raw header for `compressed_header` in `VfsNode` -> `/core/node.py`
 - Improved ISO detection -> `/core/handlers/iso_handler.py`
 - Improved UI for hex editor -> `/ui/widgets/hex_editor.py`
+- Standardized UI elements via theme -> `/ui/style_sheets.py` & `/ui/`
+- node import -> `/core/handlers/`
+- node export -> `/core/handlers/`
 
 ## Future TODO list:
 
 - Smart cache for editors -> `/core/dispatcher.py`
-- cleanup and revise core code (It is a mess from different ideas) -> `/core/`
 - .pk support -> `/core/handler/iso_handler.py` & `/core/extension_overrides.py`
-- Clean up semantic names for UI readability -> `/core/name_overrides.py`
-- Separate ui_core/models as needed/prefered -> `/ui_core.py` & `/ui/tree_model.py`
-- Search for tree view -> `/ui_core.py`
 - UI improvements (settings, standardized theme.......)
 
 # Rough Roadmap

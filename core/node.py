@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum, auto
-from typing import Optional, Tuple
+from typing import Tuple
 from PyQt6.QtCore import pyqtSignal, QObject
 
 import logging
@@ -19,15 +19,15 @@ class VfsNode:
     '''Pure Data Container. All files whether iso, kods, or raw are all nodes. '''
     def __init__(
         self, 
-        name: Optional[str] = 'Undefined', 
+        name: str = 'Undefined', 
         category: str = 'Unknown', 
         offset: int = 0, 
         size: int = 0, 
         header: bytes = b'', 
         extension: str = '.bin', 
-        parent: Optional[VfsNode] = None, 
+        parent: VfsNode | None = None,
         hid: Tuple[int, ...] = (),
-        target: Optional[list[tuple]] = None,
+        target: list[Tuple[int, ...]] | None = None,
     ):
         self.name = name                                    # semantic name from overrides
         self.category = category                            # semantic category derived from disk index
@@ -36,11 +36,11 @@ class VfsNode:
 
         self.offset = offset                                # Relative offset into parent
         self.size = size                                    # Size of node in bytes (VirtualFile=disk[offset:offset+size])
-        self.target: list[tuple[int,...]] | None = target   # Header HID for unpacking
+        self.target: list[Tuple[int,...]] | None = target   # Header HID for unpacking
 
         self.header = header                                # raw header
         self.extension = extension                          # extension from override
-        self.compressed_header: bytes = b''                 # SLZ source header
+        self.compressed_header: object = None               # SLZ source header
 
         self._id_path: Tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
 
@@ -50,6 +50,7 @@ class VfsNode:
         # Flags; Useful for rebuild and UI
         self.is_physical = False                            # Has physical address
         self.is_compressed = False                          # SLZ
+        self.is_banked = False
         self.is_unpacked = False                            # Static Kods
         self.is_hidden = False                              # Hide node in UI (file system related or null nodes by default)
     
@@ -148,7 +149,7 @@ class VfsManager(QObject):
         '''Get physical disk offsets'''
         return self.physical_offsets.get(node, 0)
 
-    def get_node_by_id(self, hid: Tuple[int, ...]) -> Optional[VfsNode]:
+    def get_node_by_id(self, hid: Tuple[int, ...]) -> VfsNode | None:
         '''Node lookup for known registered nodes.'''
         return self.nodes_by_id.get(hid)
     
@@ -165,7 +166,7 @@ class VfsManager(QObject):
             logger.warning(f'No nodes resolved for {hids}')
         return resolved
 
-    def _resolve_single_hid(self, hid: Tuple[int, ...], expansion_callback=None) -> Optional[VfsNode]:
+    def _resolve_single_hid(self, hid: Tuple[int, ...], expansion_callback=None) -> VfsNode | None:
         '''Recursively expand physical -> target'''
         if hid in self.nodes_by_id:
             return self.nodes_by_id[hid]
@@ -190,7 +191,7 @@ class VfsManager(QObject):
         logger.debug(f'Resolved {current.name} from {hid}')
         return current
 
-    def _find_child_by_path(self, parent: VfsNode, target_path: Tuple[int,...]) -> Optional[VfsNode]:
+    def _find_child_by_path(self, parent: VfsNode, target_path: Tuple[int,...]) -> VfsNode | None:
         for child in parent.children:
             if child.hierarchical_id == target_path:
                 return child

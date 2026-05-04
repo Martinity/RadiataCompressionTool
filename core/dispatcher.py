@@ -170,6 +170,10 @@ class Dispatcher(QObject):
             logger.warning('No physical layer detected.')
             return []
         
+        if node.children: # Prevent duplicate extractions
+            logger.debug(f'Node {node.name} is already expanded.')
+            return node.children
+        
         container_bytes = self.get_node_data(node)
         header_bytes = self._resolve_data_from_hid(getattr(node, 'target', None))
 

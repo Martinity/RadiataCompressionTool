@@ -15,7 +15,7 @@ class VfsTreeModel(QAbstractItemModel):
         super().__init__(*args, **kwargs)
         self.vfs_manager = vfs_manager
         self.root_node = self.vfs_manager.root
-        self.columns = ["ID", "File Name", "Size", "Extension"]
+        self.columns = ["ID", "File Name", "Size"]
 
         # Catch VfsManager signals for updating tree
         self.vfs_manager.insert_start.connect(self.start_insert)
@@ -86,10 +86,7 @@ class VfsTreeModel(QAbstractItemModel):
                 return node.name
             if col == 2: 
                 return self._human_readable_size(node.size)
-            if col == 3: 
-                return node.extension
-
-        # Critical: Return the node itself if the context menu asks for it!
+            
         if role == Qt.ItemDataRole.UserRole:
             return node
 
@@ -154,11 +151,37 @@ class VfsCategoryModel(QStringListModel):
 
 ###---------------------------------------------- Category Proxy -------------------------------------------###
 
-class VfsCategoryProxyModel(QSortFilterProxyModel):
+class TreeProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.active_category: str | None = 'All'
+        self.active_category: str = 'All'
         self.show_hidden  = False
+        self.search_query = ''
+        self.setRecursiveFilteringEnabled(True)
+        self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        '''Custom sorting logic for columns'''
+        left_node: VfsNode = self.sourceModel().data(left, Qt.ItemDataRole.UserRole)
+        right_node: VfsNode = self.sourceModel().data(right, Qt.ItemDataRole.UserRole)
+
+        if not left_node or not right_node:
+            return super().lessThan(left, right)
+        
+        col = left.column()
+
+        if col == 0:
+            try:
+                left_parts = list(left_node.hierarchical_id)
+                right_parts = list(right_node.hierarchical_id)
+                return left_parts < right_parts
+            except (ValueError, AttributeError):
+                return left_node.hierarchical_id < right_node.hierarchical_id
+        
+        if col == 2:
+            return left_node.size < right_node.size
+        
+        return super().lessThan(left, right)
 
     def set_category(self, category: str):
         self.active_category = category
@@ -169,18 +192,27 @@ class VfsCategoryProxyModel(QSortFilterProxyModel):
         self.show_hidden = show
         self.invalidateFilter()
 
+    def set_search_query(self, query: str):
+        self.search_query = query.lower().strip()
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
         index = self.sourceModel().index(source_row, 0 , source_parent)
         node = index.data(Qt.ItemDataRole.UserRole)
 
-        from core.node import VfsNode
-        if not isinstance(node, VfsNode):
+        if not node:
             return False
         
         if not self.show_hidden and getattr(node, 'is_hidden', False):
             return False
 
-        if self.active_category == 'All' or self.active_category is None:
-            return True
+        if self.active_category != 'All':
+            if getattr(node, 'category', None) != self.active_category:
+                return False
         
-        return node.category == self.active_category
+        if self.search_query:
+            node_name = getattr(node, 'name', '')
+            if self.search_query not in node_name.lower():
+                return False
+        
+        return True

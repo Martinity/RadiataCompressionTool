@@ -147,9 +147,10 @@ class IsoHandler(BaseHandler):
             category: str = self.FileCategories.get_category(disk_index)
             semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
             target: list[tuple] | None = self.DatacenterTargets.get_target(disk_index)
+            ext = '.kods' if target else ext
 
             node = VfsNode(
-                name=semantic_name,
+                name=f'{semantic_name}{ext}',
                 category=category,
                 offset=offset,
                 size=(entry['size'] * self.params.sector_size),

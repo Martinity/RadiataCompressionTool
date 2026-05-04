@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings
+from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer, QEvent
 from PyQt6.QtWidgets import QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QListWidget, QHBoxLayout, QListWidgetItem
-from PyQt6.QtWidgets import QProgressBar, QTextEdit
-from PyQt6.QtGui import QAction, QCloseEvent
+from PyQt6.QtWidgets import QProgressBar, QTextEdit, QLineEdit
+from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent
 from pathlib import Path
 from core.node import VfsNode, ModTracker
 from core.dispatcher import Dispatcher
@@ -11,7 +11,7 @@ from core.registry import Registry
 from core.resolver import ActionResolver
 from core.contracts import BaseEditor
 from plugins.logger import LoggingWindow
-from ui.tree_model import VfsCategoryProxyModel, VfsCategoryModel, VfsTreeModel
+from ui.tree_model import TreeProxyModel, VfsCategoryModel, VfsTreeModel
 from ui.style_sheets import DARK_STYLESHEET
 from plugins.hex_editor import HexEditorWidget
 
@@ -204,26 +204,38 @@ class WorkspaceWidget(QWidget):
 
 ###-------------------------------------------- Workspace Signals -------------------------###
 
-class WorkspaceController:
+class WorkspaceController(QObject):
     '''Handles all signals and logic for the workspace'''
     def __init__(self, workspace: WorkspaceWidget, dispatcher: Dispatcher, tracker: ModTracker) -> None:
+        super().__init__(parent=workspace)
         self.view = workspace
         self.dispatcher = dispatcher
         self.tracker = tracker
+        self.tree_model = None
+        self.proxy_model = None
+
+        # Setup Invisible Search
+        self.search_buffer = ''
+        self.search_timer = QTimer(self)
+        self.search_timer.setInterval(1500)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.timeout.connect(self.clear_search_buffer)
 
         # Connect tracker state
         self.dispatcher.tracking_update.connect(self.on_tracking_update)
 
+
     def init_workspace(self, root_node: VfsNode) -> None:
-        source_model = VfsTreeModel(self.dispatcher.vfs)
-        self.category_proxy_model = VfsCategoryProxyModel()
-        self.category_proxy_model.setSourceModel(source_model)
+        self.tree_model = VfsTreeModel(self.dispatcher.vfs)
+        self.proxy_model = TreeProxyModel()
+        self.proxy_model.setSourceModel(self.tree_model)
 
-        self.view.tree_view.setModel(self.category_proxy_model)
-
-        self.tree_model = source_model
-
+        self.view.tree_view.setModel(self.proxy_model)
         self.view.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        self.view.tree_view.setSortingEnabled(True)
+        self.view.tree_view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.view.tree_view.installEventFilter(self)
 
         # prevent duplicate signals
         try:
@@ -251,18 +263,18 @@ class WorkspaceController:
 
     def handle_category_select(self, index: QModelIndex) -> None:
         selected_category = self.view.category_model.data(index, Qt.ItemDataRole.DisplayRole)
-        if self.category_proxy_model:
-            self.category_proxy_model.set_category(selected_category)
+        if self.proxy_model:
+            self.proxy_model.set_category(selected_category)
         self.view.tree_view.expandAll()
         logger.info(f'Filtering by: {selected_category}')
 
     def handle_tree_select(self, current: QModelIndex, previous: QModelIndex) -> None:
         if not current.isValid(): 
             return
-        if not self.category_proxy_model:
+        if not self.proxy_model:
             return
         
-        source_index = self.category_proxy_model.mapToSource(current)
+        source_index = self.proxy_model.mapToSource(current)
         node = source_index.data(Qt.ItemDataRole.UserRole)
         if node:
             logger.debug(f'Selected: {current.data()}')
@@ -271,14 +283,14 @@ class WorkspaceController:
                 self.launch_editor(node, supported_profiles)
 
     def handle_context_menu(self, position) -> None:
-        if not self.category_proxy_model:
+        if not self.proxy_model:
             return
         
         proxy_index = self.view.tree_view.indexAt(position)
         if not proxy_index.isValid(): 
             return
 
-        source_index = self.category_proxy_model.mapToSource(proxy_index)
+        source_index = self.proxy_model.mapToSource(proxy_index)
         node = source_index.data(Qt.ItemDataRole.UserRole)
         if not node: 
             return
@@ -297,6 +309,14 @@ class WorkspaceController:
         menu.addSeparator()
 
         supported_actions = ActionResolver.get_supported_actions(node)
+        priority = {
+            'Decompress': 0,
+            'Unpack': 1,
+            'Export': 2,
+            'Properties': 10,
+        }
+        supported_actions.sort(key=lambda x: priority.get(x, 5))
+
         for action_name in supported_actions:
             action = menu.addAction(action_name)
             action.triggered.connect(lambda checked=False, a=action_name, n=node: self.route_action(n, a))
@@ -322,12 +342,34 @@ class WorkspaceController:
         if action_name in ('Unpack', 'Decompress'): # Type 1: produce new nodes
             new_nodes = self.dispatcher.load_source(node)
 
-            if new_nodes and self.tree_model and self.category_proxy_model:
+            if new_nodes and self.tree_model and self.proxy_model:
                 source_index = self.tree_model.index_for_node(node)
-                proxy_idx = self.category_proxy_model.mapFromSource(source_index)
+                proxy_idx = self.proxy_model.mapFromSource(source_index)
                 self.view.tree_view.expand(proxy_idx)
         else: # Type 2: info / editor actions
             self.dispatcher.execute_node_action(node, action_name)
+
+    def eventFilter(self, obj: QObject, event: QKeyEvent) -> bool:
+        if obj is self.view.tree_view and event.type() == QEvent.Type.KeyPress:
+            key_event: QKeyEvent = event
+            if key_event.key() == Qt.Key.Key_Escape:
+                self.search_buffer = ''
+                self.proxy_model.set_search_query('')
+                self.search_timer.stop()
+                return True
+            
+            text = key_event.text()
+            if text and text.isprintable():
+                self.search_buffer += text
+                self.proxy_model.set_search_query(self.search_buffer)
+                self.view.tree_view.expandAll()
+                self.search_timer.start()
+                return True
+        return super().eventFilter(obj, event)
+    
+    def clear_search_buffer(self) -> None:
+        '''Clears the search buffer but not the category proxy model. To reset proxy "Esc" in eventFilter'''
+        self.search_buffer = ''
 
     def update_review_bar_visibility(self) -> None:
         '''Toggle the bar if there are modified nodes'''
@@ -571,5 +613,5 @@ class MainMenuBar:
 
     def _handle_toggle_hidden(self, checked: bool) -> None:
         '''Pass the toggle signal to the proxy model'''
-        if hasattr(self.window.controller, 'category_proxy_model'):
-            self.window.controller.category_proxy_model.set_show_hidden(checked)
+        if hasattr(self.window.controller, 'proxy_model'):
+            self.window.controller.proxy_model.set_show_hidden(checked)

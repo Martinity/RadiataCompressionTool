@@ -17,7 +17,7 @@ logger = logging.getLogger(f'radiata.{__name__}')
 @Registry.register(
     name='Kods Archiver',
     extensions=('.kods', '.kods_composite'),
-    supported_actions=('Properties', 'Unpack'))
+    supported_actions=('Unpack', 'Properties'))
 class KodsHandler(BaseHandler):
     '''Wrapper for Kods archiver class'''
     def __init__(self, source: bytes, parent: VfsNode, datacenter_headers: list[bytes] | None = None) -> None:
@@ -64,7 +64,7 @@ class KodsHandler(BaseHandler):
             
             header_bytes = bytes(self.payload_view[meta.offset : meta.offset + 8])
             ext = next((ext for sig, ext in extensions.items() if header_bytes.startswith(sig)), '.bin')
-            name = f'{meta.node_index:03d}' if is_internal else f'Entry {meta.node_index:03d}'
+            name = f'{meta.node_index:04d}{ext}' if is_internal else f'Entry {meta.node_index:02d}{ext}'
 
             node = VfsNode(
                 name=name,
@@ -203,7 +203,7 @@ class KodsArchiver:
             if is_internal:
                 valid_nodes.append(self.FileNodeMeta(-1, -1, self.payload_length, 0, False)) # EOF sentinel
             else: # Boundary not yet known for datacenter headers 1-9
-                valid_nodes.append(self.FileNodeMeta(-1, -1, -1, 0, False))
+                valid_nodes.append(self.FileNodeMeta(-1, -1, -1, 0, True))
 
             for current_node, next_node in zip(valid_nodes, valid_nodes[1:]): # Calculate valid node sizes
                 if current_node.offset == next_node.offset:
