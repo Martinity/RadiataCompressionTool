@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit, QWidget
-from PyQt6.QtGui import QTextCursor, QColor, QFont
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt6.QtWidgets import QGridLayout, QPushButton, QPlainTextEdit, QWidget
+from PyQt6.QtGui import QTextCursor, QColor
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt
 
 import logging
 
@@ -41,21 +41,23 @@ class LoggingWindow(QWidget):
         super().__init__(parent)
 
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName('LogView')
         self.log_view.setReadOnly(True)
         self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.log_view.setFont(QFont('Courier New', 9))
-        self.log_view.setStyleSheet('QPlainTextEdit {background-color: #1e1e1e; color: #dcdcdc;}')
 
-        toolbar = QHBoxLayout()
-        clear_button = QPushButton('Clear Log')
-        clear_button.clicked.connect(self.log_view.clear)
-        toolbar.addWidget(clear_button)
-        toolbar.addStretch()
+        self.clear_button = QPushButton('Clear')
+        self.clear_button.setObjectName('FloatClearButton')
+        self.clear_button.clicked.connect(self.log_view.clear)
 
-        layout = QVBoxLayout(self)
+        layout = QGridLayout(self)
         layout.setContentsMargins(0,0,0,0)
-        layout.addLayout(toolbar)
-        layout.addWidget(self.log_view)
+        layout.addWidget(self.log_view, 0, 0)
+
+        layout.addWidget(
+            self.clear_button,
+            0,0,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight
+        )
 
     def __repr__(self) -> str:
         lines = self.log_view.document().lineCount()
@@ -68,13 +70,13 @@ class LoggingWindow(QWidget):
     def append_log(self, message: str, level: int):
         '''Slot gets logs from QtLogHandler'''
         colors = {
-            logging.DEBUG: "#7CFB41",
-            logging.INFO: "#ffffff",
-            logging.WARNING: "#ffaa55",
-            logging.ERROR: "#ff5555",
-            logging.CRITICAL: "#ff0000"
+            logging.DEBUG: "#7f6df2",
+            logging.INFO: "#dcddde",
+            logging.WARNING: "#ffaa33",
+            logging.ERROR: "#ff3333",
+            logging.CRITICAL: "#990000"
         }
-        color = colors.get(level, "#ffffff")
+        color = colors.get(level, "#dcddde")
 
         cursor = self.log_view.textCursor()
         cursor.beginEditBlock()

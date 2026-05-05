@@ -24,7 +24,7 @@ class HexEditorWidget(BaseEditor):
 
         # Toolbar (Same as before)
         self.toolbar = QWidget()
-        self.toolbar.setStyleSheet("background-color: #333333; border-bottom: 1px solid #3c3c3c;")
+        self.toolbar.setObjectName('EditorToolbar')
         tool_layout = QHBoxLayout(self.toolbar)
         tool_layout.setContentsMargins(10, 5, 10, 5)
 
@@ -40,16 +40,9 @@ class HexEditorWidget(BaseEditor):
 
         # The New Table View
         self.table_view = QTableView()
+        self.table_view.setObjectName('HexView')
         self.table_view.setFont(QFont('Courier New', 10))
-        self.table_view.setStyleSheet("""
-            QTableView {
-                background-color: #1e1e1e; 
-                color: #dcdcdc; 
-                border: none;
-                gridline-color: #333333;
-            }
-        """)
-        
+
         # Hide standard headers to look like a clean hex editor
         self.table_view.horizontalHeader().setVisible(False)
         self.table_view.verticalHeader().setVisible(False)
@@ -69,10 +62,13 @@ class HexEditorWidget(BaseEditor):
         self.table_view.setModel(self.model)
 
         # Format column widths
+        h_header = self.table_view.horizontalHeader()
+        h_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.table_view.setColumnWidth(0, 80) # Offset
         for i in range(1, 17):
-            self.table_view.setColumnWidth(i, 25) # Hex cells (narrow)
-        self.table_view.setColumnWidth(17, 150) # ASCII dump
+            h_header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed) # Hex cells (narrow)
+            self.table_view.setColumnWidth(i, 25)
+        h_header.setSectionResizeMode(17, QHeaderView.ResizeMode.Stretch) # ASCII dump 
 
         logger.debug(f"Loaded {node.name} into Hex Editor Table.")
 

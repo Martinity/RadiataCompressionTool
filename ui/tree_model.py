@@ -212,7 +212,8 @@ class TreeProxyModel(QSortFilterProxyModel):
         
         if self.search_query:
             node_name = getattr(node, 'name', '')
-            if self.search_query not in node_name.lower():
+            if (self.search_query not in node_name.lower() and 
+            self.search_query not in getattr(node, 'hierarchical_id_str', '').lower()):
                 return False
         
         return True

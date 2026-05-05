@@ -56,6 +56,7 @@ Used for: Hex View.
 #### 3. Data Commit (Rebuilding ISO)
 Used for: Pushing editor changes to ISO
 ...
+
 ### Rebuild:
 **Recursion** Post order
 **Files** Front to back
@@ -69,12 +70,14 @@ Used for: Pushing editor changes to ISO
 - Setup Asynchronous worker `QThreads` -> `/core/workers.py`
 - Improved ISO detection -> `/core/handlers/iso_handler.py`
 - Improved UI for hex editor -> `/ui/widgets/hex_editor.py`
-- Standardized UI elements via theme -> `/ui/style_sheets.py` & `/ui/`
 - node import -> `/core/handlers/`
 - node export -> `/core/handlers/`
+- Proper Status Logging for rebuild -> `/core/handlers/iso_handler.py`
+- Saved settings json -> `/ui/`
 
 ## Future TODO list:
 
+- Stagin/Commiting Menu improvements -> `/ui/ui_core.py`
 - Smart cache for editors -> `/core/dispatcher.py`
 - .pk support -> `/core/handler/iso_handler.py` & `/core/extension_overrides.py`
 - UI improvements (settings, standardized theme.......)

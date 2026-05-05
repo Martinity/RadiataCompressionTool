@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer, QEvent
-from PyQt6.QtWidgets import QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QListWidget, QHBoxLayout, QListWidgetItem
-from PyQt6.QtWidgets import QProgressBar, QTextEdit, QLineEdit
-from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent
+from PyQt6.QtWidgets import (
+    QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, 
+    QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QListWidget, 
+    QHBoxLayout, QListWidgetItem, QProgressBar, QTextEdit, QHeaderView
+)
+from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QShortcut, QKeySequence
 from pathlib import Path
 from core.node import VfsNode, ModTracker
 from core.dispatcher import Dispatcher
@@ -12,7 +15,7 @@ from core.resolver import ActionResolver
 from core.contracts import BaseEditor
 from plugins.logger import LoggingWindow
 from ui.tree_model import TreeProxyModel, VfsCategoryModel, VfsTreeModel
-from ui.style_sheets import DARK_STYLESHEET
+from ui.style_sheet import DarkTheme, ThemeManager
 from plugins.hex_editor import HexEditorWidget
 
 import logging
@@ -25,8 +28,10 @@ class MainWindow(QMainWindow):
         super().__init__(parent=None)
         self.dispatcher = dispatcher
         self.settings = QSettings('RadiataModding', 'Tool')
+        self.current_theme = DarkTheme
+        self._setup_zoom_shortcuts()
 
-        # Setup View # TODO definde how the tracker is passed
+        # Setup View
         self.stack = QStackedWidget()
         self.welcome_page = WelcomePage()
         self.workspace_page = WorkspaceWidget()
@@ -47,18 +52,24 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.workspace_page)
         self.stack.addWidget(self.staging_page)
         self.stack.addWidget(self.rebuild_page)
-        self.setStyleSheet(DARK_STYLESHEET)
+        self.adjust_zoom(0) # Initialize the style sheet via font, probably be a scuffy way to do this
         self.setWindowTitle('Radiata Modding Tool 2.0 Alpha')
         self.resize(1400, 900)
     
     def _setup_statusbar(self) -> None:
         self.statusBar().showMessage('Ready', 3000)
 
+    def _setup_zoom_shortcuts(self):
+        QShortcut(QKeySequence('Ctrl+='), self).activated.connect(lambda: self.adjust_zoom(1))
+        QShortcut(QKeySequence('Ctrl++'), self).activated.connect(lambda: self.adjust_zoom(1))
+        QShortcut(QKeySequence('Ctrl+-'), self).activated.connect(lambda: self.adjust_zoom(-1))
+
     def _connect_signals(self) -> None:
         '''Only for main window state signals'''
         self.welcome_page.request_open.connect(self.attempt_load_iso)
         self.workspace_page.btn_review.clicked.connect(lambda: self.stack.setCurrentWidget(self.staging_page))
         
+        self.staging_page.request_workspace.connect(lambda: self.stack.setCurrentIndex(1))
         self.dispatcher.rebuild_requested.connect(self.start_rebuild)
 
         self.dispatcher.rebuild_progress.connect(self.rebuild_page.update_progress)
@@ -70,10 +81,21 @@ class MainWindow(QMainWindow):
         geometry = self.settings.value('geometry')
         if geometry:
             self.restoreGeometry(geometry)
+        if h_state := self.settings.value('h_splitter'):
+            self.workspace_page.h_splitter.restoreState(h_state)
+        if v_state := self.settings.value('v_splitter'):
+            self.workspace_page.v_splitter.restoreState(v_state)
+
+    def adjust_zoom(self, delta: int):
+        new_css = ThemeManager.get_theme_with_zoom(self.current_theme, delta)
+        self.setStyleSheet(new_css)
+        if app := QApplication.instance():
+            app.setStyleSheet(new_css)
+        logger.debug(f'Zoom Adjusted (Font size set to: {ThemeManager.current_font_size})')
     
     def attempt_load_iso(self, path: Path) -> None:
-        self.statusBar().showMessage(f'Loading {Path(path).name}')
-        result = self.dispatcher.load_source(Path(path))
+        self.statusBar().showMessage(f'Loading {path.name}')
+        result = self.dispatcher.load_source(path)
         if result:
             root_node = result[0] if isinstance(result, (list, tuple)) else result
             self.controller.init_workspace(root_node)
@@ -117,9 +139,11 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage('Rebuild Failed', 5000)
             QMessageBox.critical(self, 'Build Failed', message)
-            
+
     def closeEvent(self, event: QCloseEvent | None) -> None:
         self.settings.setValue('geometry', self.saveGeometry())
+        self.settings.setValue('h_splitter', self.workspace_page.h_splitter.saveState())
+        self.settings.setValue('v_splitter', self.workspace_page.v_splitter.saveState())
         return super().closeEvent(event)
 
 ###------------------------------------------ Workspace UI -------------------------------------###
@@ -133,7 +157,6 @@ class WorkspaceWidget(QWidget):
 
     def _init_views(self) -> None:
         self.category_view = QListView()
-        self.category_view.setAlternatingRowColors(True)
 
         self.category_model = VfsCategoryModel()
         self.category_model.setStringList(self.category_model.categories)
@@ -141,7 +164,6 @@ class WorkspaceWidget(QWidget):
 
         self.tree_view = QTreeView()
         self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree_view.setAlternatingRowColors(True)
         self.tree_view.setUniformRowHeights(True)
 
         self.hex_editor = HexEditorWidget()
@@ -158,15 +180,18 @@ class WorkspaceWidget(QWidget):
         self.h_splitter.addWidget(self.category_view)
         self.h_splitter.addWidget(self.tree_view)
         self.h_splitter.addWidget(self.hex_editor)
-        self.h_splitter.setSizes([180, 700, 650])
-        self.h_splitter.setStretchFactor(1, 2)
+
+        self.h_splitter.setStretchFactor(0, 1)
+        self.h_splitter.setStretchFactor(1, 3)
+        self.h_splitter.setStretchFactor(2, 3)
 
         # Vertical split: Main area | Log
         self.v_splitter = QSplitter(Qt.Orientation.Vertical)
         self.v_splitter.addWidget(self.h_splitter)
         self.v_splitter.addWidget(self.log_console)
-        self.v_splitter.setSizes([650,250])
-        self.v_splitter.setStretchFactor(0, 1)
+
+        self.v_splitter.setStretchFactor(0, 4)
+        self.v_splitter.setStretchFactor(1, 1)
 
         layout.addWidget(self.v_splitter)
 
@@ -178,7 +203,6 @@ class WorkspaceWidget(QWidget):
 
         self.status_label = QLabel('No pending ISO modifications')
         self.btn_review = QPushButton('Review & Rebuild ISO')
-        self.btn_review.setFixedHeight(32)
 
         bar_layout.addWidget(self.status_label)
         bar_layout.addStretch()
@@ -190,13 +214,12 @@ class WorkspaceWidget(QWidget):
     def set_center_widget(self, new_widget: QWidget) -> None:
         old_widget = self.h_splitter.widget(2)
 
-        if old_widget and old_widget is not new_widget:
-            self.h_splitter.replaceWidget(2, new_widget)
+        if old_widget is new_widget:
+            return
+        self.h_splitter.replaceWidget(2, new_widget)
+        if old_widget:
             old_widget.deleteLater()
-        else:
-            self.h_splitter.insertWidget(2, new_widget)
         self.active_editor = new_widget
-        new_widget.show()
 
     def update_review_bar(self, has_mods: bool, count: int) -> None:
         self.review_bar.setVisible(has_mods)
@@ -251,7 +274,15 @@ class WorkspaceController(QObject):
         if tree_selection:
             tree_selection.currentChanged.connect(self.handle_tree_select)
 
-        self.view.tree_view.setColumnWidth(0,350)
+        header = self.view.tree_view.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.view.tree_view.setColumnWidth(0, 150)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self.view.tree_view.setColumnWidth(1, 400)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self.view.tree_view.setColumnWidth(2, 85)
+
+        self.view.tree_view.setUniformRowHeights(True)
         self.view.tree_view.expandToDepth(1)
 
         self.view.update_review_bar(False, 0)
@@ -338,7 +369,7 @@ class WorkspaceController(QObject):
 
     def route_action(self, node: VfsNode, action_name: str) -> None:
         '''Route action to the dispatcher'''
-        logger.debug(f'User requested new node(s) with "{action_name}" on {node.name} (Datacenter={getattr(node, 'target', None)})')
+        logger.debug(f'User requested new node(s) with "{action_name}" on {node.name} (Datacenter={getattr(node, "target", None)})')
         if action_name in ('Unpack', 'Decompress'): # Type 1: produce new nodes
             new_nodes = self.dispatcher.load_source(node)
 
@@ -371,19 +402,10 @@ class WorkspaceController(QObject):
         '''Clears the search buffer but not the category proxy model. To reset proxy "Esc" in eventFilter'''
         self.search_buffer = ''
 
-    def update_review_bar_visibility(self) -> None:
-        '''Toggle the bar if there are modified nodes'''
-        has_modifications = (len(self.tracker.modified_nodes) > 0 or 
-                             len(self.tracker.rebuild_queue) > 0)
-        self.view.review_bar.setVisible(has_modifications)
-
-        count = len(self.tracker.modified_nodes) + len(self.tracker.rebuild_queue)
-        self.view.status_label.setText(f'{count} file(s) modified in current session')
-
 ###-------------------------------------- Welcome Page --------------------------------------###
 
 class WelcomePage(QWidget):
-    request_open = pyqtSignal(str)
+    request_open = pyqtSignal(Path)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -393,11 +415,10 @@ class WelcomePage(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         subtitle = QLabel('Select a Radiata Stories ISO...')
-        subtitle.setStyleSheet('font-size: 14px; color: #888; margin-bottom: 40px;')
+        subtitle.setObjectName('WelcomeSubtitle')
 
         self.button = QPushButton('Open ISO', self)
-        self.button.setFixedSize(220,60)
-        self.button.setStyleSheet('font-size: 16px; background-color: #2c3e50; color: white; border-radius: 8px;')
+        self.button.setObjectName('WelcomeButton')
         self.button.clicked.connect(self.open_file_dialog)
 
         layout.addWidget(subtitle)
@@ -406,12 +427,14 @@ class WelcomePage(QWidget):
     def open_file_dialog(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, 'Open ISO', '', 'ISO Files (*.iso);;All Files (*)')
         if file_path:
-            self.request_open.emit(file_path)
+            self.request_open.emit(Path(file_path))
 
 ###------------------------------------- Staging Page --------------------------------------###
 
 class StagingPage(QWidget):
     '''UI for managing the filesystem vs Staging Area'''
+    request_workspace = pyqtSignal()
+
     def __init__(self, mod_track: ModTracker, parent=None) -> None:
         super().__init__(parent)
         self.tracker = mod_track
@@ -425,7 +448,9 @@ class StagingPage(QWidget):
 
         # left side
         unstaged_layout = QVBoxLayout()
-        unstaged_layout.addWidget(QLabel('<b>Unstage Changes</b>'))
+        unstage_label = QLabel('Unstage Changes')
+        unstage_label.setObjectName('SectionHeader')
+        unstaged_layout.addWidget(unstage_label)
         self.unstaged_list = QListWidget()
         unstaged_layout.addWidget(self.unstaged_list)
 
@@ -442,7 +467,9 @@ class StagingPage(QWidget):
 
         # right side
         staged_layout = QVBoxLayout()
-        staged_layout.addWidget(QLabel('<b>Staged Changes (Ready to Commit)</b>'))
+        staged_label = QLabel('Staged Changes (Ready to Commit)')
+        staged_label.setObjectName('SectionHeader')
+        staged_layout.addWidget(staged_label)
         self.staged_list = QListWidget()
         staged_layout.addWidget(self.staged_list)
 
@@ -451,18 +478,22 @@ class StagingPage(QWidget):
         lists_layout.addLayout(button_layout)
         lists_layout.addLayout(staged_layout)
 
-        # confirm button
-        confirm_layout = QHBoxLayout()
-        confirm_layout.addStretch()
-        self.btn_confirm = QPushButton('Confirm Changes & Rebuild')
-        self.btn_confirm.setFixedSize(250, 40)
-        self.btn_confirm.setStyleSheet('font-weight: bold; background-color: #27ae60; color: white;')
-        confirm_layout.addWidget(self.btn_confirm)
+        # bottom button
+        bottom_layout = QHBoxLayout()
+        self.btn_back = QPushButton('Back')
+        self.btn_back.setObjectName('FloatClearButton')
+        bottom_layout.addWidget(self.btn_back)
+        bottom_layout.addStretch()
+        self.btn_confirm = QPushButton('Build New ISO')
+        self.btn_confirm.setObjectName('ConfirmButton')
+        bottom_layout.addWidget(self.btn_confirm)
 
         main_layout.addLayout(lists_layout)
-        main_layout.addLayout(confirm_layout)
+        main_layout.addLayout(bottom_layout)
     
     def _connect_signals(self) -> None:
+        self.btn_back.clicked.connect(self.request_workspace.emit)
+
         self.btn_stage.clicked.connect(self._on_stage)
         self.btn_unstage.clicked.connect(self._on_unstage)
         self.btn_revert.clicked.connect(self._on_revert)
@@ -516,7 +547,8 @@ class RebuildStatusPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(50, 50, 50, 50)
         
-        self.header = QLabel("<h2>Rebuilding ISO...</h2>")
+        self.header = QLabel('Rebuilding ISO...')
+        self.header.setObjectName('PageTitle')
         self.header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.header)
         
@@ -527,7 +559,7 @@ class RebuildStatusPage(QWidget):
         
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; font-family: monospace;")
+        self.log_output.setObjectName('LogOutput')
         layout.addWidget(self.log_output)
         
     def append_log(self, message: str) -> None:
@@ -564,7 +596,7 @@ class MainMenuBar:
 
         file_menu.addSeparator()
 
-        exit_action = QAction('Exit ISO', self.window)
+        exit_action = QAction('Exit', self.window)
         exit_action.setShortcut('Ctrl+Q')
         exit_action.triggered.connect(self._handle_exit)
         file_menu.addAction(exit_action)
@@ -598,9 +630,13 @@ class MainMenuBar:
 
     #-------- Actions --------#
     def _handle_open(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(self.window, "Open ISO", "", "ISO Files (*.iso);;All Files (*)")
-        if file_path:
-            self.window.attempt_load_iso(file_path)
+        if hasattr(self.window, 'welcome_page'):
+            self.window.welcome_page.open_file_dialog()
+        else: # fallback 
+            logger.warning('No welcome_page exists for MainWindow, falling back...')
+            file_path, _ = QFileDialog.getOpenFileName(self.window, "Open ISO", "", "ISO Files (*.iso);;All Files (*)")
+            if file_path:
+                self.window.attempt_load_iso(Path(file_path))
 
     def _handle_close(self) -> None:
         self.dispatcher.close()
