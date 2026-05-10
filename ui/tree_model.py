@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel, QStringListModel
 from typing import TYPE_CHECKING
+from core.node import VfsManager
 if TYPE_CHECKING:
-    from core.node import VfsNode, VfsManager
+    from core.node import VfsNode
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -18,8 +19,8 @@ class VfsTreeModel(QAbstractItemModel):
         self.columns = ["ID", "File Name", "Size"]
 
         # Catch VfsManager signals for updating tree
-        self.vfs_manager.insert_start.connect(self.start_insert)
-        self.vfs_manager.insert_finished.connect(self.insert_finished)
+        self.vfs_manager.insert_start.connect(self._on_insert_start)
+        self.vfs_manager.insert_finished.connect(self._on_insert_finished)
 
     ###---------------------------------------- Qt API --------------------------------------###
 
@@ -101,11 +102,12 @@ class VfsTreeModel(QAbstractItemModel):
             return '0 B'
         
         units = ['B', 'KB', 'MB', 'GB', 'TB']
+        value = float(size)
         i = 0
-        while size >= 1024 and i < len(units) -1:
-            size /= 1024
+        while value >= 1024 and i < len(units) -1:
+            value /= 1024
             i+=1
-        return f'{size:.1f} {units[i]}'
+        return f'{value:.1f} {units[i]}' if i>0 else f'{int(value)} B'
     
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         '''Enable selection and interaction with tree'''
@@ -125,13 +127,11 @@ class VfsTreeModel(QAbstractItemModel):
         self.root_node = new_root_node
         self.endResetModel()
 
-    def start_insert(self, parent_node: VfsNode, start_row: int, end_row: int) -> None:
-        parent_index = self.index_for_node(parent_node)
-        if not parent_index.isValid() and parent_node != self.root_node:
-            return
-        self.beginInsertRows(parent_index, start_row, end_row)
+    def _on_insert_start(self, parent: VfsNode, first: int, last: int) -> None:
+        parent_index = self.index_for_node(parent)
+        self.beginInsertRows(parent_index, first, last)
 
-    def insert_finished(self) -> None:
+    def _on_insert_finished(self):
         self.endInsertRows()
 
     def index_for_node(self, target_node: VfsNode) -> QModelIndex:
@@ -157,6 +157,7 @@ class TreeProxyModel(QSortFilterProxyModel):
         self.active_category: str = 'All'
         self.show_hidden  = False
         self.search_query = ''
+        # self.setDynamicSortFilter(True)
         self.setRecursiveFilteringEnabled(True)
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
@@ -203,11 +204,11 @@ class TreeProxyModel(QSortFilterProxyModel):
         if not node:
             return False
         
-        if not self.show_hidden and getattr(node, 'is_hidden', False):
+        if not self.show_hidden and node.is_hidden:
             return False
 
         if self.active_category != 'All':
-            if getattr(node, 'category', None) != self.active_category:
+            if self.active_category not in node.category:
                 return False
         
         if self.search_query:

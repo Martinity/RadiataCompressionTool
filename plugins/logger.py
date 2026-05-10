@@ -89,4 +89,6 @@ class LoggingWindow(QWidget):
         cursor.insertText(message + '\n')
         cursor.endEditBlock()
 
-        self.log_view.ensureCursorVisible()
+        scrollbar = self.log_view.verticalScrollBar()
+        if scrollbar.value() == scrollbar.maximum():
+            self.log_view.ensureCursorVisible()

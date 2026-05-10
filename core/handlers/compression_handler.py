@@ -1,9 +1,10 @@
 '''Custom Compressor for use with tri-ace ps2 era games.'''
 from dataclasses import dataclass
 from core.registry import Registry
-from core.contracts import BaseHandler
+from core.contracts import ContainerHandler
 from core.extension_overrides import generate_ext_overrides
 from core.node import VfsNode
+from core.workers import ActionDef, ActionType
 from typing import Optional, Any
 
 import logging
@@ -11,10 +12,14 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 ###------------------------------------ Wrapper -------------------------------------------###
 
-@Registry.register(name='Tri-Ace Ps2 Compression Handler',
-                   extensions=('.slz', '.sle'),
-                   supported_actions=('Decompress', 'Properties'))
-class CompressorHandler(BaseHandler):
+@Registry.register(
+    name='Tri-Ace Ps2 Compression Handler',
+    extensions=('.slz', '.sle'),
+    supported_actions={
+        'Decompress': ActionDef('Decompress', ActionType.TREE_EXPAND, 'Decompress file'),
+        'Properties': ActionDef('Properties', ActionType.DIALOG, 'Properties')
+    })
+class CompressorHandler(ContainerHandler):
     '''Wrapper for Compressor class'''
 
     @dataclass(slots=True)
@@ -25,13 +30,10 @@ class CompressorHandler(BaseHandler):
         decompressed_size: int
         next_file_offset: int
 
-    def __init__(self, source, parent):
+    def __init__(self, source: bytes, parent: VfsNode):
         super().__init__(source)
         self.handler_parent = parent
-        if hasattr(self.handle, 'read'):
-            self.raw_source = memoryview(self.handle.read())
-        else:
-            self.raw_source = memoryview(self.handle)
+        self.raw_source = memoryview(self.handle.read())
     
     def get_file_tree(self) -> VfsNode:
         '''Return a node for the compressed file'''
@@ -50,24 +52,23 @@ class CompressorHandler(BaseHandler):
             if len(header_view) < 16 or header_view[:3] not in [b'SLZ', b'SLE']:
                 break
             
-            raw_header = bytes(header_view)
+            header = bytes(header_view)
             header_obj = self.SlzHeader(
-                magic='SLZ' if raw_header[:3] == b'SLZ' else 'SLE',
-                mode=raw_header[3],
-                compressed_size=int.from_bytes(raw_header[4:8], 'little'),
-                decompressed_size=int.from_bytes(raw_header[8:12], 'little'),
-                next_file_offset=int.from_bytes(raw_header[12:16], 'little')
+                magic='SLZ' if header[:3] == b'SLZ' else 'SLE',
+                mode=header[3],
+                compressed_size=int.from_bytes(header[4:8], 'little'),
+                decompressed_size=int.from_bytes(header[8:12], 'little'),
+                next_file_offset=int.from_bytes(header[12:16], 'little')
             )
 
             chunk_view = self.raw_source[current_offset : current_offset + header_obj.compressed_size + 16]
             compressor = RadiCompressor(chunk_view) # slice out header bytes for node
             inline_header = compressor.decompress(get_header=True)
-            ext = next((ext for sig, ext in extension_dict.items() if inline_header[:len(sig)] == sig), '.bin')
-            
+            ext: str = next((match for sig, match in extension_dict.items() if inline_header.startswith(sig)), '.bin')
+
             node = VfsNode(
                 name=f'{chunk_idx:04d}{ext}',
                 offset=current_offset,
-                category=getattr(self.handler_parent, 'category', 'Unknown'),
                 size=header_obj.decompressed_size,
                 header=inline_header,
                 extension=ext,
@@ -86,7 +87,7 @@ class CompressorHandler(BaseHandler):
 
             if inline_header[0:4] == b'1bcb': # bcb size + sector aligned to find next bcb
                 sector_size = 0x800
-                bcb_size = header_obj.compressed_size + len(raw_header)
+                bcb_size = header_obj.compressed_size + len(header)
                 aligned_size = (bcb_size + sector_size - 1) & ~(sector_size - 1)
                 current_offset += aligned_size
                 node.is_banked = True
@@ -99,7 +100,7 @@ class CompressorHandler(BaseHandler):
 
     def get_raw_node(self, node: VfsNode) -> bytes:
         '''Return a specific raw node'''
-        if not hasattr(node, 'compressed_header'):
+        if not node.compressed_header:
             logger.warning(f'No compressed header found for {node.name}')
             return b''
         
@@ -114,7 +115,7 @@ class CompressorHandler(BaseHandler):
         new_compressed_file = b''
         for i, child in enumerate(root.children):
             is_final_payload = i == len(root.children) - 1
-            if child in staged_nodes: # Modified child
+            if child in staged_nodes and child.compressed_header: # Modified child
                 raw_bytes = child.pending_data
                 target_mode = child.compressed_header.mode
                 is_encrypted = child.compressed_header.magic == 'SLE'
@@ -140,30 +141,33 @@ class CompressorHandler(BaseHandler):
         return new_compressed_file
 
     def get_properties(self, node: VfsNode):
-        ''' TODO Pass a dedicated signal to the ui
-            For now pass log signal'''
+        '''Return formatted properties for UI'''
         if not node.children:
             node = self.get_file_tree()
+        
+        lines = ['Compressed File Properties:']
         for child in node.children:
             if child.compressed_header:
-                mode = child.compressed_header.mode
-                compressed_size = child.compressed_header.compressed_size
-                decompressed_size = child.compressed_header.decompressed_size
-                next_file = child.compressed_header.next_file_offset
-                next_file_str = 'No Chained Files.' if not next_file else str(next_file)
-                ratio = compressed_size / decompressed_size
+                c = child.compressed_header
+                next_file_str = 'No Chained Files.' if not c.next_file_offset else str(c.next_file_offset)
+                ratio = c.compressed_size / c.decompressed_size if c.decompressed_size > 0 else 0
 
-                logger.info(f'Compressed File Properties:\nMode:{mode} | Compressed File Size:{compressed_size} '
-                        f'| Decompressed File Size:{decompressed_size} | Offset to next chained file:{next_file_str} | Compression ratio={(ratio*100):.02f}%')
+                lines.append(
+                    f'\nMode: {c.mode}\n'
+                    f'Compressed Size: {c.compressed_size}\n'
+                    f'Decompressed Size: {c.decompressed_size}\n'
+                    f'Offset to next chained file: {next_file_str}\n'
+                    f'Compression ratio: {(ratio*100):.02f}%'
+                )
+            return '\n'.join(lines)
 
-    def execute_action(self, node: VfsNode, action_name: str) -> Optional[Any]:
+    def execute_action(self, node: VfsNode, action_name: str, progress_callback, log_callback, **kwargs) -> Optional[Any]:
         if action_name == 'Decompress':
-            return self.get_raw_node(node)
+            log_callback(f'Decompressed {node.name}...')
+            return self.get_file_tree()
         elif action_name == 'Properties':
             return self.get_properties(node)
-    
-    def get_identity(self) -> str:
-        return 'Compressed File'
+        return None
     
     def get_buffer_data(self, node: VfsNode) -> memoryview:
         '''Specialized extraction for composite buffer nodes.'''

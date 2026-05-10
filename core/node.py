@@ -1,7 +1,10 @@
 from __future__ import annotations
 from enum import Enum, auto
-from typing import Tuple
+import threading
+from typing import Tuple, TYPE_CHECKING, NamedTuple
 from PyQt6.QtCore import pyqtSignal, QObject
+if TYPE_CHECKING:
+    from core.handlers.compression_handler import CompressorHandler
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -40,7 +43,7 @@ class VfsNode:
 
         self.header = header                                # raw header
         self.extension = extension                          # extension from override
-        self.compressed_header: object = None               # SLZ source header
+        self.compressed_header: CompressorHandler.SlzHeader | None = None # SLZ source header
 
         self._id_path: Tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
 
@@ -53,6 +56,9 @@ class VfsNode:
         self.is_banked = False
         self.is_unpacked = False                            # Static Kods
         self.is_hidden = False                              # Hide node in UI (file system related or null nodes by default)
+
+        self.expansion_pending: bool = False                 # Threading active bool
+        self._expansion_event: threading.Event | None = None # Threading event for active thread
     
     def append_child(self, child: VfsNode):
         '''Allow children nodes'''
@@ -83,6 +89,18 @@ class VfsNode:
         except (ValueError, AttributeError):
             return 0    
         
+    def begin_expansion(self) -> threading.Event:
+        '''Mark expansion in progress. Return wait event'''
+        self.expansion_pending = True
+        self._expansion_event = threading.Event()
+        return self._expansion_event
+    
+    def finish_expansion(self) -> None:
+        '''Signal expansion complete'''
+        self.expansion_pending = False
+        if self._expansion_event:
+            self._expansion_event.set()
+        
     def clear_pending(self):
         self.pending_data = None
         self.status = NodeStatus.UNMODIFIED
@@ -94,106 +112,102 @@ class VfsNode:
 
 ###------------------------------------------------------- VFS Manager -----------------------------------------------------###
 
+class HidSnapshot(NamedTuple):
+    '''Result of a lock-protect VFS snapshot'''
+    resolved: list[VfsNode]             # nodes already in the VFS
+    unresolved: list[Tuple[int, ...]]   # HIDs whose parent need expansion
+
 class VfsManager(QObject):
     '''Virtual File System Manager. Bridge between the dispatcher and node'''
-    insert_start = pyqtSignal(VfsNode, int, int) # (VfsNode, start_row, end_row)
+    insert_start = pyqtSignal(VfsNode, int, int) # (parent, first_row, last_row)
     insert_finished = pyqtSignal()
+    node_updated = pyqtSignal(VfsNode)
 
     def __init__(self, root_node: VfsNode):
         super().__init__()
-
         self.root = root_node
-        # Flat path lookup map
-        self.nodes_by_id: dict[Tuple[int, ...], VfsNode] = {}
-        # Physical disk map
-        self.physical_offsets: dict[VfsNode, int] = {}
-        # Track modified nodes
-        self.dirty_nodes: set[VfsNode] = set()
+        self._lock = threading.RLock()
+
+       
+        self.nodes_by_id: dict[Tuple[int, ...], VfsNode] = {}  # Flat path lookup map
+        self.physical_offsets: dict[VfsNode, int] = {}         # Physical disk map
         # Initialize root with offset 0
-        self.register_node(self.root, 0)
+        self._register_recursive(self.root) # Register physical nodes with VFS initilization
+    
+    ###--------------------- Registration ----------------------###
 
-    def register_node(self, node: VfsNode, relative_offset: int = 0, is_physical: bool = False):
-        '''Register node with HID map'''
+    def _register_recursive(self, node: VfsNode, is_physical: bool = False, disk_base: int = 0):
+        '''Register node and all its children. Must be called inside _lock after initialization.'''
         self.nodes_by_id[node.hierarchical_id] = node
-
         if is_physical:
-            abs_disk_offset = relative_offset + node.offset
-            self.physical_offsets[node] = abs_disk_offset
-
+            self.physical_offsets[node] = disk_base + node.offset
         for child in node.children:
-            self.register_node(child, relative_offset=0)
+            self._register_recursive(child)
+    
+    def register_node(self, node: VfsNode):
+        with self._lock:
+            self._register_recursive(node)
 
-    def insert_children(self, parent_node: VfsNode, new_children: list[VfsNode], relative_offset: int = 0) -> None:
-        '''Update the node and signal to the tree model'''
+    def insert_children(self, parent: VfsNode, new_children: list[VfsNode]) -> None:
+        '''Update the VFS and signal to the tree model'''
         if not new_children:
             return
         
-        start_row = len(parent_node.children)
-        end_row = start_row + len(new_children) - 1
+        with self._lock:
+            base_idx = len(parent.children)
+            for child in new_children: # Inherit categories
+                child.category = parent.category
+            self.insert_start.emit(parent, base_idx, base_idx + len(new_children) - 1)
+            for i, child in enumerate(new_children): # Add the nodes to the file system / tree
+                child.parent = parent
+                child._id_path = parent._id_path + (base_idx + i,)
+                child.is_hidden = True if parent.is_hidden or not child.size or child.offset == -1 else False
+                parent.children.append(child)
+                self._register_recursive(child)
+            self.insert_finished.emit()
 
-        self.insert_start.emit(parent_node, start_row, end_row)
-        for child in new_children:
-            parent_node.append_child(child)
-            self._silent_register(child, relative_offset)
-        self.insert_finished.emit()
-        
-    def _silent_register(self, node: VfsNode, relative_offset: int = 0) -> None:
-        '''Register node with HID map'''
-        self.nodes_by_id[node.hierarchical_id] = node
-        if node.is_physical:
-            self.physical_offsets[node] = relative_offset + node.offset
-        for child in node.children:
-            self._silent_register(child, relative_offset=0)
-        
+    ###--------------------- Lookup -----------------------###
+
     def get_offset(self, node: VfsNode) -> int:
         '''Get physical disk offsets'''
         return self.physical_offsets.get(node, 0)
 
     def get_node_by_id(self, hid: Tuple[int, ...]) -> VfsNode | None:
         '''Node lookup for known registered nodes.'''
-        return self.nodes_by_id.get(hid)
+        with self._lock:
+            return self.nodes_by_id.get(hid)
     
-    def resolve_nodes(self, hids: list[Tuple[int, ...]], expansion_callback=None) -> list[VfsNode]:
-        '''Resolve list of HIDs. expansion_callback for resolving yet registered nodes recursively'''
-        resolved: list[VfsNode] = []
-        logger.debug(f'Resolving {hids} with {expansion_callback}')
+    ###-------------------- Navigator API ------------------###
 
-        for hid in hids:
-            node = self._resolve_single_hid(hid, expansion_callback)
-            if node:
-                resolved.append(node)
-        if not resolved:
-            logger.warning(f'No nodes resolved for {hids}')
-        return resolved
+    def snapshot_hids(self, hids: list[Tuple[int,...]]) -> HidSnapshot:
+        '''Lock-protected snapshot. Return nodes already in the VFS'''
+        resolved: list[VfsNode] =[]
+        unresolved: list[Tuple[int,...]] = []
 
-    def _resolve_single_hid(self, hid: Tuple[int, ...], expansion_callback=None) -> VfsNode | None:
-        '''Recursively expand physical -> target'''
-        if hid in self.nodes_by_id:
-            return self.nodes_by_id[hid]
-        
-        current = self.root
-        for i in range(1, len(hid) + 1):
-            path = hid[:i]
-            next_node = self._find_child_by_path(current, path)
+        with self._lock:
+            for hid in hids:
+                node = self.nodes_by_id.get(hid)
+                if node:
+                    resolved.append(node)
+                else:
+                    unresolved.append(hid)
 
-            if not next_node:
-                if expansion_callback is None:
-                    logger.warning(f'Cannot expand path {path}, no callback')
-                    return None
-                
-                expansion_callback(current)
-                next_node = self._find_child_by_path(current, path)
-                if not next_node:
-                    logger.warning(f'Expansion of {current.name}({current.hierarchical_id_str}) did not create the target child {path}')
-                    return None
-               
-            current = next_node
-        logger.debug(f'Resolved {current.name} from {hid}')
-        return current
+        return HidSnapshot(resolved, unresolved)
+    
+    def find_nearest_ancestor(self, hid: Tuple[int,...]) -> VfsNode | None:
+        '''Return the nearest ancestor for an HID, the node that needs expanding'''
+        with self._lock:
+            best: VfsNode | None = None
+            for depth in range(1, len(hid)):
+                ancestor = self.nodes_by_id.get(hid[:depth])
+                if ancestor:
+                    best = ancestor
+            return best
 
-    def _find_child_by_path(self, parent: VfsNode, target_path: Tuple[int,...]) -> VfsNode | None:
+    def _find_child_by_path(self, parent: VfsNode, target: Tuple[int,...]) -> VfsNode | None:
+        '''Scan children for match. Must be called from _lock.'''
         for child in parent.children:
-            if child.hierarchical_id == target_path:
+            if child.hierarchical_id == target:
                 return child
         return None
 
@@ -202,26 +216,25 @@ class VfsManager(QObject):
 class ModTracker(QObject):
     '''Modification state tracker'''
     node_modified = pyqtSignal(VfsNode)
-    node_staged = pyqtSignal(VfsNode)
+    node_staged   = pyqtSignal(VfsNode)
     node_unstaged = pyqtSignal(VfsNode)
     node_reverted = pyqtSignal(VfsNode)
 
-    state_changed = pyqtSignal(int, int) # format: (unstaged_count, staged_count)
+    state_changed     = pyqtSignal(int, int) # format: (unstaged_count, staged_count)
     rebuild_initiated = pyqtSignal(list)
 
     def __init__(self) -> None:
         super().__init__()
         self.modified_nodes: set[VfsNode] = set()
-        self.rebuild_queue: set[VfsNode] = set()
+        self.rebuild_queue:  set[VfsNode] = set()
 
     def _emit_state(self):
         self.state_changed.emit(len(self.modified_nodes), len(self.rebuild_queue))
 
     def mark_modified(self, node: VfsNode, new_data: bytes) -> None:
         node.pending_data = new_data
-        node.status = NodeStatus.MODIFIED
+        node.status       = NodeStatus.MODIFIED
         self.modified_nodes.add(node)
-
         self.node_modified.emit(node)
         self._emit_state()
 
@@ -249,17 +262,14 @@ class ModTracker(QObject):
         self.rebuild_queue.discard(node)
         node.clear_pending()
         node.status = NodeStatus.UNMODIFIED
-
-        logger.info(f'Reverted changes for node: {node.name}')
+        logger.info(f'Reverted changes for node: {node.hierarchical_id_str}')
         self.node_reverted.emit(node)
         self._emit_state()
 
     def confirm_and_rebuild(self) -> None:
         '''Triggered by Confirm button in staging page'''
         if not self.rebuild_queue:
-            # TODO can't trigger button when no edits
             return
-        
         staged_nodes = list(self.rebuild_queue)
         logger.info(f'Initiating rebuild with {len(staged_nodes)} staged files.')
         self.rebuild_initiated.emit(staged_nodes)

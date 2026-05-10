@@ -6,7 +6,7 @@ from core.registry import Registry
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
-@Registry.register(name='Hex Editor', extensions=(), magics=(), is_fallback=True)
+@Registry.register(name='Hex Editor', extensions=(), is_fallback=True)
 class HexEditorWidget(BaseEditor):
     data_modified = pyqtSignal(object, bytes)
 

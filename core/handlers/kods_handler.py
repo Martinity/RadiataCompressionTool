@@ -4,10 +4,11 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
-from core.contracts import BaseHandler
+from core.contracts import ContainerHandler
 from core.extension_overrides import generate_ext_overrides
 from core.registry import Registry
 from core.node import VfsNode
+from core.workers import ActionDef, ActionType
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -16,17 +17,17 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 @Registry.register(
     name='Kods Archiver',
-    extensions=('.kods', '.kods_composite'),
-    supported_actions=('Unpack', 'Properties'))
-class KodsHandler(BaseHandler):
+    extensions=('.kods',),
+    supported_actions={
+        'Unpack': ActionDef('Unpack', ActionType.TREE_EXPAND, 'Unpack archive'),
+        'Properties': ActionDef('Properties', ActionType.DIALOG, 'Properties')
+})
+class KodsHandler(ContainerHandler):
     '''Wrapper for Kods archiver class'''
     def __init__(self, source: bytes, parent: VfsNode, datacenter_headers: list[bytes] | None = None) -> None:
         super().__init__(source)
         self.handler_parent = parent
-        if hasattr(self.handle, 'read'):
-            self.payload_view = memoryview(self.handle.read())
-        else:
-            self.payload_view = memoryview(self.handle)
+        self.payload_view = memoryview(self.handle.read())
         self.archiver = KodsArchiver(self.payload_view)
         self.datacenter_headers = datacenter_headers
 
@@ -62,17 +63,16 @@ class KodsHandler(BaseHandler):
                 root.append_child(dummy_node)
                 continue
             
-            header_bytes = bytes(self.payload_view[meta.offset : meta.offset + 8])
-            ext = next((ext for sig, ext in extensions.items() if header_bytes.startswith(sig)), '.bin')
+            header = bytes(self.payload_view[meta.offset : meta.offset + 8])
+            ext: str = next((match for sig, match in extensions.items() if header.startswith(sig)), '.bin')
             name = f'{meta.node_index:04d}{ext}' if is_internal else f'Entry {meta.node_index:02d}{ext}'
 
             node = VfsNode(
                 name=name,
                 offset=meta.offset,
                 size=meta.size,
-                header=header_bytes,
+                header=header,
                 extension=ext,
-                category=getattr(self.handler_parent, 'category', 'Unknown'),
                 parent=root,
             )
             root.append_child(node)
@@ -120,33 +120,35 @@ class KodsHandler(BaseHandler):
             
         return bytes(new_kods)
     
-    def get_properties(self) -> None:
+    def get_properties(self) -> str:
         headers_view = self._collect_headers()
-        logger.info(f'Kods Archive Properties:\nNumber of Headers:{len(headers_view)}')
+        lines = [f'Kods Archive Properties:\nNumber of Headers: {len(headers_view)}\n']
         for i, header_view in enumerate(headers_view):
-            if header_view and i == 0: # Check for internal header
-                p = self.archiver.parse_header(header_view, is_internal=True)
-            elif header_view: # Check for external headers
-                p = self.archiver.parse_header(header_view, is_internal=False)
-            else: # 
-                logger.info('No internal Header.')
+            is_internal =(i==0) and header_view
+            p = self.archiver.parse_header(header_view, is_internal=is_internal)
+            if p.num_entries == 0:
+                continue
 
             mode_str = '32bit aligned' if not p.mode else '16bit aligned'
+            header_title = 'Inline' if i == 0 else f'Datacenter Index {i}'
 
-            header = 'Inline' if i == 0 else f'Datacenter Index {i}'
-            logger.info(f'Header {header}:\nNumber of Entries: {p.num_entries} '
-                        f'| Compression shift: {p.shift} | Entry mode: {mode_str} '
-                        f'| Secondary table present: {p.has_second_table} | Size of Pre-Payload data: {p.payload_offset} bytes')
-    
-    def execute_action(self, node: VfsNode, action_name: str) -> Any:
+            lines.append(
+                f'--- Header: {header_title} ---\n'
+                f'Number of Entries: {p.num_entries}\n'
+                f'Compression shift: {p.shift}\n'
+                f'Entry mode: {mode_str}\n'
+                f'Secondary table present: {p.has_second_table}\n'
+                f'Size of Pre-Payload data: {p.payload_offset} bytes\n'
+            )
+        return '\n'.join(lines)
+
+    def execute_action(self, node: VfsNode, action_name: str, progress_callback, log_callback, **kwargs) -> Any:
         if action_name == 'Unpack':
+            log_callback(f'Unpacking {node.name}...')
             return self.get_file_tree()
         elif action_name == 'Properties':
             return self.get_properties()
         return None
-    
-    def get_identity(self) -> str:
-        return 'Kods Archive'
     
 ###----------------------------------------------- Archiver ----------------------------------------------------###
 
@@ -183,8 +185,6 @@ class KodsArchiver:
     def get_kods_map(self, headers: list[memoryview], is_internal: bool) -> dict[int, list[KodsArchiver.FileNodeMeta]]:
         '''Generate a single offset map into the payload from all provided headers'''
         kods_map: dict[int, list[KodsArchiver.FileNodeMeta]] = {}
-
-        logger.warning(f'Number of headers for mapping:{len(headers)}')
 
         for header_idx, header_view in enumerate(headers): # Get Headers, offsets, and shifts
             header_obj = self.parse_header(header_view, is_internal)

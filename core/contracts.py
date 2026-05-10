@@ -4,13 +4,14 @@
 - Utility widgets (logger, properties) inherit QWidget
 '''
 from __future__ import annotations
-from typing import TYPE_CHECKING, Union, Optional, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pathlib import Path
 import io
 import abc
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import pyqtSignal
+
 if TYPE_CHECKING:
     from core.node import VfsNode
 
@@ -18,80 +19,124 @@ import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
 
-###---------------------------------------------- Base Handler contracts ------------------------------------------------###
+###---------------------------------------------- Base Handler contract ------------------------------------------------###
 
 class BaseHandler(abc.ABC):
-    '''Abstract Base Class for all handlers. Classes that inherit from this must implement:\n
-    @abstractmethod get_file_tree: Get metadata for tree_view\n
-    @abstractmethod process_node: Process raw node data\n
-    @abstractmethod rebuild_node: Rebuild the raw node data\n
-    get_identity is suggested for debugging
-    '''
-    def __init__(self, source: Union[Path, io.BufferedIOBase, bytes], parent_node: Optional['VfsNode'] = None):
-        '''Initialize the root handle'''
-        self.path = source if isinstance(source, Path) else None
+    """
+    The architectural blueprint for data interpretation.
+    
+    A Handler acts as a translator between raw binary data and the VfsNode 
+    hierarchy. It is responsible for 'unpacking' a format's internal structure 
+    and 'repacking' modifications back into a valid binary stream.
+    
+    Lifecycle:
+        1. Instantiated by a Worker or Navigator with source bytes.
+        2. get_file_tree() maps internal entries to VfsNodes.
+        3. execute_action() performs specific logic (e.g., decompression).
+    """ 
+    def __init__(self, parent_node: VfsNode | None = None) -> None:
+        '''Initialize the root handle and provide generic resource management'''
         self.parent_node = parent_node
-        self.owns_handle = False
-
-        if isinstance(source, Path):
-            self.handle = open(source, 'rb')
-            self.owns_handle = True
-        elif isinstance(source, bytes):
-            self.handle = io.BytesIO(source)
-            self.owns_handle = True
-        else:
-            self.handle = source
+        self.handler: io.BufferedIOBase | None = None
+        self.owns_handle: bool = False
 
     def __enter__(self):
         return self
     
-    def __exit__(self, *args):
+    def __exit__(self, exc_type, exc_value, exc_traceback) -> None:
         self.close()
 
-    def __repr__(self) -> str:
-        return f"<{self.__class__.__name__} path='{self.path}' status='{self.get_identity()}'>"
+    def close(self):
+        '''Close the stream if owned by this instance'''
+        if self.owns_handle and self.handle:
+            try:
+                self.handle.close()
+                logger.debug('Closed handler resources successfully.')
+            except Exception as e:
+                logger.error(f'Error while closing handler: {e}')
+            finally:
+                self.owns_handle = False
+                self.handle = None
 
-    def __str__(self):
-        return self.get_identity()
-        
-    def execute_action(self, node: 'VfsNode', action_name: str) -> Optional[Any]:
-        '''Entry points for custom handler logic
-           something like get "Properties" might want to pass a signal for the ui'''
-        if action_name == 'Properties':
-            logger.info('Properties not yet implemented for selected node forat')
-        logger.warning(f'{self.__class__.__name__} has not implemented action: {action_name}')
-        return None
-
-    @abc.abstractmethod
-    def get_file_tree(self) -> VfsNode:
-        '''Returns list of virtual nodes representing internal files.'''
+    def execute_action(
+        self, 
+        node: VfsNode, 
+        action_name: str, 
+        progress_callback: Callable[[int, str], None],
+        log_callback: Callable[[str], None],
+        **kwargs,
+    ) -> Any:
+        '''Execute custom actions registered with the Registry'''
         pass
 
     @abc.abstractmethod
     def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
-        '''Return the rebuilt container using pending edits'''
+        '''Pack children back into parent container using pending edits if any'''
         pass
 
+###------------------------------------------ Specialized Handler Contracts ----------------------------------------###
+
+class PhysicalHandler(BaseHandler, abc.ABC):
+    '''Used exclusively for physical disk archives (e.g. ISO)
+    - Source must be a physical Path
+    - Manages file-handles directly
+    - Scanning and maintaining top-level tree structures
+    '''
+    def __init__(self, source: Path, parent_node: VfsNode | None = None) -> None:
+        super().__init__(parent_node)
+        if not isinstance(source, Path):
+            raise TypeError(f'PysicalHandler expects a Path object, got: {type(source)}')
+        self.path = source
+        self.handle = open(source, 'rb')
+        self.owns_handle = True
+
     @abc.abstractmethod
-    def get_raw_node(self, node: VfsNode) -> bytes:
-        '''Return the raw original node data from the relative offset of the parent. Bypass pending edits'''
-        if not self.handle or self.handle.closed:
-            return b''
-        self.handle.seek(node.offset)
-        return self.handle.read(node.size)
+    def get_file_tree(self) -> VfsNode:
+        '''Interfaces with the physical disk to return mapped virtual VfsNodes'''
+        pass
 
-    def get_identity(self) -> str:
-        '''Override for build name'''
-        return 'Unknown format'
+class ContainerHandler(BaseHandler, abc.ABC):
+    '''Used for virtual archives (e.g. SLZ, Kods)
+    - Source must be memory-based (bytes or stream)
+    - Maintains relationships and alignments between nodes
+    '''
+    def __init__(self, source: bytes | io.BufferedIOBase, parent_node: VfsNode | None = None) -> None:
+        super().__init__(parent_node)
+        if isinstance(source, bytes):
+            self.handle = io.BytesIO(source)
+        elif isinstance(source, io.BufferedIOBase):
+            self.handle = source
+        else:
+            raise TypeError(f'ContainerHandler expects bytes or stream, got: {type(source)}')
+        
+    @abc.abstractmethod
+    def get_file_tree(self) -> VfsNode:
+        '''Generate metadata entries and map them to child VfsNodes'''
+        pass
 
-    def close(self):
-        '''Close the handle'''
-        if hasattr(self, 'handle') and self.owns_handle and not self.handle.closed:
-            self.handle.close()
+class LeafHandler(BaseHandler, abc.ABC):
+    '''Used for individual, isolated file objects (e.g. IO)
+    - Source must be memory-based (bytes or stream)
+    - Never sees any relational data
+    - Purely used for tasks where the node is the input for specific logic (e.g. parsing a JPG)
+    '''
+    def __init__(self, source: bytes | io.BufferedIOBase, parent_node: VfsNode | None = None) -> None:
+        super().__init__(parent_node)
+        if isinstance(source, bytes):
+            self.handler = io.BytesIO(source)
+        elif isinstance(source, io.BufferedIOBase):
+            self.handle = source
+        else:
+            raise TypeError(f'LeafHandler expects bytes or stream, got: {type(source)}')
+
+    def get_file_tree(self) -> VfsNode:
+        '''Leaf nodes do not contain children'''
+        return VfsNode(name='raw_data')
+    
 
 ###---------------------------------------------- Widget contract ----------------------------------------------###
 
-class _ABCMetaQtMeta(type(QWidget), abc.ABCMeta):
+class _ABCMetaQtMeta(type(QWidget), abc.ABCMeta): # type: ignore 
     '''Merge PyQt6 widget metaclass with ABC metaclass'''
     pass
 
@@ -104,10 +149,10 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     apply_requested = pyqtSignal(object, bytes) # (VfsNode, new raw data for node)
     dataChanged = pyqtSignal(bool)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.current_node = None
-        self._is_dirty = False
+        self.current_node: VfsNode | None = None
+        self._is_dirty: bool = False
 
         # self._check_abstract_methods()
 

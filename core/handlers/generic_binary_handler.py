@@ -1,12 +1,10 @@
 import io
-from pathlib import Path
-from typing import Union
-from core.contracts import BaseHandler
+from core.contracts import LeafHandler
 from core.node import VfsNode
 
-class GenericBinaryHandler(BaseHandler):
+class GenericBinaryHandler(LeafHandler):
     '''Generic Handler used to get raw bytes of node'''
-    def __init__(self, source: Union[Path, io.BufferedIOBase, bytes]):
+    def __init__(self, source: io.BufferedIOBase | bytes):
         super().__init__(source)
 
     def get_raw_node(self, node: VfsNode) -> bytes:
@@ -15,7 +13,3 @@ class GenericBinaryHandler(BaseHandler):
 
     def get_file_tree(self) -> VfsNode:
         return VfsNode(name='raw_data')
-
-    def rebuild_file_data(self, node: VfsNode) -> bytes:
-        return b''
-    
