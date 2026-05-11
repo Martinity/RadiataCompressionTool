@@ -3,7 +3,7 @@ from core.node import VfsNode
 from core.contracts import LeafHandler
 from core.registry import Registry
 
-@Registry.register(name='File Import/Exporter',is_fallback=True,)
+@Registry.register(name='File Import/Exporter', is_fallback=True,)
 class IOHandler(LeafHandler):
     def __init__(self, raw_bytes: bytes, parent: VfsNode | None = None):
         super().__init__(raw_bytes, parent)

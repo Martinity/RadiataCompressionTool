@@ -267,7 +267,7 @@ class Dispatcher(QObject):
                     new_nodes = result.payload.children or [result.payload]
                     self.vfs.insert_children(result.node, new_nodes)
                     result.node.expansion_pending = False
-                    logger.info(f'Insertd {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
+                    logger.info(f'Inserted {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
             case ActionType.PROCESS | ActionType.DIALOG | ActionType.EXPORT:
                 pass # UI handled
 

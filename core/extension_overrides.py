@@ -29,9 +29,9 @@ HEADERS = {
     b'RTA'    : '.rta',     #
     b'PAF'    : '.paf',     #
     # Texture
-    b'FIS\00' : '.fis',   #
+    b'FIS\00' : '.fis',     # Texture data
     b'FISP'   : '.fisp',    #
-    b'FISA'   : ',fisa',
+    b'FISA'   : ',fisa',    # 
     b'TIM2'   : '.tim2',    # PS2 Standard format                 | 0%
     # Scene
     b'RBAD'   : '.rbad',    # Radiata Background Animation Data   | 0%

@@ -69,6 +69,9 @@ class LoggingWindow(QWidget):
     @pyqtSlot(str, int)
     def append_log(self, message: str, level: int):
         '''Slot gets logs from QtLogHandler'''
+        scrollbar = self.log_view.verticalScrollBar()
+        at_bottom = scrollbar.value() >= (scrollbar.maximum() - 10)
+
         colors = {
             logging.DEBUG: "#7f6df2",
             logging.INFO: "#dcddde",
@@ -89,6 +92,6 @@ class LoggingWindow(QWidget):
         cursor.insertText(message + '\n')
         cursor.endEditBlock()
 
-        scrollbar = self.log_view.verticalScrollBar()
-        if scrollbar.value() == scrollbar.maximum():
-            self.log_view.ensureCursorVisible()
+        if at_bottom:
+            self.log_view.moveCursor(QTextCursor.MoveOperation.End)
+            # self.log_view.ensureCursorVisible()

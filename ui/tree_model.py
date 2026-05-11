@@ -145,7 +145,7 @@ class VfsTreeModel(QAbstractItemModel):
 class VfsCategoryModel(QStringListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.categories = ['All', 'System', 'FMV', 'Audio', 'Map', 
+        self.categories = ['All', 'System', 'FMV', 'Audio', 'Texture', 'Map', 
                            'Character', 'Monster', 'Prop', 'Equipment', 
                            'VFX', 'Scene Setup', 'Animation', 'Battle Animation']
 

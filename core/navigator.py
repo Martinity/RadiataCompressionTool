@@ -13,7 +13,7 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 class VfsNavigator:
     '''Handles all tree traveling logic'''
-    EXPANSION_TIMEOUT = 3.0
+    EXPANSION_TIMEOUT = 1.0
     def __init__(self, vfs: VfsManager, data_reader: Callable[[VfsNode], bytes], expansion_callback: Callable[[VfsNode, threading.Event], None]):
         self.vfs  = vfs
         self.read = data_reader                      # dispatcher.get_node_data
@@ -110,7 +110,6 @@ class VfsNavigator:
             if key not in ancestors_needed:
                 ancestors_needed[key] = ancestor
 
-        logger.warning(ancestors_needed)
         for ancestor in ancestors_needed.values():
             if ancestor.expansion_pending and ancestor._expansion_event: # Expansion in progress
                 logger.debug(f'Waiting for in-progress expansion of ID: {ancestor.hierarchical_id_str}')

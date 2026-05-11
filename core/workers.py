@@ -17,11 +17,11 @@ logger = logging.getLogger(f'radiata.{__name__}')
 ###------------------------------------- Action Types -------------------------------------###
 
 class ActionType(Enum):
-    TREE_EXPAND = 'tree_expand'
-    PROCESS     = 'process'
-    DIALOG      = 'dialog'
-    EXPORT      = 'export'
-    IMPORT      = 'import'
+    TREE_EXPAND = 'tree_expand'   # Action needs to mutate the tree model
+    PROCESS     = 'process'       # Action needs to return data without UI 
+    DIALOG      = 'dialog'        # Action needs to return data with UI
+    EXPORT      = 'export'        # Action needs to write to disk
+    IMPORT      = 'import'        # Action needs to read from disk
 
 @dataclass(frozen=True)
 class ActionDef:

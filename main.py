@@ -3,7 +3,7 @@ from core.dispatcher import Dispatcher
 import sys
 from PyQt6.QtWidgets import QApplication
 from core.handlers import discover_handlers
-from plugins.logger import setup_logging
+from ui.widgets.logger import setup_logging
 import logging
 logger = logging.getLogger('radiata')
 

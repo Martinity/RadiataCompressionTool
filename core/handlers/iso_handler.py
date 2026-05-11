@@ -40,7 +40,15 @@ class IsoHandler(PhysicalHandler):
         '''Known File Categories'''
         _CATEGORIES = {
             range(8, 17):       'FMV',
-            range(42, 176):     'Audio',
+            range(3, 4):        'Audio',
+            range(42, 181):     'Audio',
+            range(188, 189):    'Audio',
+            range(184, 188):    'Script',
+            range(204, 205):    'Script',
+            range(4, 5):        'Texture',
+            range(26, 27):      'Texture',
+            range(189, 204):    'Texture',
+            range(205, 207):    'Texture',
             range(207, 1206):   'Map',
             range(1206, 1511):  'Character',
             range(1511, 1688):  'Monster',
@@ -51,9 +59,11 @@ class IsoHandler(PhysicalHandler):
             range(3426, 3629):  'Animation',
             range(3730, 4151):  'Battle Animation',
 
-            range(0, 8):        'System', # boot
-            range(18, 42):      'System', # core
-            range(177, 207):    'System'  # game
+            range(0, 3):        'System', # boot
+            range(5, 8):        'System', # datacenter/SO3
+            range(18, 26):      'System', # stats
+            range(27, 42):      'System', # core/debug
+            range(182, 184):    'System', # game
         }
         @classmethod
         def get_category(cls, index: int) -> str:
@@ -67,7 +77,7 @@ class IsoHandler(PhysicalHandler):
         '''Kods datacenter targets'''
         _TARGET_STATIC = { # format: [disk index]:[Datacenter header HIDs]
             186: (5, 0), 204: (5, 1),
-            185: (5, 7),  181: (5, 8),  187: (5, 9),
+            185: (5, 7),  187: (5, 9),
             203: (5, 10), 189: (5, 11), 190: (5, 12),
             191: (5, 13), 192: (5, 14), 193: (5, 15),
             194: (5, 16), 195: (5, 17), 196: (5, 18),
@@ -284,66 +294,6 @@ class IsoHandler(PhysicalHandler):
                 except OSError as err:
                     logger.error(f'Could not remove partial output: {err}')
             return False
-
-                #     if orig_lba == self.params.toc_offset // self.params.sector_size: # skip TOC self-reference
-                #         for node in nodes:
-                #             new_lba_map[node] = orig_lba
-                #         continue
-
-                #     is_modified = any(n in staged_set for n in nodes)
-                #     if orig_lba < self.params.toc_offset // self.params.sector_size and not is_modified: # ignore offsets that were before the TOC
-                #         for node in nodes:
-                #             new_lba_map[node] = orig_lba
-                #         continue
-
-                #     primary_node = next((n for n in nodes if n in staged_set and n.pending_data), None)
-                #     if not primary_node: # Get nodes that have data
-                #         primary_node = next((n for n in nodes if n.size > 0), nodes[0])
-
-                #     data = primary_node.pending_data if primary_node in staged_set else self.get_raw_node(primary_node)
-                #     if data and len(data) > 0:
-                #         is_before_toc = orig_lba < self.params.toc_offset // self.params.sector_size
-                #         original_sector_span = math.ceil(primary_node.size / self.params.sector_size)
-                #         new_sector_span = math.ceil(len(data) / self.params.sector_size)
-
-                #         if is_before_toc and new_sector_span <= original_sector_span:
-                #             write_lba = orig_lba
-                #             f.seek(write_lba * self.params.sector_size)
-                #         else:
-                #             if is_before_toc:
-                #                 logger.warning(f"File at LBA {orig_lba} exceeds original bounds. Moving to end of disk. This may break ISO9660 references...")
-
-                #             write_lba = current_offset // self.params.sector_size
-                #             f.seek(current_offset)
-                #             current_offset += new_sector_span * self.params.sector_size
-
-                #         for node in nodes:
-                #             new_lba_map[node] = write_lba
-
-                #         f.write(data)
-                #         padding_size = (-len(data)) & (self.params.sector_size - 1)
-                #         if padding_size:
-                #             f.write(b'\x00' * padding_size)
-                #     else:
-                #         if any(node.size > 0 for node in nodes):
-                #             logger.warning(f'LBA group at {hex(orig_lba * self.params.sector_size)} has non-zero size but no data. LBA preserved, output may be corrupted')
-                #         for node in nodes: # Aliased toc entries (dummy nodes)
-                #             new_lba_map[node] = orig_lba
-
-                #     if progress_callback and idx % 50 == 0:
-                #         percent = int((idx / total_groups) * 90)
-                #         progress_callback(percent, f'Written {idx}/{total_groups} data blocks')
-
-                # new_toc_bytes = self._build_toc(root.children, staged_set, new_lba_map)
-
-                # # Patch volume descriptor
-                # _ISO9660_VD_SECTOR = 16         # Volume descriptor is always at sector 16
-                # _ISO9660_VOL_SPACE_OFF = 80     # 'Volume Space Size' field
-                # total_sectors = current_offset // self.params.sector_size
-                # f.seek(_ISO9660_VD_SECTOR * self.params.sector_size + _ISO9660_VOL_SPACE_OFF)
-                # f.write(total_sectors.to_bytes(4, 'little') + total_sectors.to_bytes(4, 'big'))
-                # final_size    = max(current_offset, self.params.toc_offset + toc_size)
-                # total_sectors = final_size // self.params.sector_size
 
     def _stream_copy(self, source_handle, output_obj, length, chunk_size = 1024*1024):
         '''Helper for writing out one segment or node at a time'''

@@ -1,29 +1,10 @@
-# Radiata Modding Tool 2.0 +
+# Radiata Stories Tool suite: Technical Documentation
 
-Post 2.0 the tool handles the filesystem automatically in memory. The goal is to browse the virtual file system in memory to extract, analyze, and rebuild the ISO data directly. It uses a node based approach where each virtual file is stored as a `VfsNode`.
+This document provides a highly detailed overview of the system architecture, file system models, binary format handlers, and UI synchronization pipelines of the Radiata Stories Modding & Virtual File System (VFS) Suite.
 
-## Key components
+This suite is a modular, high-performance toolkit designed to unpack, reverse-engineer, edit, and rebuild game archives from the PlayStation 2 game Radiata Stories (tri-Ace engine).
 
-### Logic
-- **Dispatcher**: Manages the active I/O stream, maintains the _buffer_cache for virtual layers, and performs recursive data retrieval. It acts as the "Stateless Factory" for handlers. Type 1. `active_handler` = handler for physical files. Type 2. `temp_handler` = handler for virtual files. The distinction is made because `active_handler` stays open from ISO mount while `temp_handler` is only open during transactions.2
-- **Contracts**: Interace definitions. `BaseHandler` manages format-specific logic (Unpacking/Rebuilding...) while `BaseEditor` handles the data-viewing UI. The **only** place for performing I/O
-- **Registry**: Global lookup service for matching file signatures/extensions as well as actions to their respective Handlers and Editors.
-- **VfsNode**: Holds the data of the node
-- **VfsManager**: Tracks node relationships (HID), physical disk offsets, and Dirty State (pending modifications).
-- **ActionResolver**: Determines context-aware capabilities by merging global actions with format-specific handler actions.
-
-### UI
-- **MainWindow**: Initializes the `QMainWindow`, separates concerns, and contacts dispatcher for iso
-- **MenuBar**: Create and handles the menu bar for the main window (may be separated by UI - Logic in future)
-- **WelcomePage**: All logic for the welcome page
-- **WorkspaceController**: Signals for the workspace page -> Translates user interactions into commands for the `ActionResolver` and `Dispatcher`.
-- **WorkspaceWidget**: UI for the workspace page
-- **TreeModel**: Contains read-only node data to display in the `tree_view` widget
-- **CategoryModel**: Contains the data to display in category widget
-- **CategoryProxyModel**: Contains the proxy data for the category applied to `tree_view`
-
-### Utility
-- **Logger**: Logging system using PyQt signals to bridge standard Python logging into the UI console. With level to color output.
+**Documentation will be updated after the next UI pass**
 
 
 # Data flow
@@ -64,23 +45,23 @@ Used for: Pushing editor changes to ISO
 
 ## Current TODO list:
 
-- Temp file scanning for SLZ / Kods headers with statistics outputting -> `/core/handler/compressor_handler.py` & `/core/handler/kods_handler.py`
+- migrate from using an identity method to getting the identity from the class decorator -> `/core/handlers/`
+- Setup better object structure for VfsNode rather than large list of bools -> `/core/node.py`
+- .pk/audio format support -> `/core/handler/iso_handler.py` & `/core/extension_overrides.py`
 - Better File statistics / display -> `/core/handlers/`
+- FIS/texture handlers / display -> `/core/handlers/fis_handler.py`
 - Further investigate the composite Kods unpacking before deciding rebuild strategy -> `/core/handler/kods_handler.py` & `/core/handler/compressor_handler.py` & `/core/dispatcher'py`
-- Setup Asynchronous worker `QThreads` -> `/core/workers.py`
-- Improved ISO detection -> `/core/handlers/iso_handler.py`
-- Improved UI for hex editor -> `/ui/widgets/hex_editor.py`
-- node import -> `/core/handlers/`
-- node export -> `/core/handlers/`
-- Proper Status Logging for rebuild -> `/core/handlers/iso_handler.py`
 - Saved settings json -> `/ui/`
+- Closing application has to close all background threads.
+- seqw handler -> `/core/handler/seqw_handler.py`
+- wav player (need music when editing obv) -> `/plugins/wav_player.py`
 
 ## Future TODO list:
 
+- Check stylesheet when there are more elements. Consider implementing generic objects rather than specific as needed -> `/ui/style_sheet.py`
 - Stagin/Commiting Menu improvements -> `/ui/ui_core.py`
 - Smart cache for editors -> `/core/dispatcher.py`
-- .pk support -> `/core/handler/iso_handler.py` & `/core/extension_overrides.py`
-- UI improvements (settings, standardized theme.......)
+
 
 # Rough Roadmap
 
