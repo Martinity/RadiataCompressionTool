@@ -45,11 +45,15 @@ Used for: Pushing editor changes to ISO
 
 ## Current TODO list:
 
+- context menu to open editor page
+- editor page with less cluttering
+- descriptor/metadata/properties view on the left default
+- 
+
 - migrate from using an identity method to getting the identity from the class decorator -> `/core/handlers/`
 - Setup better object structure for VfsNode rather than large list of bools -> `/core/node.py`
 - .pk/audio format support -> `/core/handler/iso_handler.py` & `/core/extension_overrides.py`
 - Better File statistics / display -> `/core/handlers/`
-- FIS/texture handlers / display -> `/core/handlers/fis_handler.py`
 - Further investigate the composite Kods unpacking before deciding rebuild strategy -> `/core/handler/kods_handler.py` & `/core/handler/compressor_handler.py` & `/core/dispatcher'py`
 - Saved settings json -> `/ui/`
 - Closing application has to close all background threads.

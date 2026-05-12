@@ -263,11 +263,17 @@ class Dispatcher(QObject):
                     self.apply_edit(result.node, result.payload)
                     self.rebuild_log.emit(f'Import applied to {result.node.name}')
             case ActionType.TREE_EXPAND:
-                if isinstance(result.payload, VfsNode) and self.vfs:
-                    new_nodes = result.payload.children or [result.payload]
-                    self.vfs.insert_children(result.node, new_nodes)
-                    result.node.expansion_pending = False
-                    logger.info(f'Inserted {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
+                if self.vfs:
+                    if isinstance(result.payload, VfsNode) and self.vfs:
+                        new_nodes = result.payload.children or [result.payload]
+                    elif isinstance(result.payload, list):
+                        new_nodes = result.payload
+                    else:
+                        logger.warning(f'TREE_EXPAND action returned unexpected payload type: {type(result.payload)}')
+                    if new_nodes:
+                        self.vfs.insert_children(result.node, new_nodes)
+                        result.node.expansion_pending = False
+                        logger.info(f'Inserted {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
             case ActionType.PROCESS | ActionType.DIALOG | ActionType.EXPORT:
                 pass # UI handled
 
