@@ -12,7 +12,7 @@ HEADERS = {
     # Audio
     b'SEQW'   : '.seqw',    # Sound data (4 bytes)                | 0%
     b'VAGp'   : '.VAG',     # PS2 Standard format                 | 0%
-    (0x000020).to_bytes(3, 'little'): ".020", # looped audio      | 0%
+    (0x000020).to_bytes(3, 'little'): ".020", # TAC audio         | viewer/export
     # Movie
     (0x225277).to_bytes(3, 'little'): ".fmv", # movies            | 0%
     # Mesh
