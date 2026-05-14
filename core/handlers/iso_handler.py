@@ -149,7 +149,7 @@ class IsoHandler(PhysicalHandler):
 
             # Real node
             header: bytes = self.handle.read(32)
-            ext: str = next((match for sig, match in extension_dict.items() if header.startswith(sig)), '.bin')
+            ext: str = next((match for sig, match in extension_dict.items() if header.startswith(sig)), self._check_pk(header))
             category: str = self.FileCategories.get_category(disk_index)
             semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
             target: list[tuple] | None = self.DatacenterTargets.get_target(disk_index)
@@ -360,3 +360,10 @@ class IsoHandler(PhysicalHandler):
             key ^= ((key << 2) ^ self.params.seed) & 0xFFFFFFFF
 
         return scramble
+    
+    def _check_pk(self, header: bytes) -> str:
+        offset_header = int.from_bytes(header[0x10:0x14], 'little')
+        pk3_magic = 0x004E000
+        if offset_header % pk3_magic == 0: # header is pk3 divisible
+            return '.pk3' # pk3 header
+        return 'bin'

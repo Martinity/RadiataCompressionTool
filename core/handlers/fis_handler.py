@@ -305,10 +305,9 @@ def _indices_to_rgba(
 @Registry.register(
     name='FIS Texture Handler',
     extensions=('.fis',),
-    supported_actions={
-        'Properties': ActionDef('Properties', ActionType.DIALOG, 'Texture Properties'),
-    },
-)
+    supported_actions=(
+        ActionDef('Properties', ActionType.DIALOG),
+))
 class FisHandler(LeafHandler):
     '''Leaf handler for FIS textures. The editor widget owns decoding + display.'''
 
@@ -339,9 +338,6 @@ class FisHandler(LeafHandler):
             except Exception as e:
                 return f'Parse error: {e}'
         return None
-
-    def get_identity(self) -> str:
-        return 'FIS Texture'
 
 # ---------------------------------------------------------------------------
 # Editor widget — registered as the viewer for .fis nodes
@@ -440,7 +436,7 @@ class FisEditorWidget(BaseEditor):
     # BaseEditor implementation
     # ------------------------------------------------------------------
 
-    def load_node(self, node: VfsNode, data: bytes) -> None:
+    def load_node(self, node: VfsNode, data: bytes, data_resolver: Callable) -> None:
         super().load_node(node, data)
         self._raw = data
 

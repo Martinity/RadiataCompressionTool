@@ -3,17 +3,22 @@ from core.dispatcher import Dispatcher
 import sys
 from PyQt6.QtWidgets import QApplication
 from core.handlers import discover_handlers
-from ui.widgets.logger import setup_logging
+from ui.editors import discover_editors
+from ui.theme_manager import ThemeManager
+from ui.logger import setup_logging
 import logging
 logger = logging.getLogger('radiata')
 
 
 if __name__ == '__main__':
 
-    discover_handlers() # import hack
+    discover_handlers()
+    discover_editors() 
 
     app = QApplication(sys.argv)
     print('Application Started.')
+    # Initialize ThemeManager
+    ThemeManager.initialize(app)
     # Initialize logger
     qt_log_handler = setup_logging(level=logging.DEBUG)
     # Initialize logic

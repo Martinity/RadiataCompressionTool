@@ -15,10 +15,10 @@ logger = logging.getLogger(f'radiata.{__name__}')
 @Registry.register(
     name='Tri-Ace Ps2 Compression Handler',
     extensions=('.slz', '.sle'),
-    supported_actions={
-        'Decompress': ActionDef('Decompress', ActionType.TREE_EXPAND, 'Decompress file'),
-        'Properties': ActionDef('Properties', ActionType.DIALOG, 'Properties')
-    })
+    supported_actions=(
+        ActionDef('Decompress', ActionType.TREE_EXPAND),
+        ActionDef('Properties', ActionType.DIALOG)
+    ))
 class CompressorHandler(ContainerHandler):
     '''Wrapper for Compressor class'''
 
@@ -140,30 +140,39 @@ class CompressorHandler(ContainerHandler):
 
         return new_compressed_file
 
-    def get_properties(self, node: VfsNode):
-        '''Return formatted properties for UI'''
+    def get_properties(self, node: VfsNode) -> str:
         if not node.children:
             node = self.get_file_tree()
-        
-        lines = ['Compressed File Properties:']
+        lines = ["Compressed File Properties:"]
         for child in node.children:
-            if child.compressed_header:
-                c = child.compressed_header
-                next_file_str = 'No Chained Files.' if not c.next_file_offset else str(c.next_file_offset)
-                ratio = c.compressed_size / c.decompressed_size if c.decompressed_size > 0 else 0
-
-                lines.append(
-                    f'\nMode: {c.mode}\n'
-                    f'Compressed Size: {c.compressed_size}\n'
-                    f'Decompressed Size: {c.decompressed_size}\n'
-                    f'Offset to next chained file: {next_file_str}\n'
-                    f'Compression ratio: {(ratio*100):.02f}%'
-                )
-            return '\n'.join(lines)
+            if not child.compressed_header:
+                continue
+            c = child.compressed_header
+            next_file_str = (
+                None
+                if not c.next_file_offset
+                else str(c.next_file_offset)
+            )
+            ratio = (
+                c.compressed_size / c.decompressed_size
+                if c.decompressed_size > 0
+                else 0
+            )
+            lines.extend([
+                "",
+                f"Mode: {c.mode}",
+                f"Compressed Size: {c.compressed_size}",
+                f"Decompressed Size: {c.decompressed_size}",
+                f"Compression ratio: {(ratio * 100):.02f}%",
+            ])
+            if next_file_str:
+                lines.append(f"Offset to next chained file: {next_file_str}")
+        return "\n".join(lines)
 
     def execute_action(self, node: VfsNode, action_name: str, progress_callback, log_callback, **kwargs) -> Optional[Any]:
         if action_name == 'Decompress':
-            log_callback(f'Decompressed {node.name}...')
+            if log_callback:
+                log_callback(f'Decompressed {node.name}...')
             return self.get_file_tree()
         elif action_name == 'Properties':
             return self.get_properties(node)
@@ -482,7 +491,7 @@ class RadiCompressor():
             self.data = self._unscramble_slz_payload()
 
         if self.mode.name == 'STORE': # STORE mode
-            return self.data[16:]
+            return bytes(self.data[16:])
         
         compressed_size = int.from_bytes(self.data[4:8], 'little')
         expected_size = int.from_bytes(self.data[8:12], 'little')

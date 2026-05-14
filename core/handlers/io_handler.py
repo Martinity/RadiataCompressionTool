@@ -29,12 +29,3 @@ class IOHandler(LeafHandler):
             return self.export_node(kwargs['raw_node'], kwargs['file_path'], progress_callback)
         elif action == 'Import':
             return self.import_node(kwargs['file_path'], progress_callback)
-
-    def get_file_tree(self) -> VfsNode:
-        return VfsNode(name='io_export')
-
-    def rebuild_node(self, node: VfsNode) -> bytes:
-        return b''
-    
-    def get_raw_node(self, node: VfsNode) -> bytes:
-        return b''

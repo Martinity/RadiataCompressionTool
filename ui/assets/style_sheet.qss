@@ -1,0 +1,154 @@
+/* ====================== Base ====================== */
+QMainWindow, QWidget {
+    background-color: {BG_MAIN};
+    color: {TEXT};
+    font-family: {FONT_SANS};
+    font-weight: {BASE_FONT_WEIGHT};
+}
+
+QTreeView, QListView, QTableView, QListWidget, QTreeWidget {
+    background-color: {BG_SECONDARY};
+    border: 1px solid {BORDER};
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
+    gridline-color: {BORDER};
+}
+
+QTreeView::item:hover, QListView::item:hover,
+QTableView::item:hover, QListWidget::item:hover {
+    background-color: {BG_TERTIARY};
+}
+
+/* Headers */
+QHeaderView::section {
+    background-color: {BG_SECONDARY};
+    color: {TEXT};
+    font-weight: bold;
+    padding: 4px;
+    border: none;
+}
+
+QHeaderView::section:hover {
+    background-color: {BG_TERTIARY};
+}
+
+/* Scrollbars */
+QScrollBar:vertical, QScrollBar:horizontal {
+    background: {BG_SECONDARY};
+    width: 12px;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: {INTERACTIVE};
+    min-height: 20px;
+    border-radius: 5px;
+}
+QScrollBar::handle:hover {
+    background: {SCROLL_HOVER};
+}
+
+/* Buttons */
+QPushButton {
+    background-color: {INTERACTIVE};
+    color: {TEXT};
+    border: none;
+    border-radius: 4px;
+}
+QPushButton:hover {
+    background-color: {INTERACTIVE_HOVER};
+}
+QPushButton:pressed {
+    background-color: {ACCENT};
+}
+
+/* Inputs */
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background-color: {BG_SECONDARY};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    padding: 4px;
+}
+
+/* Progress Bar */
+QProgressBar {
+    border: 1px solid {BORDER};
+    background-color: {BG_SECONDARY};
+    text-align: center;
+    border-radius: 4px;
+    color: {TEXT};
+}
+QProgressBar::chunk {
+    background-color: {ACCENT};
+    border-radius: 3px;
+}
+
+/* ====================== Custom Objects ====================== */
+
+#WelcomeSubtitle {
+    color: #888888;
+    margin-bottom: 4px;
+}
+
+#WelcomeButton {
+    border-radius: 8px;
+}
+
+#ConfirmButton {
+    font-weight: bold;
+    background-color: {ACCENT};
+}
+#ConfirmButton:hover {
+    background-color: {ACCENT_HOVER};
+}
+#ConfirmButton:disabled {
+    background-color: {BG_MAIN};
+    color: {BG_MAIN};
+}
+
+#SectionHeader {
+    font-weight: bold;
+}
+
+#PageTitle {
+    font-weight: bold;
+}
+
+#LogOutput {
+    font-family: {FONT_MONO};
+}
+
+#EditorToolbar {
+    background-color: {BG_MAIN};
+    border-bottom: 1px solid {BORDER};
+}
+
+#HexView {
+    background-color: {BG_SECONDARY};
+    font-family: {FONT_MONO};
+}
+
+#FloatClearButton {
+    background-color: {INTERACTIVE};
+    border: none;
+}
+#FloatClearButton:hover {
+    background-color: {INTERACTIVE_HOVER};
+}
+#FloatClearButton:pressed {
+    background-color: {ACCENT};
+}
+
+#DescriptorTag {
+    background-color: {BG_SECONDARY};
+    color: {TEXT};
+}
+
+#SearchOverlay {
+    background-color: rgba(0, 0, 0, 0);
+    color: {TEXT};
+    font-weight: bold;
+}
+
+#GenericText {
+    color: {TEXT};
+    font-family: {FONT_SANS};
+}

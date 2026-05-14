@@ -18,10 +18,11 @@ logger = logging.getLogger(f'radiata.{__name__}')
 @Registry.register(
     name='Kods Archiver',
     extensions=('.kods',),
-    supported_actions={
-        'Unpack': ActionDef('Unpack', ActionType.TREE_EXPAND, 'Unpack archive'),
-        'Properties': ActionDef('Properties', ActionType.DIALOG, 'Properties')
-})
+    supported_actions=(
+        ActionDef('Unpack', ActionType.TREE_EXPAND),
+        ActionDef('Properties', ActionType.DIALOG),
+        ActionDef('Scan', ActionType.PROCESS)
+    ))
 class KodsHandler(ContainerHandler):
     '''Wrapper for Kods archiver class'''
     def __init__(self, source: bytes, parent: VfsNode, datacenter_headers: list[bytes] | None = None) -> None:
@@ -47,6 +48,7 @@ class KodsHandler(ContainerHandler):
             logger.error('No valid headers found for unpacking')
             return root
         
+        bruteforce_offsets = []#self.find_all_embeds()
         master_map = self.archiver.get_kods_map(headers, is_internal)
         extensions = generate_ext_overrides()
         primary_nodes = master_map.get(0, [])
@@ -77,10 +79,31 @@ class KodsHandler(ContainerHandler):
             )
             root.append_child(node)
 
+        seen = []
+        for node in root.children:
+            seen.append(node.offset)
+
+        for i, offset in enumerate(bruteforce_offsets):
+            if offset in seen:
+                continue
+            header = bytes(self.payload_view[offset : offset + 8])
+            ext: str = next((match for sig, match in extensions.items() if header.startswith(sig)), '.bin')
+            node = VfsNode(
+                name=f'Bruteforce {i:02d}{ext}',
+                offset=offset,
+                size=int.from_bytes(header[4:8], 'little') + 8,
+                header=header,
+                extension=ext,
+                parent=root
+            )
+            root.append_child(node)
+            logger.info(f'Added bruteforce node {i} from offset {offset}')
+
         logger.info(f'Successfully unpacked {len(root.children)} sections')
         return root
 
     def get_raw_node(self, node: VfsNode) -> bytes:
+        logger.debug(f'Read {node.size} from {node.offset}')
         return self.payload_view[node.offset : node.offset + node.size].tobytes()
 
     def _collect_headers(self, include_internal: bool = True) -> list[memoryview]:
@@ -122,32 +145,60 @@ class KodsHandler(ContainerHandler):
     
     def get_properties(self) -> str:
         headers_view = self._collect_headers()
-        lines = [f'Kods Archive Properties:\nNumber of Headers: {len(headers_view)}\n']
+        lines = [f"Number of Headers: {len(headers_view)}"]
         for i, header_view in enumerate(headers_view):
-            is_internal =(i==0) and header_view
-            p = self.archiver.parse_header(header_view, is_internal=is_internal)
+            is_internal = (i == 0) and header_view
+            p = self.archiver.parse_header(
+                header_view,
+                is_internal=is_internal
+            )
             if p.num_entries == 0:
                 continue
-
-            mode_str = '32bit aligned' if not p.mode else '16bit aligned'
-            header_title = 'Inline' if i == 0 else f'Datacenter Index {i}'
-
-            lines.append(
-                f'--- Header: {header_title} ---\n'
-                f'Number of Entries: {p.num_entries}\n'
-                f'Compression shift: {p.shift}\n'
-                f'Entry mode: {mode_str}\n'
-                f'Secondary table present: {p.has_second_table}\n'
-                f'Size of Pre-Payload data: {p.payload_offset} bytes\n'
+            mode_str = (
+                "32bit aligned"
+                if not p.mode
+                else "16bit aligned"
             )
-        return '\n'.join(lines)
-
+            header_title = (
+                "Inline"
+                if i == 0
+                else f"Datacenter Index {i}"
+            )
+            lines.extend([
+                f"Header: {header_title}",
+                f"Number of Entries: {p.num_entries}",
+                f"Compression shift: {p.shift}",
+                f"Entry mode: {mode_str}",
+                f"Secondary table present: {p.has_second_table}",
+            ])
+            if p.payload_offset:
+                lines.append(
+                    f"Size of Pre-Payload data: {p.payload_offset} bytes"
+                )
+            lines.append("")  # blank separator line
+        return "\n".join(lines)
+    
+    def find_all_embeds(self) -> list[int]:
+        '''Return all offsets where SLZ can be found'''
+        record_slz = []
+        record_kods = []
+        pos = 0
+        while pos < len(self.payload_view) + 3:
+            if self.payload_view[pos:pos+3] == b'SLZ':
+                record_slz.append(pos)
+            elif self.payload_view[pos:pos+3] == b'Kods':
+                record_kods.append(pos)
+            pos += 1
+        return record_slz
+            
     def execute_action(self, node: VfsNode, action_name: str, progress_callback, log_callback, **kwargs) -> Any:
         if action_name == 'Unpack':
             log_callback(f'Unpacking {node.name}...')
             return self.get_file_tree()
         elif action_name == 'Properties':
             return self.get_properties()
+        elif action_name == 'Scan':
+            return self.find_all_embeds()
         return None
     
 ###----------------------------------------------- Archiver ----------------------------------------------------###
