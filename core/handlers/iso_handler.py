@@ -361,3 +361,10 @@ class IsoHandler(PhysicalHandler):
             key ^= ((key << 2) ^ self.params.seed) & 0xFFFFFFFF
 
         return scramble
+
+    def _check_pk(self, header: bytes) -> str:
+        offset_header = int.from_bytes(header[0x10:0x14], 'little')
+        pk3_magic = 0x004E000
+        if offset_header % pk3_magic == 0: # header is pk3 divisible
+            return '.pk3' # pk3 header
+        return 'bin'
