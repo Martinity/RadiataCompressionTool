@@ -150,7 +150,7 @@ class IsoHandler(PhysicalHandler):
 
             # Real node
             header: bytes = self.handle.read(32)
-            ext: str = next((match for sig, match in extension_dict.items() if header.startswith(sig)), '.bin')
+            ext: str = next((match for sig, match in extension_dict.items() if header.startswith(sig)), self._check_pk(header))
             category: str = self.FileCategories.get_category(disk_index)
             semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
             target: list[tuple] | None = self.DatacenterTargets.get_target(disk_index)

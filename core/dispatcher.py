@@ -4,13 +4,13 @@ import threading
 from pathlib import Path
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
-from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType
+from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, EditorPayload
 from core.navigator import VfsNavigator
 from PyQt6.QtCore import pyqtSignal, QObject, Qt
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from core.contracts import BaseHandler
+    from core.contracts import BaseHandler, BaseEditor
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -19,6 +19,7 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 class Dispatcher(QObject):
     '''Bridge between UI and logic
+
     Node actions pass to Actions.dispatch which routes by ActionDef.action_type.
     Dispatcher does not need to now what an action needs to execute.
     '''
@@ -47,7 +48,6 @@ class Dispatcher(QObject):
         self.active_handler: BaseHandler | None = None
         self.task_coordinator = TaskCoordinator()
         self.nav: VfsNavigator | None = None
-        self._pending_resolutions: dict[tuple, set] = {}
         self._setup_connections()
 
     def _setup_connections(self) -> None:
@@ -117,6 +117,32 @@ class Dispatcher(QObject):
         self.tracker.mark_modified(node, data)
         logger.info(f'Edit applied: {node.name}')
 
+    def open_editor(self, node: VfsNode, editor: 'BaseEditor') -> Any:
+        '''
+        Start background data preparation for an editor
+        
+        Returns a TaskSignal of either:
+            Success   - EditorPayload(node, data)
+            Exception - (False, str)
+        '''
+        if not self.nav:
+            logger.error('Navigator not initialised')
+            return
+        handler_class = Registry.get_handler(node)
+        if not handler_class:
+            logger.warning(f'No handler for {node.name} -- Falling back to generic handler, returning bytes')
+            from core.handlers.generic_binary_handler import GenericBinaryHandler
+            handler_class = GenericBinaryHandler
+
+        signals = self.task_coordinator.start_task(
+            Actions.prepare_editor,
+            handler_class,
+            node,
+            self.nav,
+        )
+        signals.log_message.connect(self.rebuild_log.emit)
+        return signals
+
     def execute_node_action(self, node: VfsNode, action_name: str, **kwargs) -> None:
         '''Route action through Actions.dispatch. '''
         if not self.nav:
@@ -163,6 +189,8 @@ class Dispatcher(QObject):
 
     def close(self) -> None:
         '''For exiting the dispatch'''
+        if self.task_coordinator:
+            self.task_coordinator.shutdown()
         if self.active_handler:
             self.active_handler.close()
         self.vfs            = None
@@ -248,7 +276,7 @@ class Dispatcher(QObject):
             return
         
         if result.status == ActionStatus.FAILURE:
-            logger.error(f'Action "{result.action_name}" filed: {result.message}')
+            logger.error(f'Action "{result.action_name}" failed: {result.message}')
             self.action_complete.emit(result)
             return
         
@@ -264,7 +292,7 @@ class Dispatcher(QObject):
                     self.rebuild_log.emit(f'Import applied to {result.node.name}')
             case ActionType.TREE_EXPAND:
                 if self.vfs:
-                    if isinstance(result.payload, VfsNode) and self.vfs:
+                    if isinstance(result.payload, VfsNode):
                         new_nodes = result.payload.children or [result.payload]
                     elif isinstance(result.payload, list):
                         new_nodes = result.payload
@@ -274,7 +302,7 @@ class Dispatcher(QObject):
                         self.vfs.insert_children(result.node, new_nodes)
                         result.node.expansion_pending = False
                         logger.info(f'Inserted {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
-            case ActionType.PROCESS | ActionType.DIALOG | ActionType.EXPORT:
-                pass # UI handled
+            case _:
+                pass # PROCESS / DIALOG / EXPORT -- UI handled via action_complete
 
         self.action_complete.emit(result)

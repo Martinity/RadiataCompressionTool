@@ -17,17 +17,27 @@ logger = logging.getLogger(f'radiata.{__name__}')
 ###------------------------------------- Action Types -------------------------------------###
 
 class ActionType(Enum):
-    TREE_EXPAND = 'tree_expand'   # Action needs to mutate the tree model
-    PROCESS     = 'process'       # Action needs to return data without UI 
-    DIALOG      = 'dialog'        # Action needs to return data with UI
-    EXPORT      = 'export'        # Action needs to write to disk
-    IMPORT      = 'import'        # Action needs to read from disk
+    '''
+    Defines how the disatcher and Action.dispatch handle results
+
+    TREE_EXPAND  - execute_action returns a VfsNode — dispatcher inserts children\n
+    PROCESS      - execute_action returns node data in Any format — stored as payload\n
+    DIALOG       - execute_action returns a display string — shown in descriptor panel or dialog\n
+    EXPORT       - write node data to disk\n
+    IMPORT       - read file from disk into node
+    '''
+    TREE_EXPAND = 'tree_expand'
+    PROCESS     = 'process'
+    DIALOG      = 'dialog'
+    EXPORT      = 'export'
+    IMPORT      = 'import'
 
 @dataclass(frozen=True)
 class ActionDef:
-    name:        str              # key for handler.execute_action
+    '''Describes a single action.
+    name is the key passed to execute_action and the context menu label'''
+    name:        str
     action_type: ActionType
-    title:       str              # label for UI
 
 ###---------------------------------------- Results ----------------------------------------###
 
@@ -40,8 +50,14 @@ class ActionResult:
     action_name: str
     node:        VfsNode
     status:      ActionStatus
-    payload:     Any = None  # result of the action (bytes, str... etc)
+    payload:     Any = None  # result of the action (bytes, str... etc) depending on ActionType
     message:     str = ''
+
+@dataclass 
+class EditorPayload:
+    '''Result structured for editors. Carries node, data'''
+    node: 'VfsNode'
+    data: Any
 
 ###---------------------------------------- Tasks ------------------------------------------###
 
@@ -83,16 +99,55 @@ class TaskCoordinator(QObject):
         worker = GenericTask(function, *args, **kwargs)
         self.thread_pool.start(worker)
         return worker.signals
+    
+    def shutdown(self):
+        logger.info('TaskCoordiantor: Canceling pending tasks...')
+        self.is_shutting_down = True
+        self.thread_pool.clear()
+        if not self.thread_pool.waitForDone(2000):
+            logger.warning('TaskCoordinator: Some threads did not finish in time.')
 
 ###---------------------------------------- Actions --------------------------------------###
 
 class Actions:
     '''All background task logic in one place
+
     log_callback: user-facing messages (LoggingWindow)
     logger.*:     system/debug messages (LoggingWindow w/ Log Level Filtering)
     progress_callback(%, label): progress bar
     '''
 
+    ### Editor
+    @staticmethod
+    def prepare_editor(
+        handler_class:     type['BaseHandler'],
+        node:             'VfsNode',
+        navigator:        'VfsNavigator',
+        progress_callback: Callable,
+        log_callback:      Callable,
+    ) -> EditorPayload:
+        '''
+        Unwraps the node and calls handler.prepare_editor_data() on a worker thread.
+
+        Returns EditorPayload(node, data) 
+        '''
+        log_callback(f'Loading {node.name}...')
+        progress_callback(10, 'Unwrapping data...')
+
+        raw_bytes = navigator.unwrap_chain(node)
+        header_bytes = navigator.resolve_data_from_hid(getattr(node, 'target', None))
+
+        progress_callback(60, 'Preparing editor data...')
+        with handler_class(raw_bytes, node.parent) as handler:
+            if header_bytes and hasattr(handler, 'datacenter_headers'):
+                handler.datacenter_headers = header_bytes
+            result = handler.prepare_editor_data(node, raw_bytes)
+        
+        progress_callback(100, 'Done')
+        logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__}')
+        return EditorPayload(node=node, data=result)
+
+    ### Entry point for all node actions
     @staticmethod
     def dispatch(
         action_def: 'ActionDef',

@@ -1,9 +1,10 @@
 '''Complex UI mapping handler'''
 from __future__ import annotations
 
-from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel, QStringListModel
+from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel
 from typing import TYPE_CHECKING
 from core.node import VfsManager
+from utilities import human_size
 if TYPE_CHECKING:
     from core.node import VfsNode
 
@@ -86,28 +87,12 @@ class VfsTreeModel(QAbstractItemModel):
             if col == 1: 
                 return node.name
             if col == 2: 
-                return self._human_readable_size(node.size)
+                return human_size(node.size)
             
         if role == Qt.ItemDataRole.UserRole:
             return node
 
         return None
-
-    @staticmethod
-    def _human_readable_size(size: int | None) -> str:
-        '''Convert size to human readable strin'''
-        if size is None or size < 0:
-            return '-'
-        if size == 0:
-            return '0 B'
-        
-        units = ['B', 'KB', 'MB', 'GB', 'TB']
-        value = float(size)
-        i = 0
-        while value >= 1024 and i < len(units) -1:
-            value /= 1024
-            i+=1
-        return f'{value:.1f} {units[i]}' if i>0 else f'{int(value)} B'
     
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         '''Enable selection and interaction with tree'''
@@ -140,15 +125,6 @@ class VfsTreeModel(QAbstractItemModel):
             return QModelIndex()
         return self.createIndex(target_node.row(), 0, target_node)
 
-###--------------------------------------------- Category View ----------------------------------------------------###
-
-class VfsCategoryModel(QStringListModel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.categories = ['All', 'System', 'FMV', 'Audio', 'Texture', 'Script', 'Map', 
-                           'Character', 'Monster', 'Prop', 'Equipment', 
-                           'VFX', 'Scene Setup', 'Animation', 'Battle Animation']
-
 ###---------------------------------------------- Category Proxy -------------------------------------------###
 
 class TreeProxyModel(QSortFilterProxyModel):
@@ -157,6 +133,7 @@ class TreeProxyModel(QSortFilterProxyModel):
         self.active_category: str = 'All'
         self.show_hidden  = False
         self.search_query = ''
+        self._descriptors = {}
         # self.setDynamicSortFilter(True)
         self.setRecursiveFilteringEnabled(True)
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -197,24 +174,90 @@ class TreeProxyModel(QSortFilterProxyModel):
         self.search_query = query.lower().strip()
         self.invalidateFilter()
 
+    def set_descriptors(self, data: dict):
+        self._descriptors = data
+
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
         index = self.sourceModel().index(source_row, 0 , source_parent)
         node = index.data(Qt.ItemDataRole.UserRole)
 
         if not node:
             return False
-        
+
         if not self.show_hidden and node.is_hidden:
             return False
 
-        if self.active_category != 'All':
-            if self.active_category not in node.category:
-                return False
+        if not self.search_query:
+            return True
+
+        query = self.search_query.lower()
+
+        node_name = getattr(node, 'name', '')
+        if query in node_name.lower(): # Search for name
+             return True
+        if query in node.hierarchical_id_str.lower(): # Search for ID
+            return True
+        from ui.ui_core import _DESCRIPTORS
+        descriptor = _DESCRIPTORS.get(node.hierarchical_id_str, {})
+        tags = descriptor.get('tags', [])
+
+        if query.startswith('tag:'): # Seach only tags/clicked tag
+            target_tag = query[4:].strip()
+            return any(target_tag in t.lower() for t in tags)
         
-        if self.search_query:
-            node_name = getattr(node, 'name', '')
-            if (self.search_query not in node_name.lower() and 
-            self.search_query not in getattr(node, 'hierarchical_id_str', '').lower()):
-                return False
-        
-        return True
+        for tag in tags: # Search for tag
+            if query in tag.lower():
+                return True
+        return False
+
+### -------------------------------
+
+class FlatSearchModel(QAbstractItemModel):
+    '''A model that provides a falt list of the VFS nodes'''
+    def __init__(self, vfs_manager, descriptors, parent=None):
+        super().__init__(parent)
+        self.vfs = vfs_manager
+        self.descriptors = descriptors
+        self.matches = []
+        self._query = ''
+
+    def set_query(self, query: str):
+        self._query = query.lower()
+        self.refresh()
+
+    def refresh(self):
+        self.beginResetModel()
+        self.matches = []
+        if self._query:
+            self._search_recursive(self.vfs.root)
+        self.endResetModel()
+    
+    def _search_recursive(self, node: VfsNode):
+        match = self._query in node.name.lower()
+        if not match:
+            node_data = self.descriptors.get(node.hierarchical_id_str, {})
+            tags = node_data.get('tags', [])
+            match = any(self._query in tag.lower() for tag in tags)
+
+        if match:
+            self.matches.append(node)
+
+        for child in node.children:
+            self._search_recursive(child)
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return len(self.matches)
+    
+    def data(self, index, role):
+        if not index.isValid():
+            return None
+        node = self.matches[index.row()]
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            return f'{node.name} ({node.hierarchical_id_str})'
+        if role == Qt.ItemDataRole.UserRole:
+            return node
+        return None
+    
+    def columnCount(self, parent: QModelIndex) -> int:
+        return 1

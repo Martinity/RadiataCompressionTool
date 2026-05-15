@@ -18,10 +18,10 @@ logger = logging.getLogger(f'radiata.{__name__}')
 @Registry.register(
     name='Chain Handler', 
     extensions=('.fps','.fas', '.rmac', '.tgil', '.xbdc', '.dnal', '.lctp', '.idom'), 
-    supported_actions={
-        'Deconstruct Chain': ActionDef('Deconstruct Chain', ActionType.TREE_EXPAND, 'Deconstruct Chain'),
-        'Properties': ActionDef('Properties', ActionType.DIALOG, 'Properties')
-    })
+    supported_actions=(
+        ActionDef('Deconstruct Chain', ActionType.TREE_EXPAND),
+        ActionDef('Properties', ActionType.DIALOG)
+))
 class ChainHandler(ContainerHandler):
     @dataclass(frozen=True, slots=True)
     class ChainHeader:
