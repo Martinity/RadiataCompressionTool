@@ -19,7 +19,7 @@ _GLOBAL_ACTIONS_BY_NAME: dict[str, ActionDef] = {a.name: a for a in GLOBAL_ACTIO
 
 ###---------------------------------------- Registry ------------------------------------------------###
 
-@dataclass(frozen=True)
+@dataclass
 class FormatProfile:
     '''
     Format Metadata/Logic data for all handler/editors
@@ -39,7 +39,8 @@ class FormatProfile:
     )
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, '_action_map', {a.name: a for a in self.actions})
+        self._action_map = {a.name: a for a in self.actions}
+        # object.__setattr__(self, '_action_map', {a.name: a for a in self.actions})
 
     def get_action(self, name: str) -> ActionDef | None:
         '''Look up specific action by name'''
@@ -77,37 +78,41 @@ class Registry:
         '''
         def decorator(cls_or_func):
             actions = _normalise_actions(supported_actions)
-
             cls_or_func._plugin_name = name # stamps the class with the registered name used for identity
 
-            if issubclass(cls_or_func, BaseHandler): # (Handler) for data/tree logic registration
-                profile = FormatProfile(
-                    name=name,
-                    extensions=extensions,
-                    handler_class=cls_or_func,
-                    actions=actions,
-                    categories=categories,
-                    is_fallback=is_fallback
-                )
-            else:  # (Editor) for editor registration
+            profile = next((p for p in cls._profiles if p.name == name), None)
+
+            if not profile:
                 from core.handlers.generic_binary_handler import GenericBinaryHandler
                 profile = FormatProfile(
                     name=name,
-                    extensions=extensions,
                     handler_class=GenericBinaryHandler,
-                    editor_class=cls_or_func,
-                    actions=actions,
-                    categories=categories,
                     is_fallback=is_fallback
                 )
+                cls._profiles.append(profile)
+            
+            if issubclass(cls_or_func, BaseHandler):
+                profile.handler_class = cls_or_func
+            else:
+                profile.editor_class = cls_or_func
                 if is_fallback and cls_or_func not in cls._editors:
                     cls._editors.append(cls_or_func)
-            cls._profiles.append(profile)
-            # build lookup dicts
-            for ext in extensions:
+
+            if actions:
+                combined_actions = list(profile.actions)
+                for action in actions:
+                    if action not in combined_actions:
+                        combined_actions.append(action)
+                profile.actions = tuple(combined_actions)
+                profile._action_map.update({a.name: a for a in actions})
+
+            profile.extensions = tuple(set(profile.extensions + extensions))
+            profile.categories = tuple(set(profile.categories + categories))
+
+            for ext in profile.extensions:
                 if ext not in cls._by_extension or not profile.is_fallback:
                     cls._by_extension[ext] = profile
-            for cat in categories:
+            for cat in profile.categories:
                 if cat not in cls._by_category or not profile.is_fallback:
                     cls._by_category[cat] = profile
 

@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QTableView, QHeaderView, QWidget, QMenu, QApplication, QLineEdit, QFrame,
 )
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelection
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QColor, QBrush, QAction
+from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction
 
 from core.contracts import BaseEditor
 from core.registry import Registry
@@ -119,6 +119,11 @@ class HexEditorWidget(BaseEditor):
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._on_apply_clicked)
         QShortcut(QKeySequence('Ctrl+C'), self).activated.connect(lambda: self._copy('hex'))
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self.search_input.setFocus)
+
+    def show_load_error(self, message: str) -> None:
+        self.info_label.setText(f'Load failed: {message}')
+        self.btn_apply.setEnabled(False)
+        logger.error(f'HexEditor: {message}')
 
     ###---------------------------- Contractuals ---------------------------------###
 

@@ -491,10 +491,13 @@ class WorkspaceController(QObject):
 
     def launch_editor(self, node: VfsNode, editor_class: type[BaseEditor]) -> None:
         '''Instantiate new editor and create view for it'''
+        if self._pending_editor is not None: # 
+            self._pending_editor.show_load_error('Cancelled... another file was opened')
+            self._pending_editor = None
+
         new_editor = editor_class()
         new_editor.begin_loading(node)
         new_editor.apply_requested.connect(self.dispatcher.apply_edit)
-
         self.editor_page.load_editor(new_editor, node)
         self._pending_editor = new_editor
 
@@ -509,10 +512,11 @@ class WorkspaceController(QObject):
                 widget.stack.setCurrentWidget(self.editor_page)
 
         signals = self.dispatcher.open_editor(node, new_editor)
-        if signals:
-            signals.finished.connect(
-                lambda succes, payload, e=new_editor: self._on_editor_data_ready(succes, payload, e)
-            )
+        if not signals:
+            raise ValueError('Navigator not initialized')
+        signals.finished.connect(
+            lambda succes, payload, e=new_editor: self._on_editor_data_ready(succes, payload, e)
+        )
         plugin_name = getattr(editor_class, '_plugin_name', editor_class.__name__)
         logger.info(f'Opening "{node.name}" in {plugin_name}')
 
@@ -524,6 +528,9 @@ class WorkspaceController(QObject):
         
         from core.workers import EditorPayload
         if not success or not isinstance(payload, EditorPayload):
+            editor.show_load_error(str(payload)) if not success else 'Unexpected payload type'
+            self._pending_editor = None
+            return
             error = str(payload) if not success else 'Unexpected payload type'
             logger.error(f'Editor data preparation failed: {error}')
             if hasattr(editor, 'info_label'):

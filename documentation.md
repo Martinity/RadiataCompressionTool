@@ -447,7 +447,9 @@ StagingPage → tracker.confirm_and_rebuild()
 - Fix worsened UI elements from the split -> `/ui/assets/...qss`
 - Placeholder loading utility ? -> `utilities.py` | `ui/ui_core.py`
 - Improve data feedback from background thread/investigate data silent drops -> `/ui/ui_core.WorkspaceController` -> and it's flow
+- Move from iso_handler tagging to descriptor.json tagging -> `/core/handlers/iso_handler.py` & `/ui/assets/descriptors.json`
 - Fix previous editors to support the new system -> `/core/handlers/`
+- Finish flat search, node visibility when search+tree_expand is not ideal -> `/ui/tree_model.py`
 
 ## Future TODO list:
 
@@ -458,3 +460,4 @@ StagingPage → tracker.confirm_and_rebuild()
 - Kods one header one payload strategy -> `/core/handlers/compressor_handler.py` & `/core/handlers/kods_handler.py`
 - Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
 - Stagin/Commiting Menu improvements -> `/ui/ui_core.py`
+- Hover tool tips to expose my secret shortcuts -> `/ui/ui_core.py`

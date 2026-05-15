@@ -135,16 +135,16 @@ class Actions:
         progress_callback(10, 'Unwrapping data...')
 
         raw_bytes = navigator.unwrap_chain(node)
+        if not raw_bytes:
+            raise ValueError(f'unwrap_chain returned empty bytes for {node.name}')
         header_bytes = navigator.resolve_data_from_hid(getattr(node, 'target', None))
-
         progress_callback(60, 'Preparing editor data...')
         with handler_class(raw_bytes, node.parent) as handler:
             if header_bytes and hasattr(handler, 'datacenter_headers'):
                 handler.datacenter_headers = header_bytes
             result = handler.prepare_editor_data(node, raw_bytes)
-        
         progress_callback(100, 'Done')
-        logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__}')
+        logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__} from {handler_class.__name__}')
         return EditorPayload(node=node, data=result)
 
     ### Entry point for all node actions

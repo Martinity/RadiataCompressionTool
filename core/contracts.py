@@ -271,6 +271,10 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     def is_dirty(self) -> bool:
         '''Get node status'''
         return self._is_dirty
+    
+    def show_load_error(self, message: str) -> None:
+        '''Called when prepare_editor fails. Ovverride for custom output'''
+        logger.error(f'{self.__class__.__name__}: load error... {message}')
 
 ###----------------------------------- Read Only Editors ----------------------------------###
 
