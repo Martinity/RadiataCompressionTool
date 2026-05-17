@@ -12,8 +12,8 @@ if TYPE_CHECKING:
 ###-------------------------------------- Globals ------------------------------------------###
 
 GLOBAL_ACTIONS: tuple[ActionDef, ...] = (
-    ActionDef('Export', ActionType.EXPORT),
-    ActionDef('Import', ActionType.IMPORT),
+    ActionDef('Export as Raw Bytes', ActionType.EXPORT),
+    ActionDef('Import and Replace', ActionType.IMPORT),
 )
 _GLOBAL_ACTIONS_BY_NAME: dict[str, ActionDef] = {a.name: a for a in GLOBAL_ACTIONS}
 
@@ -202,3 +202,21 @@ def _normalise_actions(actions: tuple[ActionDef, ...] | dict[str, ActionType] | 
     raise TypeError(
         f'supported_actions must be tuple[ActionDef] or dict[str, ActionType], got {type(actions).__name__!r}'
     )
+
+###--------------------------------- Metadata Stamping --------------------------------------###
+
+class DescriptorToNode:
+    '''Manages the global file descriptor asset database.'''
+    _descriptors: dict[str, dict] = {}
+
+    @classmethod
+    def load_database(cls, asset_path: Path):
+        cls._descriptors = load_json_or_flat_dict(asset_path)
+    
+    @classmethod
+    def populate_node_metadata(cls, node: VfsNode) -> None:
+        '''Look up a node by HID and assigns metadata'''
+        lookup_key = node.hierarchical_id_str
+        meta = cls._descriptors.get(lookup_key, {})
+        node.category = meta.get('category', 'Unknown')
+        node.name = meta.get('title', node.name)

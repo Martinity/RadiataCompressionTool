@@ -465,9 +465,6 @@ class WorkspaceController(QObject):
                         self.view.descriptor_panel.set_properties_text(str(result.payload or result.message))
                     else:
                         logger.warning('"Properties" action returned without payload...')
-                elif isinstance(result.payload, QImage):
-                    dlg = TexturePreviewDialog(result.payload, title=f'Preview: {result.node.name}', parent=self.view)
-                    dlg.exec()
                 else:
                     QMessageBox.information(
                         self.view, action_def.name, str(result.payload or result.message)
@@ -497,7 +494,9 @@ class WorkspaceController(QObject):
 
         new_editor = editor_class()
         new_editor.begin_loading(node)
-        new_editor.apply_requested.connect(self.dispatcher.apply_edit)
+        new_editor.apply_requested.connect(
+            lambda node, data, e=new_editor: self.dispatcher.apply_edit(node, data, e)
+        )
         self.editor_page.load_editor(new_editor, node)
         self._pending_editor = new_editor
 
@@ -1041,33 +1040,6 @@ class MainMenuBar:
         '''Pass the toggle signal to the proxy model'''
         if self.window.controller.proxy_model:
             self.window.controller.proxy_model.set_show_hidden(checked)
-
-
-class TexturePreviewDialog(QDialog):
-    def __init__(self, image: QImage, title="Texture Preview", parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(600, 500)
-        
-        layout = QVBoxLayout(self)
-        
-        # Scroll area in case the texture is larger than the window
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        # Convert QImage to QPixmap for display
-        pixmap = QPixmap.fromImage(image)
-        self.image_label.setPixmap(pixmap)
-        
-        # Add a dark background to see transparency/alpha better
-        self.image_label.setStyleSheet("background-color: #1a1a1a;")
-        
-        scroll.setWidget(self.image_label)
-        layout.addWidget(scroll)
 
 class SearchOverlay(QLabel):
     '''Floating centered text overlay that fades when idle for searching'''

@@ -11,6 +11,7 @@ from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction
 from core.contracts import BaseEditor
 from core.registry import Registry
 from core.node import VfsNode
+from utilities import human_size
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -159,7 +160,7 @@ class HexEditorWidget(BaseEditor):
             self.table_view.setColumnWidth(col, 26)
         header.setSectionResizeMode(17, QHeaderView.ResizeMode.Stretch)
 
-        size_str = _human_size(len(data))
+        size_str = human_size(len(data))
         self.info_label.setText(
             f'Editing: {self.current_node.name} {size_str}' if self.current_node
             else f'Hex View {size_str}'
@@ -472,13 +473,3 @@ class HexTableModel(QAbstractTableModel):
             i for i, (a, b) in enumerate(zip(self._data, self._original)) if a != b
         }
 
-
-###---------------------------------------- Utility -----------------------------------###
-
-def _human_size(n: int) -> str:
-    value = float(n)
-    for unit in ('B', 'KB', 'MB', 'GB'):
-        if value < 1024:
-            return f'{value:.1f} {unit}' if unit != 'B' else f'{value} B'
-        value /= 1024
-    return f'{value:.1f} TB'

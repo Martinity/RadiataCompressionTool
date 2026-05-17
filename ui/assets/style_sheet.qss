@@ -19,6 +19,10 @@ QTableView::item:hover, QListWidget::item:hover {
     background-color: {BG_TERTIARY};
 }
 
+QTreeView:focus, QlistView:focus, QTableView:focus {
+    outline: none;
+}
+
 /* Headers */
 QHeaderView::section {
     background-color: {BG_SECONDARY};
@@ -36,6 +40,7 @@ QHeaderView::section:hover {
 QScrollBar:vertical, QScrollBar:horizontal {
     background: {BG_SECONDARY};
     width: 12px;
+    margin: 0px;
 }
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
     background: {INTERACTIVE};
@@ -44,6 +49,10 @@ QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
 }
 QScrollBar::handle:hover {
     background: {SCROLL_HOVER};
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    height: 0;
+    width: 0;
 }
 
 /* Buttons */
@@ -60,12 +69,33 @@ QPushButton:pressed {
     background-color: {ACCENT};
 }
 
+QMenuBar {
+    background-color: {BORDER};
+    color: {TEXT};
+}
+QMenuBar::item:selected {
+    background-color: {BORDER};
+}
+
+QMenu {
+    background-color {BG_SECONDARY};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+}
+QMenu::item:selected {
+    background-color: {ACCENT};
+}
+
 /* Inputs */
 QLineEdit, QTextEdit, QPlainTextEdit {
     background-color: {BG_SECONDARY};
     color: {TEXT};
     border: 1px solid {BORDER};
     padding: 4px;
+}
+
+QSplitter::handle {
+    background-color: {BORDER};
 }
 
 /* Progress Bar */
@@ -81,13 +111,25 @@ QProgressBar::chunk {
     border-radius: 3px;
 }
 
+QLabel {
+    color: {TEXT};
+}
+
+QComboBox {
+    background-color: {BG_SECONDARY};
+    border: 1px solid {BORDER};
+    padding: 4px;
+}
+QComboBox::drop-down {
+    border: none;
+}
+
 /* ====================== Custom Objects ====================== */
 
 #WelcomeSubtitle {
     color: #888888;
     margin-bottom: 4px;
 }
-
 #WelcomeButton {
     border-radius: 8px;
 }
@@ -125,6 +167,9 @@ QProgressBar::chunk {
     background-color: {BG_SECONDARY};
     font-family: {FONT_MONO};
 }
+#HexView::item:hover {
+    background-color: {BG_TERTIARY};
+}
 
 #FloatClearButton {
     background-color: {INTERACTIVE};
@@ -140,12 +185,19 @@ QProgressBar::chunk {
 #DescriptorTag {
     background-color: {BG_SECONDARY};
     color: {TEXT};
+    font-weight: bold;
+    border-radius: 3px;
+}
+#DescriptorTag:hover {
+    background-color: {INTERACTIVE_HOVER};
+    color: {TEXT};
 }
 
 #SearchOverlay {
     background-color: rgba(0, 0, 0, 0);
     color: {TEXT};
     font-weight: bold;
+    font-size: 42px;
 }
 
 #GenericText {

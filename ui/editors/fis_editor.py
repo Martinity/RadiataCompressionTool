@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable
-from PyQt6.QtCore import Qt, QSize
+from typing import Callable, Any
+from pathlib import Path
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint
 from PyQt6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, QScrollArea, QSizePolicy, QFrame, QFileDialog
+    QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, QScrollArea, QSizePolicy, 
+    QFrame, QFileDialog, QListWidget, QListView, QAbstractItemView, QListWidgetItem
 )
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtGui import QMouseEvent, QPixmap, QImage, QColor, QIcon, QKeySequence, QShortcut
 
-from core.contracts import BaseViewer
+from core.contracts import BaseEditor
 from core.registry import Registry
 from core.node import VfsNode
 from core.handlers.fis_handler import FisEditorPayload, FISInfo
@@ -15,17 +17,77 @@ from core.handlers.fis_handler import FisEditorPayload, FISInfo
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
+class InteractiveCanvas(QLabel):
+    '''Zoom-aware canvas for editing indexed QImages'''
+    painted = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.image_ref: QImage | None = None
+        self.zoom_factor:       float = 1.0
+        self.selected_color_idx:  int = -1
+
+    def set_image(self, img: QImage, zoom: float):
+        self.image_ref = img
+        self.zoom_factor = zoom
+        self.update_display()
+
+    def update_display(self):
+        if not self.image_ref:
+            return
+        new_size = QSize(
+            int(self.image_ref.width() * self.zoom_factor),
+            int(self.image_ref.height() * self.zoom_factor)
+        )
+        pixmap = QPixmap.fromImage(self.image_ref).scaled(
+            new_size,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation
+        )
+        self.setPixmap(pixmap)
+        self.resize(pixmap.size())
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() & Qt.MouseButton.LeftButton:
+            self._paint_pixel(event.position().toPoint())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._paint_pixel(event.position().toPoint())
+        super().mouseMoveEvent(event)
+
+    def _paint_pixel(self, pos: QPoint):
+        if not self.image_ref or self.selected_color_idx < 0:
+            return
+        x = int(pos.x() / self.zoom_factor)
+        y = int(pos.y() / self.zoom_factor)
+        if 0 <= x < self.image_ref.width() and 0 <= y < self.image_ref.height():
+            if self.image_ref.pixelIndex(x, y) != self.selected_color_idx:
+                self.image_ref.setPixel(x, y, self.selected_color_idx)
+                self.update_display()
+                self.painted.emit()    
+
 @Registry.register(name='FIS Texture')
-class FisEditorWidget(BaseViewer):
+class FisEditorWidget(BaseEditor):
     '''Displays a decoded FIS texture with metadata.'''
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.node: VfsNode | None = None
-        self.img:  QImage  | None = None
-        self.info: FISInfo | None = None
-        self.raw_png: bytes | None = None
+        self.node:  VfsNode | None = None
+        self.img:   QImage  | None = None
+        self.info:  FISInfo | None = None
+        self.rwa_fis: bytes | None = None
+
+        self._zoom_factor: float = 1.0
+        self._zoom_step:   float = 1.2
+        self._min_zoom:    float = 0.1
+        self._max_zoom:    float = 30.0
+        self._is_panning:  bool  = False
+
         self._setup_ui()
+        QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self.apply_changes)
+
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -58,25 +120,27 @@ class FisEditorWidget(BaseViewer):
         return bar
 
     def _build_image_area(self) -> QScrollArea:
-        self._image_label = QLabel()
+        self._image_label = InteractiveCanvas()
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        self._image_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._image_label.setMinimumSize(64, 64)
         self._image_label.setText('No texture loaded')
 
+        self._image_label.painted.connect(lambda: self.set_dirty(True))
+
         area = QScrollArea()
         area.setWidget(self._image_label)
-        area.setWidgetResizable(True)
+        area.setWidgetResizable(False)
         area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        area.viewport().installEventFilter(self)
+        self._image_label.installEventFilter(self)
         self._scroll_area = area
         return area
 
     def _build_info_panel(self) -> QFrame:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
-        frame.setFixedWidth(220)
+        frame.setFixedWidth(240)
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(4)
@@ -93,36 +157,82 @@ class FisEditorWidget(BaseViewer):
             row.addWidget(val, stretch=1)
             lay.addLayout(row)
             self._info_rows[key] = val
-
         lay.addStretch()
+        lay.addSpacing(15)
+        lay.addWidget(QLabel('<b>Color Look-Up Table (CLUT)</b>'))
+
+        self._palette_list = QListWidget()
+        self._palette_list.setViewMode(QListView.ViewMode.IconMode)
+        self._palette_list.setIconSize(QSize(20, 20))
+        self._palette_list.setSpacing(2)
+        self._palette_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self._palette_list.setMovement(QListView.Movement.Static)
+        self._palette_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._palette_list.currentRowChanged.connect(self._on_color_selected)
+        lay.addWidget(self._palette_list, stretch=1)
+    
         return frame
     
     def _export_png(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, self.node.name, '', 'All Files (*)')
+        if not self.img or not self.node:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, 'Export PNG', f'{self.node.name}.png', 'PNG Images (*.png)')
         if not path:
             return
-        with open(path, 'wb') as f:
-            f.write(self.raw_png)
-        logger.info(f'Node exported to {path.name}')
+        if not self.img.save(path, 'PNG'):
+            logger.error(f'FIS: QImage.save() failed for {path}')
+        else:
+            logger.info(f'FIS: exported to {Path(path).name}')
+
+    def eventFilter(self, source, event) -> bool:
+        '''Intercept viewport and label events to handle middle-mouse panning'''
+        if source in (self._scroll_area.viewport(), self._image_label):
+            if event.type() == event.Type.MouseButtonPress: # Middle Mouse Event
+                if event.button() == Qt.MouseButton.MiddleButton:
+                    self._is_panning = True
+                    self._pan_start_pos = event.globalPosition().toPoint()
+                    self._pan_start_h_bar = self._scroll_area.horizontalScrollBar().value()
+                    self._pan_start_v_bar = self._scroll_area.verticalScrollBar().value()
+                    self._scroll_area.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    return True
+            elif event.type() == event.Type.MouseMove: # Mouse Drag Event
+                if self._is_panning:
+                    delta = event.globalPosition().toPoint() - self._pan_start_pos
+                    self._scroll_area.horizontalScrollBar().setValue(self._pan_start_h_bar - delta.x())
+                    self._scroll_area.verticalScrollBar().setValue(self._pan_start_v_bar - delta.y())
+                    return True
+            elif event.type() == event.Type.MouseButtonRelease: # Release Middle Mouse Event
+                if event.button() == Qt.MouseButton.MiddleButton and getattr(self, '_is_panning', False):
+                    self._is_panning = False
+                    self._scroll_area.unsetCursor()
+                    return True
+        return super().eventFilter(source, event)
     
     def wheelEvent(self, event):
-        '''Ctrl+scroll to ajust image size'''
+        '''Ctrl+scroll to adjust image size'''
         modifiers = event.modifiers()
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             delta = event.angleDelta().y()
             if delta > 0:
-                self.zoom_in()
+                self._zoom_in()
             elif delta < 0:
-                self.zoom_out()
+                self._zoom_out()
             event.accept()
             return
         super().wheelEvent(event)
 
-    def zoom_in(self):
-        pass
+    def _zoom_in(self):
+        self._zoom_factor *= self._zoom_step
+        if self._zoom_factor > self._max_zoom:
+            self._zoom_factor = self._max_zoom
+        self._apply_zoom()
 
-    def zoom_out(self):
-        pass
+    def _zoom_out(self):
+        self._zoom_factor /= self._zoom_step
+        if self._zoom_factor < self._min_zoom:
+            self._zoom_factor = self._min_zoom
+        self._apply_zoom()
+
 
 ###----------------------------------- Contractuals ---------------------------------------------###
 
@@ -130,6 +240,7 @@ class FisEditorWidget(BaseViewer):
         super().begin_loading(node)
         self.node = node
         self._image_label.setText(f'Loading {node.name}...')
+        self._image_label.adjustSize()
         self._btn_export.setEnabled(False)
 
     def receive_data(self, result: FisEditorPayload, data_resolver: Callable[[VfsNode], bytes] | None = None) -> None:
@@ -138,12 +249,15 @@ class FisEditorWidget(BaseViewer):
         if isinstance(result, FisEditorPayload):
             self.img     = result.image
             self.info    = result.info
-            self.raw_png = result.raw_bytes
+            self.rwa_fis = result.raw_bytes
             self._populate_ui()
         else:
             self._image_label.setText(f'Error loading texture: Got {type(result)} expected "FisEditorPayload"')
 
-    def _populate_ui(self) -> None:
+    def _populate_ui(self, data: bytes = b'') -> None:
+        if not self.img or not self.info:
+            return
+        self._populate_palette()
         self._display_image(self.img)
         self._populate_info(self.info)
         self._title_label.setText(
@@ -152,25 +266,35 @@ class FisEditorWidget(BaseViewer):
         self._btn_export.setEnabled(True)
         logger.debug(f'FIS: loaded {self.node.name} ({self.info.width}×{self.info.height} {self.info.psm_name})')
 
+    def get_modified_data(self) -> Any:
+        if not self.is_dirty() or not self.img or not self.rwa_fis:
+            return self._original_data
+        return (self.img, self.rwa_fis)
+
+    def show_load_error(self, message: str) -> None:
+        self._show_error(message)
+        return 
+
 ###------------------------------------ Display Helpers ---------------------------------------------###
 
     def _display_image(self, img: QImage) -> None:
         '''Show the decoded image, scaled to fit without distortion.'''
-        pixmap = QPixmap.fromImage(img)
-        # Scale to fit the scroll area while preserving aspect ratio
         available = self._scroll_area.size() - QSize(4, 4)
-        if img.width() > available.width() or img.height() > available.height():
-            pixmap = pixmap.scaled(
-                available,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation,
-            )
-        self._image_label.setPixmap(pixmap)
-        self._image_label.resize(pixmap.size())
+        if available.width() > 50 and available.height() > 50:
+            if img.width() > available.width() or img.height() > available.height():
+                zoom_x = available.width() / img.width()
+                zoom_y = available.height() / img.height()
+                self._zoom_factor = min(zoom_x, zoom_y)
+            else:
+                self._zoom_factor = 1.0
+        else:
+            self._zoom_factor = 1.0
+        self._apply_zoom()
 
     def _show_error(self, message: str) -> None:
         self._image_label.setPixmap(QPixmap())
         self._image_label.setText(message)
+        self._image_label.adjustSize()
         self._btn_export.setEnabled(False)
         for lbl in self._info_rows.values():
             lbl.setText('—')
@@ -191,3 +315,33 @@ class FisEditorWidget(BaseViewer):
         self._info_rows['Image offset'].setText(fmt_hex(info.image_offset))
         self._info_rows['Image size'].setText(fmt_hex(info.image_size))
 
+    def _populate_palette(self) -> None:
+        '''Extracts the Qimage color table (CLUT) stored from the handler'''
+        self._palette_list.clear()
+        if not self.img:
+            return
+        colors = self.img.colorTable()
+        for idx, rgb in enumerate(colors):
+            color = QColor.fromRgba(rgb)
+            pixmap = QPixmap(20, 20)
+            pixmap.fill(color)
+
+            item = QListWidgetItem()
+            item.setIcon(QIcon(pixmap))
+            item.setToolTip(f'Index: {idx} (Hex: {color.name()})')
+            self._palette_list.addItem(item)
+
+        if colors:
+            self._palette_list.setCurrentRow(0)
+
+    def _on_color_selected(self, index: int):
+        '''Passes the selected CLUT index to the drawing canvas'''
+        if isinstance(self._image_label, InteractiveCanvas):
+            self._image_label.selected_color_idx = index
+
+    def _apply_zoom(self):
+        if isinstance(self._image_label, InteractiveCanvas):
+            if self.img:
+                self._image_label.image_ref = self.img
+            self._image_label.zoom_factor = self._zoom_factor
+            self._image_label.update_display()

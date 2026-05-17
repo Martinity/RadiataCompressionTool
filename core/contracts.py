@@ -85,6 +85,14 @@ class BaseHandler(abc.ABC):
         Overwrite return type for complexe editors
         '''
         return raw_bytes
+    
+    def decode_editor_data(self, node: VfsNode, payload: Any, **kwargs) -> bytes:
+        '''Process the modified node data back into raw bytes'''
+        if isinstance(payload, bytes):
+            return payload
+        raise NotImplementedError(
+            f'{self.__class__.__name__} must implement decode_editor_data to handle decoding non-bytes payloads'
+        )
 
     @abc.abstractmethod
     def get_file_tree(self) -> 'VfsNode':
@@ -155,7 +163,7 @@ class LeafHandler(BaseHandler):
         self.handle.seek(0)
         return self.handle.read()
     
-    def rebuild_node(self, node: 'VfsNode', stage_nodes: list['VfsNode']) -> bytes:
+    def rebuild_node(self, node: 'VfsNode', staged_nodes: list['VfsNode']) -> bytes:
         self.handle.seek(0)
         return self.handle.read()
     
@@ -186,7 +194,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     BaseViewer, is_mutable = False
         Provides no-op for dirty/apply/discard. Editors function as Viewers.
     '''
-    apply_requested = pyqtSignal(object, bytes) # (VfsNode, new raw data for node)
+    apply_requested = pyqtSignal(object, object) # (VfsNode, Editor Payload for Handler)
     dataChanged = pyqtSignal(bool)
     is_mutable = True
 
@@ -195,6 +203,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         self.current_node:   VfsNode | None = None
         self._is_dirty:      bool           = False
         self._original_data: bytes          = b''
+        self._pending_data: bytes | None    = None
         self._data_resolver: Callable[['VfsNode'], bytes] | None = None
 
     def __repr__(self) -> str:
@@ -250,12 +259,21 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     
     ### Mutability management
     def apply_changes(self) -> None:
-        '''Pushes changes to the Dispatcher/ModTracker'''
+        '''Pushes changed snapshot to the Dispatcher/ModTracker'''
         if self.is_dirty() and self.current_node:
-            new_data = self.get_modified_data()
-            self.apply_requested.emit(self.current_node, new_data)
-            self._original_data = new_data
+            self._pending_data = self.get_modified_data()
+            self.apply_requested.emit(self.current_node, self._pending_data)
+
+    def confirm_changes_applied(self) -> None:
+        '''Called by dispatcher after handler successfully applied decoded editor data to node'''
+        if self.current_node and self._pending_data:
+            self._original_data = self.get_modified_data()
+            self._pending_data  = None
             self.set_dirty(False)
+
+    def reject_changes_applied(self, reason: str) -> None:
+        '''Called by dispatcher when handler failed to decode editor data'''
+        logger.error(f'{self.__class__.__name__} failed to apply changes: {reason}')
 
     def discard_changes(self) -> None:
         '''Reverts the UI back to the original state'''
@@ -295,3 +313,8 @@ class BaseViewer(BaseEditor):
     def get_modified_data(self) -> bytes:
         return self._original_data
     
+    def confirm_changes_applied(self) -> None:
+        pass
+
+    def reject_changes_applied(self, reason: str) -> None:
+        pass

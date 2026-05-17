@@ -102,7 +102,6 @@ class TaskCoordinator(QObject):
     
     def shutdown(self):
         logger.info('TaskCoordiantor: Canceling pending tasks...')
-        self.is_shutting_down = True
         self.thread_pool.clear()
         if not self.thread_pool.waitForDone(2000):
             logger.warning('TaskCoordinator: Some threads did not finish in time.')
@@ -131,14 +130,15 @@ class Actions:
 
         Returns EditorPayload(node, data) 
         '''
-        log_callback(f'Loading {node.name}...')
-        progress_callback(10, 'Unwrapping data...')
-
-        raw_bytes = navigator.unwrap_chain(node)
+        log_callback(f'Preparing editor data for {node.name}...')
+        progress_callback(20, 'Unwrapping nodes...')
+        if node.pending_data:
+            raw_bytes = node.pending_data
+        else:
+            raw_bytes = navigator.unwrap_chain(node)
         if not raw_bytes:
             raise ValueError(f'unwrap_chain returned empty bytes for {node.name}')
         header_bytes = navigator.resolve_data_from_hid(getattr(node, 'target', None))
-        progress_callback(60, 'Preparing editor data...')
         with handler_class(raw_bytes, node.parent) as handler:
             if header_bytes and hasattr(handler, 'datacenter_headers'):
                 handler.datacenter_headers = header_bytes
@@ -146,6 +146,35 @@ class Actions:
         progress_callback(100, 'Done')
         logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__} from {handler_class.__name__}')
         return EditorPayload(node=node, data=result)
+    
+    @staticmethod
+    def decode_editor_data(
+        handler_class: type['BaseHandler'],
+        node: 'VfsNode',
+        payload: Any,
+        progress_callback: Callable,
+        log_callback: Callable,
+    ) -> bytes:
+        '''
+        Takes a complex UI payload and routes it through the node's handler
+        converting it back to raw bytes on a background thread
+        '''
+        log_callback(f'Decoding data for {node.name}')
+        progress_callback(50, 'Decoding payload...')
+        from core.contracts import PhysicalHandler
+        if issubclass(handler_class, PhysicalHandler):
+            raise TypeError(
+                f'{handler_class.__name__} is a PhysicalHandler. decode_editor_data '
+                'requires a ContainerHandler or LeafHandler.'
+            )
+        with handler_class(b'', node.parent) as handler:
+            result = handler.decode_editor_data(node, payload)
+        if not isinstance(result, bytes):
+            raise TypeError(f'Handler {handler_class.__name__} returned {type(result).__name__}, expected bytes')
+            
+        progress_callback(100, 'Decoding complete')
+        logger.debug('Editor payload encoded to bytes')
+        return result
 
     ### Entry point for all node actions
     @staticmethod
@@ -191,7 +220,7 @@ class Actions:
                 if not file_path:
                     return ActionResult(
                         action_name=action_def.name, node=node,
-                        status=ActionStatus.FAILURE, message='No impoer path provided'
+                        status=ActionStatus.FAILURE, message='No import path provided'
                     )
                 return Actions.import_node(
                     node, file_path, progress_callback, log_callback
@@ -281,6 +310,7 @@ class Actions:
                 message=f'Saved to {output_path.name}'
             )
         except Exception as e:
+            logger.error(f'Export failed: {e}', exc_info=True)
             return ActionResult(
                 action_name='Export',
                 node=node,
@@ -331,6 +361,8 @@ class Actions:
         log_callback(f'{action_name} on node: {node.hierarchical_id_str}...')
         try:
             node_bytes   = navigator.unwrap_chain(node)
+            if not node_bytes:
+                raise ValueError(f'unwrap_chain returned empty bytes for {node.name}')
             header_bytes = navigator.resolve_data_from_hid(getattr(node, 'target', None))
 
             with handler_class(node_bytes, node.parent) as handler:

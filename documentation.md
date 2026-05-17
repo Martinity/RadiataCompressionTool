@@ -25,6 +25,10 @@ main.py
 
 Central service locator for all registered handlers and editors.
 
+**Decorators**
+To register handler/editors `@Registry.register(Fields)` with `Fields` from `FormatProfile` below.
+To link a handler to an editor assign them to the same `name` insuring that atleast one of the registrations contains the `extensions` or `categories` you want to work on.
+
 **`FormatProfile`** (frozen dataclass)
 
 | Field | Type | Purpose |
@@ -444,11 +448,9 @@ StagingPage → tracker.confirm_and_rebuild()
 
 ## Current TODO list:
 
-- Fix worsened UI elements from the split -> `/ui/assets/...qss`
-- Placeholder loading utility ? -> `utilities.py` | `ui/ui_core.py`
-- Improve data feedback from background thread/investigate data silent drops -> `/ui/ui_core.WorkspaceController` -> and it's flow
+- Palette color swapping for FIS editor -> `/ui/editors/fis_editor.py`
 - Move from iso_handler tagging to descriptor.json tagging -> `/core/handlers/iso_handler.py` & `/ui/assets/descriptors.json`
-- Fix previous editors to support the new system -> `/core/handlers/`
+- Fix TAC editor to support the new system -> `/core/handlers/tac_handler.py`
 - Finish flat search, node visibility when search+tree_expand is not ideal -> `/ui/tree_model.py`
 
 ## Future TODO list:
@@ -461,3 +463,4 @@ StagingPage → tracker.confirm_and_rebuild()
 - Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
 - Stagin/Commiting Menu improvements -> `/ui/ui_core.py`
 - Hover tool tips to expose my secret shortcuts -> `/ui/ui_core.py`
+- Investigate whether or not editors should end up being generic to format (ex. ImageEditor for all QImage payloads?)

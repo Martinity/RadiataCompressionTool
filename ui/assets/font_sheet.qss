@@ -29,3 +29,11 @@ QPushButton {
     padding: {BTN_PADDING};
     min-width: {BTN_MIN_WIDTH};
 }
+
+#DescriptorTag {
+    font-size: {FONT_SIZE};
+}
+
+#SearchOverlay {
+    font-size: 42px;
+}

@@ -4,7 +4,7 @@ import threading
 from pathlib import Path
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
-from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, EditorPayload
+from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType
 from core.navigator import VfsNavigator
 from PyQt6.QtCore import pyqtSignal, QObject, Qt
 from typing import TYPE_CHECKING, Any
@@ -73,6 +73,7 @@ class Dispatcher(QObject):
             handler_class = Registry.get_handler(source)
             if not handler_class:
                 logger.warning(f'No handler for {source.name}')
+                return []
             return self._load_physical(handler_class, source)
         
         if source.children or source.expansion_pending:
@@ -113,9 +114,36 @@ class Dispatcher(QObject):
             return b''
         return self.nav.unwrap_chain(node)
 
-    def apply_edit(self, node: VfsNode, data: bytes) -> None:
-        self.tracker.mark_modified(node, data)
-        logger.info(f'Edit applied: {node.name}')
+    def apply_edit(self, node: VfsNode, data: Any, editor: BaseEditor | None = None) -> None:
+        '''Pushes changes to the tracker.
+        If data is not bytes, dispatches to a background worker to decode the payload
+        Notifies the editor when finished'''
+        if isinstance(data, bytes):
+            self.tracker.mark_modified(node, data)
+            logger.info(f'Edit applied directly: {node.name}')
+            if editor:
+                editor.confirm_changes_applied()
+            return
+
+        if not editor:
+            return
+        handler_class = Registry.get_handler(node)
+        if not handler_class:
+            error_msg = f'No handler registered for {node.name} to compile payload.'
+            logger.error(error_msg)
+            if editor:
+                editor.reject_changes_applied(error_msg)
+            return
+        signals = self.task_coordinator.start_task(
+            Actions.decode_editor_data,
+            handler_class,
+            node,
+            data
+        )
+        signals.log_message.connect(self.rebuild_log.emit)
+        logger.info('calling finished... _on_decode_done')
+        signals.finished.connect(
+            lambda success, result: self._on_decode_done(success, result, node, editor))
 
     def open_editor(self, node: VfsNode, editor: 'BaseEditor') -> Any:
         '''
@@ -292,6 +320,7 @@ class Dispatcher(QObject):
                     self.rebuild_log.emit(f'Import applied to {result.node.name}')
             case ActionType.TREE_EXPAND:
                 if self.vfs:
+                    new_nodes: list[VfsNode] = []
                     if isinstance(result.payload, VfsNode):
                         new_nodes = result.payload.children or [result.payload]
                     elif isinstance(result.payload, list):
@@ -306,3 +335,17 @@ class Dispatcher(QObject):
                 pass # PROCESS / DIALOG / EXPORT -- UI handled via action_complete
 
         self.action_complete.emit(result)
+
+    def _on_decode_done(self, success: bool, result: Any, node: VfsNode, editor: BaseEditor) -> None:
+        '''Callback for when handler finishes decoding'''
+        logger.info('In _on_decode_done')
+        if success and isinstance(result, bytes):
+            self.tracker.mark_modified(node, result)
+            logger.info(f'Edit applied after background compilation: {node.name}')
+            if editor:
+                editor.confirm_changes_applied()
+        else:
+            error_msg = str(result) if not success else f'Compilation returned {type(result).__name__}, expected bytes'
+            logger.error(f'Payload compilation failed: {error_msg}')
+            if editor:
+                editor.reject_changes_applied(error_msg)
