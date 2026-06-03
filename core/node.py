@@ -1,10 +1,12 @@
+'''Node metadata. Contains three supporting classes, VfsNode (File data), VfsManager (Relational data), ModTracker (Mutation tracking)'''
 from __future__ import annotations
-from enum import Enum, auto
+
 import threading
-from typing import Tuple, TYPE_CHECKING, NamedTuple
+from enum import Enum, auto
+from typing import Tuple, NamedTuple, Callable, TYPE_CHECKING
 from PyQt6.QtCore import pyqtSignal, QObject
 if TYPE_CHECKING:
-    from core.handlers.compression_handler import CompressorHandler
+    from core.handlers.compression_container import CompressorHandler
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -22,28 +24,28 @@ class VfsNode:
     '''Pure Data Container. All files whether iso, kods, or raw are all nodes. '''
     def __init__(
         self, 
-        name: str = 'Undefined', 
-        category: str = 'Unknown', 
-        offset: int = 0, 
-        size: int = 0, 
-        header: bytes = b'', 
+        name:      str = 'Undefined', 
+        category:  Tuple[str, ...] = ('Unknown',), 
+        offset:    int = 0, 
+        size:      int = 0, 
+        header:    bytes = b'', 
         extension: str = '.bin', 
-        parent: VfsNode | None = None,
-        hid: Tuple[int, ...] = (),
-        target: list[Tuple[int, ...]] | None = None,
+        parent:    VfsNode | None = None,
+        hid:       Tuple[int, ...] = (),
+        target:    Tuple[int, ...] | None = None,
     ):
-        self.name = name                                    # semantic name from overrides
+        self.name     = name                                # semantic name from overrides
         self.category = category                            # semantic category derived from disk index
-        self.parent = parent                                # parent node (None = Root)
+        self.parent   = parent                              # parent node (None = Root)
         self.children: list[VfsNode] = []                   # children node(s)
 
         self.offset = offset                                # Relative offset into parent
-        self.size = size                                    # Size of node in bytes (VirtualFile=disk[offset:offset+size])
-        self.target: list[Tuple[int,...]] | None = target   # Header HID for unpacking
+        self.size   = size                                  # Size of node in bytes (VirtualFile=disk[offset:offset+size])
+        self.target: Tuple[int,...] | None = target         # Header HID for unpacking datacenter
 
-        self.header = header                                # raw header
+        self.header    = header                             # raw header
         self.extension = extension                          # extension from override
-        self.compressed_header: CompressorHandler.SlzHeader | None = None # SLZ source header
+        self.compressed_header: CompressorHandler.SlzHeader | None = None        # SLZ source header
 
         self._id_path: Tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
 
@@ -51,11 +53,11 @@ class VfsNode:
         self.pending_data: bytes | None = None              # cached data
 
         # Flags; Useful for rebuild and UI
-        self.is_physical = False                            # Has physical address
+        self.is_physical   = False                          # Has physical address
         self.is_compressed = False                          # SLZ
-        self.is_banked = False
-        self.is_unpacked = False                            # Static Kods
-        self.is_hidden = False                              # Hide node in UI (file system related or null nodes by default)
+        self.is_banked     = False
+        self.is_unpacked   = False                          # Static Kods
+        self.is_hidden     = False                          # Hide node in UI (file system related or null nodes by default)
 
         self.expansion_pending: bool = False                 # Threading active bool
         self._expansion_event: threading.Event | None = None # Threading event for active thread
@@ -91,8 +93,8 @@ class VfsNode:
         
     def begin_expansion(self) -> threading.Event:
         '''Mark expansion in progress. Return wait event'''
-        self.expansion_pending = True
         self._expansion_event = threading.Event()
+        self.expansion_pending = True
         return self._expansion_event
     
     def finish_expansion(self) -> None:
@@ -123,14 +125,14 @@ class VfsManager(QObject):
     insert_finished = pyqtSignal()
     node_updated = pyqtSignal(VfsNode)
 
-    def __init__(self, root_node: VfsNode):
+    def __init__(self, root_node: VfsNode, node_enricher: Callable[[VfsNode], None] | None = None) -> None:
         super().__init__()
-        self.root = root_node
-        self._lock = threading.RLock()
-
+        self.root        = root_node
+        self.enrich_node = node_enricher
+        self._lock       = threading.RLock()
        
-        self.nodes_by_id: dict[Tuple[int, ...], VfsNode] = {}  # Flat path lookup map
-        self.physical_offsets: dict[VfsNode, int] = {}         # Physical disk map
+        self.nodes_by_id:      dict[Tuple[int, ...], VfsNode] = {}  # Flat path lookup map
+        self.physical_offsets: dict[VfsNode, int] = {}              # Physical disk map
         # Initialize root with offset 0
         self._register_recursive(self.root) # Register physical nodes with VFS initilization
     
@@ -143,7 +145,7 @@ class VfsManager(QObject):
             self.physical_offsets[node] = disk_base + node.offset
         for child in node.children:
             self._register_recursive(child)
-    
+
     def register_node(self, node: VfsNode):
         with self._lock:
             self._register_recursive(node)
@@ -155,16 +157,24 @@ class VfsManager(QObject):
         
         with self._lock:
             base_idx = len(parent.children)
-            for child in new_children: # Inherit categories
-                child.category = parent.category
             self.insert_start.emit(parent, base_idx, base_idx + len(new_children) - 1)
             for i, child in enumerate(new_children): # Add the nodes to the file system / tree
                 child.parent = parent
                 child._id_path = parent._id_path + (base_idx + i,)
                 child.is_hidden = True if parent.is_hidden or not child.size or child.offset == -1 else False
+                if self.enrich_node:
+                    self.enrich_node(child)
                 parent.children.append(child)
                 self._register_recursive(child)
             self.insert_finished.emit()
+
+    def enrich_initial_tree(self) -> None:
+        '''Walk the tree after initialization enriching nodes with metadata'''
+        if not self.enrich_node:
+            return
+        for child in self.root.children:
+            self.enrich_node(child)
+        logger.debug('VfsManager.enrich_initial_tree: complete')
 
     ###--------------------- Lookup -----------------------###
 
@@ -181,7 +191,7 @@ class VfsManager(QObject):
 
     def snapshot_hids(self, hids: list[Tuple[int,...]]) -> HidSnapshot:
         '''Lock-protected snapshot. Return nodes already in the VFS'''
-        resolved: list[VfsNode] =[]
+        resolved:   list[VfsNode] =[]
         unresolved: list[Tuple[int,...]] = []
 
         with self._lock:
@@ -227,16 +237,22 @@ class ModTracker(QObject):
         super().__init__()
         self.modified_nodes: set[VfsNode] = set()
         self.rebuild_queue:  set[VfsNode] = set()
+        self._originals:     dict[VfsNode, bytes] = {}
 
     def _emit_state(self):
         self.state_changed.emit(len(self.modified_nodes), len(self.rebuild_queue))
 
-    def mark_modified(self, node: VfsNode, new_data: bytes) -> None:
+    def mark_modified(self, node: VfsNode, new_data: bytes, original_data: bytes) -> None:
+        if node not in self._originals:
+            self._originals[node] = original_data
         node.pending_data = new_data
         node.status       = NodeStatus.MODIFIED
         self.modified_nodes.add(node)
         self.node_modified.emit(node)
         self._emit_state()
+
+    def get_original(self, node: VfsNode) -> bytes:
+        return self._originals.get(node, b'')
 
     def stage_node(self, node: VfsNode) -> None:
         '''Move from cache to staging area'''
@@ -260,6 +276,7 @@ class ModTracker(QObject):
         '''Discard changes'''
         self.modified_nodes.discard(node)
         self.rebuild_queue.discard(node)
+        self._originals.pop(node, None)
         node.clear_pending()
         node.status = NodeStatus.UNMODIFIED
         logger.info(f'Reverted changes for node: {node.hierarchical_id_str}')
@@ -278,4 +295,5 @@ class ModTracker(QObject):
         '''Clear state when closing an ISO'''
         self.modified_nodes.clear()
         self.rebuild_queue.clear()
+        self._originals.clear()
         self._emit_state()

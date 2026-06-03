@@ -1,3 +1,5 @@
+'''ContainerHandler for unpacking what I think the game calls "spf" tbh I am not sure tho 
+I did not need to analyse any MIPS to reverse this format at this surface level'''
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,6 +17,11 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 ###------------------------------- Chain handler -----------------------------------###
 
+'''
+fps payload [28:32] offset to FIS payload + header size (0x40)
+[20:24] 6 = fis is contained?
+[34:36] seems to be C0 B4 or similar
+'''
 @Registry.register(
     name='Chain Handler', 
     extensions=('.fps','.fas', '.rmac', '.tgil', '.xbdc', '.dnal', '.lctp', '.idom'), 
@@ -36,12 +43,11 @@ class ChainHandler(ContainerHandler):
         self.data = memoryview(source)
 
     def get_raw_node(self, node: VfsNode) -> bytes:
-        return self.data[node.offset : node.offset + node.size]
+        return bytes(self.data[node.offset : node.offset + node.size])
 
     def get_file_tree(self) -> VfsNode:
         root = VfsNode(
             name=f"{getattr(self.handler_parent, 'name', 'Chain')}_contents",
-            category=getattr(self.handler_parent, 'category', 'Unknown'),
             parent=self.handler_parent,
         )
         extensions = generate_ext_overrides()
@@ -71,7 +77,7 @@ class ChainHandler(ContainerHandler):
         logger.info(f'Successfully unpacked {len(root.children)} nodes from chain')
         return root
 
-    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode], log_callback: Callable) -> bytes:
         staged_set = set(staged_nodes)
         previous_size = 0
         new_node = bytearray()
@@ -86,10 +92,11 @@ class ChainHandler(ContainerHandler):
             new_node += payload
 
             previous_size = len(payload)
+        log_callback(f'New spf chain built. Original size:{node.size} New size:{len(new_node)}')
         return new_node
     
     def get_properties(self, node: VfsNode):
-        pass
+        return 'Not yet Implemented'
 
     def execute_action(self, node: VfsNode, action_name: str, progress_callback: Callable[[int, str], None], log_callback: Callable[[str], None], **kwargs) -> Any:
         if action_name == 'Deconstruct Chain':

@@ -2,8 +2,7 @@ from ui.ui_core import MainWindow
 from core.dispatcher import Dispatcher
 import sys
 from PyQt6.QtWidgets import QApplication
-from core.handlers import discover_handlers
-from ui.editors import discover_editors
+from core.registry import discover_all, Registry
 from ui.theme_manager import ThemeManager
 from ui.logger import setup_logging
 import logging
@@ -12,8 +11,8 @@ logger = logging.getLogger('radiata')
 
 if __name__ == '__main__':
 
-    discover_handlers()
-    discover_editors() 
+    discover_all()
+    Registry.summary()
 
     app = QApplication(sys.argv)
     print('Application Started.')

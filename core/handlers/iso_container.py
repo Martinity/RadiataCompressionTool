@@ -1,4 +1,4 @@
-'''Handle ISO related processing. Extraction, rebuilding, TOC parsing, disk verification'''
+'''PhysicalHandler ISO related processing. Extraction, rebuilding, TOC parsing, disk verification'''
 from __future__ import annotations
 
 import struct
@@ -39,76 +39,41 @@ class IsoHandler(PhysicalHandler):
     class FileCategories:
         '''Known File Categories'''
         _CATEGORIES = {
-            range(8, 17):       'FMV',
-            range(3, 4):        'Audio',
-            range(42, 176):     'TAC Audio',
-            range(176, 181):    'Audio',
-            range(188, 189):    'Audio',
-            range(184, 188):    'Script',
-            range(204, 205):    'Script',
-            range(206, 207):    'Script',
-            range(4, 5):        'Texture',
-            range(26, 27):      'Texture',
-            range(189, 204):    'Texture',
-            range(205, 206):    'Texture',
-            range(207, 1206):   'Map',
-            range(1206, 1511):  'Character',
-            range(1511, 1688):  'Monster',
-            range(1688, 1939):  'Prop',
-            range(1939, 2126):  'Equipment',
-            range(2126, 2426):  'VFX',
-            range(2426, 3426):  'Scene Setup',
-            range(3426, 3629):  'Animation',
-            range(3730, 4151):  'Battle Animation',
+            range(8, 17):       ('FMV',),
+            range(3, 4):        ('Audio',),
+            range(42, 176):     ('TAC Audio',),
+            range(176, 181):    ('Audio',),
+            range(188, 189):    ('Audio',),
+            range(184, 188):    ('Script',),
+            range(204, 205):    ('Script',),
+            range(206, 207):    ('Script',),
+            range(4, 5):        ('Texture',),
+            range(26, 27):      ('Texture',),
+            range(189, 204):    ('Texture',),
+            range(205, 206):    ('Texture',),
+            range(207, 1206):   ('Map',),
+            range(1206, 1511):  ('Character',),
+            range(1511, 1688):  ('Monster',),
+            range(1688, 1939):  ('Prop',),
+            range(1939, 2126):  ('Equipment',),
+            range(2126, 2426):  ('VFX',),
+            range(2426, 3426):  ('Scene Setup',),
+            range(3426, 3629):  ('Animation',),
+            range(3730, 4151):  ('Battle Animation',),
 
-            range(0, 3):        'System', # boot
-            range(5, 8):        'System', # datacenter/SO3
-            range(18, 26):      'System', # stats
-            range(27, 42):      'System', # core/debug
-            range(182, 184):    'System', # game
+            range(0, 3):        ('System',), # boot
+            range(5, 8):        ('System',), # datacenter/SO3
+            range(18, 26):      ('System',), # stats
+            range(27, 42):      ('System',), # core/debug
+            range(182, 184):    ('System',), # game
         }
         @classmethod
-        def get_category(cls, index: int) -> str:
+        def get_category(cls, index: int) -> tuple[str, ...]:
             '''Return semantic file category'''
             for index_range, name in cls._CATEGORIES.items():
                 if index in index_range:
                     return name
-            return "Unknown"
-        
-    class DatacenterTargets:
-        '''Kods datacenter targets'''
-        _TARGET_STATIC = { # format: [disk index]:[Datacenter header HIDs]
-            186: (5, 0), 204: (5, 1),
-            185: (5, 7),  187: (5, 9),
-            203: (5, 10), 189: (5, 11), 190: (5, 12),
-            191: (5, 13), 192: (5, 14), 193: (5, 15),
-            194: (5, 16), 195: (5, 17), 196: (5, 18),
-            197: (5, 19), 198: (5, 20), 199: (5, 21),
-            200: (5, 22), 201: (5, 23), 206: (5, 25),
-            179: (5, 26), 178: (5, 27), 177: (5, 28),
-            176: (5, 29), 180: (5, 30), 188: (5, 31)
-        }
-        _TARGET_MAP = [ # format: [Start Idx, End Idx, HID prefix, Number of Header Idxs]
-            (1206, 1511, (5, 2, 0), 10),
-            (1511, 1682, (5, 3, 0), 10),
-            (1688, 1939, (5, 4, 0), 10),
-            (1939, 2126, (5, 5, 0), 10),
-            (2126, 2426, (5, 6, 0), 10),
-        ]
-        @classmethod
-        def get_target(cls, disk_index: int) -> list[tuple[int,...]] | None:
-            '''Return the datacenter header HID(s) for the datacenter target'''
-            # Single datacenter header
-            if disk_index in cls._TARGET_STATIC:
-                return [cls._TARGET_STATIC[disk_index]]
-
-            # Multiple datacenter headers
-            for start, end, hid_prefix, steps in cls._TARGET_MAP:
-                if start <= disk_index < end:
-                    base_val = (disk_index - start) * steps
-                    return [hid_prefix  + (j + base_val,) for j in range(steps)]
-        
-            return None
+            return ("Unknown",)
 
     def __init__(self, iso_path: Path, parent=None):
         '''Initialize iso properties'''
@@ -151,20 +116,18 @@ class IsoHandler(PhysicalHandler):
             # Real node
             header: bytes = self.handle.read(32)
             ext: str = next((match for sig, match in extension_dict.items() if header.startswith(sig)), self._check_pk(header))
-            category: str = self.FileCategories.get_category(disk_index)
+            category: tuple[str, ...] = self.FileCategories.get_category(disk_index)
             semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
-            target: list[tuple] | None = self.DatacenterTargets.get_target(disk_index)
-            ext = '.kods' if target else ext
 
             node = VfsNode(
-                name=f'{semantic_name}{ext}',
+                name=semantic_name or 'Unknown',
                 category=category,
                 offset=offset,
                 size=(entry['size'] * self.params.sector_size),
                 parent=root,
                 header=header,
-                extension='.kods' if target else ext,
-                target=target
+                extension=ext,
+                target=None
             )
             node.is_physical = True  # Set as reference node for all file processes
             root.append_child(node)
@@ -174,12 +137,18 @@ class IsoHandler(PhysicalHandler):
         return root
     
     def get_raw_node(self, node: VfsNode) -> bytes:
-        """Called for the raw data of a physical node"""
-        self.handle.seek(node.offset)
-        data = self.handle.read(node.size)
+        """Called for the raw data of a physical node with a private handle"""
+        with open(self.path, 'rb') as fh:
+            fh.seek(node.offset)
+            data = fh.read(node.size)
 
         logger.debug(f'Read {len(data) // self.params.sector_size} sectors from offset {hex(node.offset)}')
         return data
+    
+    def _read_node_from(self, file_handle, node: VfsNode) -> None:
+        '''Called for raw data of a physical node with an already open handle'''
+        file_handle.seek(node.offset)
+        return file_handle.read(node.size)
     
     ###----------------------------- TOC Parsing ---------------------------------###
 
@@ -216,27 +185,33 @@ class IsoHandler(PhysicalHandler):
 
 ###----------------------------------- Build ISO ------------------------------------------###
 
-    def rebuild_node(self, root: VfsNode, staged_nodes: list[VfsNode], output_path: Path, progress_callback: Callable[[int, str], None] | None = None) -> bool:
+    def rebuild_node(
+        self, 
+        node:              VfsNode, 
+        staged_nodes:      list[VfsNode], 
+        output_path:       Path, 
+        progress_callback: Callable[[int, str], None] | None = None
+    ) -> bool:
         '''Rebuilds the ISO, preserving physical ordering, aliasing, and system file integrity.'''
         if output_path.resolve() == self.source.resolve():
             raise ValueError('Cannot overwrite source ISO')
         logger.info(f'Rebuilding ISO to {output_path}')
-        toc_lba = self.params.toc_offset // self.params.sector_size
-        toc_size = self.params.total_entries * 3 * 4
         staged_set = set(staged_nodes)
         try:
-            with open(output_path, 'wb') as f:
+            with open(self.path, 'rb') as src, open(output_path, 'wb') as dst: # open private handle
                 if progress_callback:
                     progress_callback(0, 'Initialized ISO rebuild...')
+                toc_lba = self.params.toc_offset // self.params.sector_size
+                toc_size = self.params.total_entries * 3 * 4
                 # Copy pre-TOC
-                self.handle.seek(0)
-                self._stream_copy(self.handle, f, self.params.toc_offset)
+                src.seek(0)
+                self._stream_copy(src, dst, self.params.toc_offset)
                 # Reserve TOC space
-                f.write(b'\x00' * toc_size)
+                dst.write(b'\x00' * toc_size)
                 # Start sequential build
                 new_lba_map: dict[VfsNode, int] = {}
                 current_offset = self.params.toc_offset + toc_size
-                for idx, child in enumerate(root.children):
+                for idx, child in enumerate(node.children):
                     orig_lba = self.toc[idx]['lba'] if idx < len(self.toc) else 0
                     # TOC self-reference, built in _build_toc
                     if idx == 0:
@@ -253,34 +228,34 @@ class IsoHandler(PhysicalHandler):
                     data = (
                         child.pending_data 
                         if child in staged_set and child.pending_data
-                        else self.get_raw_node(child)
+                        else self._read_node_from(src, child)
                     )
                     if not data:
                         logger.warning(f'No data for {child.name} (idx {idx})')
                         new_lba_map[child] = 0
                         continue
                     new_lba_map[child] = current_offset // self.params.sector_size
-                    f.write(data)
+                    dst.write(data)
                     padding = (-len(data)) & (self.params.sector_size - 1)
                     if padding:
-                        f.write(b'\x00' * padding)
+                        dst.write(b'\x00' * padding)
                     current_offset += len(data) + padding
 
                     if progress_callback and idx % 50 == 0:
                         pct = int((idx / self.params.total_entries) * 90)
                         progress_callback(pct, f'Writing file {idx}/{self.params.total_entries}')
                 # Verify the TOC
-                new_toc = self._build_toc(root.children, staged_set, new_lba_map)
+                new_toc = self._build_toc(node.children, staged_set, new_lba_map)
                 new_sig = struct.unpack_from('<I', new_toc, 0)[0]
                 if new_sig != self.params.signature:
                     raise RuntimeError(f'TOC signature mismatch. Expected {hex(self.params.signature)} got: {hex(new_sig)}. Entry 0 LBA reconstruction failed.')
-                f.seek(self.params.toc_offset)
-                f.write(new_toc)
+                dst.seek(self.params.toc_offset)
+                dst.write(new_toc)
 
                 # Patch ISO9660 Volume Descriptor
                 total_sectors = current_offset // self.params.sector_size
-                f.seek(_VD_SECTOR * self.params.sector_size + _VD_VOL_SPACE_OFF)
-                f.write(total_sectors.to_bytes(4, 'little') + total_sectors.to_bytes(4, 'big'))
+                dst.seek(_VD_SECTOR * self.params.sector_size + _VD_VOL_SPACE_OFF)
+                dst.write(total_sectors.to_bytes(4, 'little') + total_sectors.to_bytes(4, 'big'))
             
             if progress_callback:
                 progress_callback(100, 'Rebuild complete!')
@@ -307,7 +282,12 @@ class IsoHandler(PhysicalHandler):
             output_obj.write(chunk)
             bytes_left -= len(chunk)
 
-    def _build_toc(self, children: list[VfsNode], staged_set: set[VfsNode], lba_map: dict) -> bytes:
+    def _build_toc(
+        self, 
+        children:   list[VfsNode], 
+        staged_set: set[VfsNode], 
+        lba_map:    dict[VfsNode, int]
+    ) -> bytes:
         '''Scan Nodes to build new toc'''
         total = self.params.total_entries
         toc = [0] * (total * 3)
@@ -338,12 +318,12 @@ class IsoHandler(PhysicalHandler):
         '''Verify radiata iso. Check what version of the disk is running.'''
         logger.debug('Verifying ISO integrity')
         # Check hash against known hashes
-        self.handle.seek(0)
-        hasher = xxhash.xxh128()
-        while chunk := self.handle.read(16 * 1024 * 1024): # read in 16MB chunks
-            hasher.update(chunk)
+        with open(self.path, 'rb') as fh:
+            hasher = xxhash.xxh128()
+            while chunk := fh.read(16 * 1024 * 1024): # read in 16MB chunks
+                hasher.update(chunk)
         digest = hasher.hexdigest()
-        build = _KNOWN_BUILDS.get(digest, 'Modified/Unknown')
+        build = _KNOWN_BUILDS.get(digest, f'Modified/Unknown: {digest}')
         return build
     
     def _scramble(self, flat_toc: list) -> list:

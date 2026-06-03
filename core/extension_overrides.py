@@ -1,4 +1,4 @@
-'''File Extension naming overrides'''
+'''File Extension naming overrides and currently also a losely stored database of game formats'''
 
 HEADERS = {
     # Core containers       | Purpose                             | In tool support
@@ -39,6 +39,7 @@ HEADERS = {
     b'RMF'    : '.rmf',     #
     b'NDNC'   : '.ndnc',    #
     b'XBDC'   : '.xbdc',    #
+    b'PCDC'   : '.pcdc',    # 
     b'DNAL'   : '.dnal',    #
     b'TGIL'   : '.tgil',    # Container for map animation data
     # Gameplay
@@ -61,3 +62,4 @@ def generate_ext_overrides() -> dict[bytes, str]:
         overrides[idx] = name
 
     return overrides
+

@@ -4,6 +4,78 @@ A modular toolkit for unpacking, reverse-engineering, editing, and rebuilding ga
 
 ---
 
+## Guide for Handlers/Editors
+
+### Handlers - Raw data processors (Background Thread)
+
+#### Decorators
+
+```
+@Registry.register(name, extensions, categories, supported_actions, is_fallback)
+
+- name (required) = Semantic name for the handler used as the key for the profile in the registry
+- extensions (optional) = The preferred specifier for when the logic should be applied. Preferred since the extension is matched against the raw data.
+- categories (optional) = The alternative specifier for when the logic should be applied. Matches against the semantic tags in descriptor.json.
+- supported_actions (*required) = Required for logic to fire. Supports two types of declaration:
+    1. tuple(ActionDef) the preferred method 
+    2. dict(str, ActionDef) alternative method gets translated into type 1. Migth be removed in the future old method...
+- is_fallback (optional) = defaults to False. Used only to declare global handlers
+```
+
+#### Contracts
+
+BaseHandler
+
+- Enforced:
+  1. `get_file_tree` : Creates nodes for the tree model.
+  2. `rebuild_node` : Rebuilds a modified node into acceptable original format.
+  3. `get_raw_node` : Returns a buffer of the raw data of a node. With priority for pending modifications.
+- Editor:
+  1. `prepare_editor_data`  : Process raw node data into an editor specific format.
+  2. `decode_editor_data` : Process a modified editor specific format back into the original format.
+- Recommended:
+  1. `execute_action` : Routes action keys to their custom functions
+
+Sub-Contracts
+
+- PhysicalHandler: Sub-contract used for physical to virtual processing. Source is type `Path` and overrides`rebuild_node` to output to disk.
+- ContainerHandler: Sub-contract used for virtual nodes that expand the virtual file system. Source is type `bytes`. All data passing between handlers happens in bytes, after a handler receives the bytes they can change the format.
+- LeafHandler: Used for handlers that don't need to manage the file system, in otherwords they only care about the raw data in isolation. Stubs all 'Enforced' functions for convenience. Source is type `bytes`.
+
+
+  
+### Editors - Translated data viewers (Main thread)
+
+Decorators: 
+
+```
+@Registry.register_editor(name, handler, extensions, categories, is_fallback)
+
+- name (required) = Semantic name for the editor used as the key for the profile in the registry
+- handler (required) = The class name for the handler that will process the raw data on a background thread for the editor
+- extensions (optional) = The preferred specifier for when the editor is acceptable. Preferred since the extension is matched against the raw data.
+- categories (optional) = The alternative specifier for when the editor is acceptable. Matches against the semantic tags in descriptor.json.
+- is_fallback (optional) = defaults to False. Used only to declare global editors
+```
+
+Contract:
+
+BaseEditor
+
+- Enforced:
+  1. `populate_ui`  : Called after data is received. Transitions the UI to a 'ready' state for modifying.
+- Recommended:
+  1. `begin_loading`  : Override to specify the editors loading state for when the handler is processing data.
+  2. `receive_data` : Called by dispatcher when handler returns a processed payload. Should verify payload and call `populate_ui`
+  3. `get_modified_data`  : For custom payload types will need to be overriden from the default bytes.
+  4. `show_load_error`  : Override for specific load errors
+
+Sub-Contract
+
+- BaseViewer: Convenience base for immutable editors, stubs all mutation handling functions.
+
+---
+
 ## Architecture overview
 
 ```
@@ -440,6 +512,7 @@ StagingPage → tracker.confirm_and_rebuild()
               5. patch ISO9660 volume descriptor
       → _on_rebuild_finished → tracker.clear() + rebuild_complete signal
 ```
+
 ---
 
 ### Rebuild:
@@ -448,19 +521,25 @@ StagingPage → tracker.confirm_and_rebuild()
 
 ## Current TODO list:
 
-- Palette color swapping for FIS editor -> `/ui/editors/fis_editor.py`
-- Move from iso_handler tagging to descriptor.json tagging -> `/core/handlers/iso_handler.py` & `/ui/assets/descriptors.json`
-- Fix TAC editor to support the new system -> `/core/handlers/tac_handler.py`
-- Finish flat search, node visibility when search+tree_expand is not ideal -> `/ui/tree_model.py`
+- Perfect rebuilding Kods containers -> `/core/handlers/kods_container.py`
+- FIS Undo/Revert seem to revert canvas state not image state fix the wiring -> `/ui/editors/fis_editor.py`
+- Standardize saving mechanics for BaseEditors -> `/ui/ui_core.py` & `/ui/editors/...`
+- Consider changing the contract to recieve data being the abstract over populate ui
 
 ## Future TODO list:
 
-- Setup better object structure for VfsNode rather than large list of bools -> `/core/node.py`
-- Further investigate the composite Kods unpacking before deciding rebuild strategy -> `/core/handler/kods_handler.py` & `/core/handler/compressor_handler.py` & `/core/dispatcher'py`
-- Saved settings json -> `/ui/`
+- Fix background task bailout/timeout, if spammed infinite loops -> `/core/workers.py`
+- FPS chain unpacking needs to be reevaluated since fps heads may contain other fps chains within -> `/core/handlers/chain_handler.py`
+- FIS editor decoding CLUT shifts 7F to 80 -> `/core/handlers/fis_leaf.py`
+- Support multiple handlers on a file rather than just the most valid. -> `/core/...` & `/ui/ui_core.py`
+- Hex editor toggle for bottom values to display in hex or dec -> `/ui/editors/hex_editor.py`
+- Staging page diff... This could be greatly improved but I don't want to spend a ton of time on anything beyond the basics to allow better analysis of custom format building -> `/ui/ui_core.py`
+- 0FDC unpacking, seems to be an archive of slz format -> `/core/handlers/fdc_handler.py`
+- FIS textures, Bank 6, ~Bank 0, Bank 1. Investigation needed. -> `/core/handlers/fis_handler.py`
+- Icons? -> `/ui/...`
 - seqw handler -> `/core/handler/seqw_handler.py`
-- Kods one header one payload strategy -> `/core/handlers/compressor_handler.py` & `/core/handlers/kods_handler.py`
 - Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
-- Stagin/Commiting Menu improvements -> `/ui/ui_core.py`
-- Hover tool tips to expose my secret shortcuts -> `/ui/ui_core.py`
-- Investigate whether or not editors should end up being generic to format (ex. ImageEditor for all QImage payloads?)
+
+
+Rebuilding kods nodes returns tuple. Element 1 being the payload. Element 2 being the datacenter header if valid.
+After datacenter dependant modification the ModTracker, Dispatcher, and Navigator will need to handle the kods rebuild payloads correctly to ensure that Element 1 is applied to the original modified node, and Element 2 is applied to the target node of the original modified node.

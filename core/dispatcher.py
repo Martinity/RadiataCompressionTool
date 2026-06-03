@@ -1,11 +1,16 @@
+'''
+Dispatcher handles most of the coordination work between the UI and logic
+Functions as a signal proxy
+'''
 from __future__ import annotations
 
 import threading
 from pathlib import Path
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
-from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType
+from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskSignals
 from core.navigator import VfsNavigator
+from core.descriptor_manager import NodeDescriptorStore
 from PyQt6.QtCore import pyqtSignal, QObject, Qt
 from typing import TYPE_CHECKING, Any
 
@@ -37,18 +42,22 @@ class Dispatcher(QObject):
     iso_verified = pyqtSignal(str)           # Build string
     # Generic node actions
     action_complete = pyqtSignal(object)     # ActionResult 
+    workspace_log   = pyqtSignal(str)        # Testing usefulness of log signalling
     # IO 
     io_progress = pyqtSignal(int, str)       # completion %
     io_complete = pyqtSignal(bool, object)   # (success, result)
 
     def __init__(self) -> None:
         super().__init__()
-        self.vfs: VfsManager | None = None
-        self.tracker = ModTracker()
-        self.active_handler: BaseHandler | None = None
+        self.vfs:                        VfsManager | None = None
+        self.active_handler:            BaseHandler | None = None
+        self.nav:                      VfsNavigator | None = None
+        self._descriptor_store: NodeDescriptorStore | None = None
+        self.tracker          = ModTracker()
         self.task_coordinator = TaskCoordinator()
-        self.nav: VfsNavigator | None = None
         self._setup_connections()
+
+        self._rebuild_active: bool = False
 
     def _setup_connections(self) -> None:
         '''Relay tracker signals to UI'''
@@ -58,6 +67,9 @@ class Dispatcher(QObject):
         self.tracker.state_changed.connect(self._relay_tracking_state)
 
         self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection)
+
+    def set_descriptor_store(self, store: NodeDescriptorStore) -> None:
+        self._descriptor_store = store
 
     def _relay_tracking_state(self):
         '''Emit counts so UI doesn't need to recalc'''
@@ -78,8 +90,8 @@ class Dispatcher(QObject):
         
         if source.children or source.expansion_pending:
             return source.children or []
-        
-        profile = Registry.get_profile(source)
+
+        profile = Registry.get_handler_profile(source)
         if not profile:
             logger.warning(f'No profile or {source.name}, cannot expand.')
             return []
@@ -96,14 +108,15 @@ class Dispatcher(QObject):
             source,
             self.nav,
         )
-        signals.log_message.connect(self.rebuild_log.emit)
+        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         signals.finished.connect(self._on_action_complete)
         return [] # signal populates the tree ^^^
     
     def get_node_data(self, node: VfsNode) -> bytes:
-        '''Return the raw bytes of the requested node, unwrapping virutal to the physical source'''
-        if node.pending_data is not None:
-            return node.pending_data
+        '''Return the raw bytes of the requested node, unwrapping virtual to the physical source'''
+        pending = node.pending_data
+        if pending is not None:
+            return pending
         if node.is_physical:
             if not self.active_handler:
                 logger.error(f'No physical handler for node: {node.hierarchical_id_str}')
@@ -119,7 +132,8 @@ class Dispatcher(QObject):
         If data is not bytes, dispatches to a background worker to decode the payload
         Notifies the editor when finished'''
         if isinstance(data, bytes):
-            self.tracker.mark_modified(node, data)
+            original = self.get_node_data(node) if node not in self.tracker._originals else b''
+            self.tracker.mark_modified(node, data, original)
             logger.info(f'Edit applied directly: {node.name}')
             if editor:
                 editor.confirm_changes_applied()
@@ -140,12 +154,11 @@ class Dispatcher(QObject):
             node,
             data
         )
-        signals.log_message.connect(self.rebuild_log.emit)
-        logger.info('calling finished... _on_decode_done')
+        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         signals.finished.connect(
             lambda success, result: self._on_decode_done(success, result, node, editor))
 
-    def open_editor(self, node: VfsNode, editor: 'BaseEditor') -> Any:
+    def open_editor(self, node: VfsNode, editor: BaseEditor) -> TaskSignals | None:
         '''
         Start background data preparation for an editor
         
@@ -155,12 +168,19 @@ class Dispatcher(QObject):
         '''
         if not self.nav:
             logger.error('Navigator not initialised')
-            return
-        handler_class = Registry.get_handler(node)
+            return None
+        handler_class = (
+            Registry.get_handler_for_editor(editor)
+            or Registry.get_handler(node)
+        )
         if not handler_class:
-            logger.warning(f'No handler for {node.name} -- Falling back to generic handler, returning bytes')
-            from core.handlers.generic_binary_handler import GenericBinaryHandler
-            handler_class = GenericBinaryHandler
+            logger.warning(f'No handler for {node.name} - Cannot prepare editor data')
+            return None
+        logger.debug(
+            f'open_editor: node={node.name}'
+            f'editor={editor.__class__.__name__}'
+            f'handler={handler_class.__name__}'
+        )
 
         signals = self.task_coordinator.start_task(
             Actions.prepare_editor,
@@ -168,7 +188,7 @@ class Dispatcher(QObject):
             node,
             self.nav,
         )
-        signals.log_message.connect(self.rebuild_log.emit)
+        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         return signals
 
     def execute_node_action(self, node: VfsNode, action_name: str, **kwargs) -> None:
@@ -185,6 +205,14 @@ class Dispatcher(QObject):
                 message=f'No ActionDef registered for "{action_name}" on node: {node.hierarchical_id_str}'
             ))
             return
+        if action_def.action_type is ActionType.TREE_EXPAND and node.children: # Dedup expansions
+            self.action_complete.emit(ActionResult(
+                action_name=action_name,
+                node=node,
+                status=ActionStatus.FAILURE,
+                message=f'{node.name} has already been expanded previously. Duplicate expansion cancelled.'
+            ))
+            return
         signals = self.task_coordinator.start_task(
             Actions.dispatch,
             action_def,
@@ -192,13 +220,14 @@ class Dispatcher(QObject):
             self.nav,
             **kwargs
             )
-        signals.log_message.connect(self.rebuild_log.emit)
+        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         signals.finished.connect(self._on_action_complete)
 
     def start_iso_rebuild(self, output_path: Path) -> None:
         if not self.active_handler or not self.vfs or not self.nav:
             self.rebuild_complete.emit(False, 'No ISO Loaded.')
             return
+        self._rebuild_active = True
         
         staged_nodes = list(self.tracker.rebuild_queue)
         self.rebuild_log.emit(f'Preparing to build {len(staged_nodes)} staged file(s)...')
@@ -214,6 +243,7 @@ class Dispatcher(QObject):
         signals.progress.connect(lambda pct, _msg: self.rebuild_progress.emit(pct))
         signals.log_message.connect(self.rebuild_log.emit)
         signals.finished.connect(self._on_rebuild_finished)
+        self._rebuild_active = False
 
     def close(self) -> None:
         '''For exiting the dispatch'''
@@ -233,19 +263,44 @@ class Dispatcher(QObject):
         '''helper for loading physical files'''
         if self.active_handler:
             self.active_handler.close()
+        if not self._descriptor_store:
+            logger.debug(f'No file metadata loaded... {self._descriptor_store}')
 
         handler = handler_class(path, None)
+        root    = handler.get_file_tree()
+        handler.release_handle()
         self.active_handler = handler
-        root = handler.get_file_tree()
-        self.vfs = VfsManager(root)
+        
+        self.vfs = VfsManager(root, node_enricher=self._descriptor_store.enrich if self._descriptor_store else None)
+        self.vfs.enrich_initial_tree()
+        logger.info(f'Workspace initialised: {handler_class.__name__} ({len(self.vfs.nodes_by_id)} nodes)')
         self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
+        self._migrate_targets_if_needed()
+        for child in root.children:
+            if self._descriptor_store:
+                self._descriptor_store.enrich(child)
         logger.info(f'Workspace initialized with Root: {handler_class.__name__}')
 
         signals = self.task_coordinator.start_task(Actions.verify_iso, handler)
-        signals.log_message.connect(self.rebuild_log.emit)
+        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         signals.finished.connect(self._on_iso_verified)
 
         return [root]
+
+    def _migrate_targets_if_needed(self) -> None:
+        store = self._descriptor_store
+        if store is None:
+            return
+        has_targets = any(meta.target_hid is not None for meta in store._db.values())
+        if has_targets:
+            return
+        logger.info('No target entries found - running DatacenterTargets migration.')
+        count = store.migrate_datacenter_targets()
+        store.save()
+        logger.info(f'Migration complete: {count} target entries written to {store._path.name}')
+        if self.vfs:
+            self.vfs.enrich_initial_tree()
+        logger.info('Re-enrichment pass complete - datacenter nodes have .kods extension.')
 
     ###------------------------ Callback -----------------------###
     def _expand_node(self, parent: VfsNode, wait_event: threading.Event) -> None:
@@ -259,7 +314,7 @@ class Dispatcher(QObject):
             wait_event.set()
             return
         
-        profile = Registry.get_profile(node)
+        profile = Registry.get_handler_profile(node)
         action_def = profile.primary_expand_action() if profile else None
         if not action_def or not self.nav:
             logger.warning(f'Cannot expand node: {node.hierarchical_id_str}, missing expand actions or navigator.')
@@ -280,13 +335,13 @@ class Dispatcher(QObject):
             node,
             self.nav,
         )
-        signals.log_message.connect(self.rebuild_log.emit)
+        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         signals.finished.connect(_on_expand_done)
         
     def _on_rebuild_finished(self, success: bool, result: Any) -> None:
         '''Verify type of result and pack signal'''
         if isinstance(result, ActionResult):
-            msg = result.message or ('Rebuld succeeded.' if success else 'Rebuild failed.')
+            msg = result.message or ('Rebuild succeeded.' if success else 'Rebuild failed.')
         else:
             msg = str(result)
         self.rebuild_complete.emit(success, msg)
@@ -340,12 +395,11 @@ class Dispatcher(QObject):
         '''Callback for when handler finishes decoding'''
         logger.info('In _on_decode_done')
         if success and isinstance(result, bytes):
-            self.tracker.mark_modified(node, result)
+            original = self.get_node_data(node) if node not in self.tracker._originals else b''
+            self.tracker.mark_modified(node, result, original)
             logger.info(f'Edit applied after background compilation: {node.name}')
-            if editor:
-                editor.confirm_changes_applied()
+            editor.confirm_changes_applied()
         else:
             error_msg = str(result) if not success else f'Compilation returned {type(result).__name__}, expected bytes'
             logger.error(f'Payload compilation failed: {error_msg}')
-            if editor:
-                editor.reject_changes_applied(error_msg)
+            editor.reject_changes_applied(error_msg)

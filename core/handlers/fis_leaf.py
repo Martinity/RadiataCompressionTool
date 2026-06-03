@@ -66,7 +66,7 @@ class FISInfo:
             f'Name:         {self.name!r}\n'
             f'PSM:          {self.psm_name} ({self.bpp}bpp)\n'
             f'Dimensions:   {self.width}×{self.height}\n'
-            f'Swizzled:     {self.dimension_mode}\n'
+            f'Swizzled:     {self.swizzled}\n'
             f'Padded CLUT:  {self.padded_4bpp_clut}'
         )
     
@@ -85,7 +85,7 @@ def _u32(data: bytes, off: int) -> int:
     return struct.unpack_from('<I', data, off)[0]
 
 def _ps2_alpha(a: int) -> int:
-    '''Convert PS2 alpha 4-bit(0-128) to 8-bit(0-255)'''
+    '''Convert PS2 alpha 7-bit(0-128) to 8-bit(0-255)'''
     return min(255, a * 2)
 
 ###----------------------------- CLUT Helpers ------------------------------------------###
@@ -189,6 +189,8 @@ def parse_fis(data: bytes, *, swizzled: bool | None = None, padded_4bpp: bool | 
     pre_image_size      = _u32(data, 0x1C)
     pal_storage_size    = _u32(data, 0x20)
     img_hdr_off         = pre_image_size + 0x10
+    if img_hdr_off + 0x10 > len(data):
+        raise ValueError('Invalid FIS payload')
 
     raw_w      = _u16(data, img_hdr_off + 0x00)
     raw_h      = _u16(data, img_hdr_off + 0x02)
@@ -292,7 +294,6 @@ def decode_fis(
         if info.swizzled:
             pixel_data = _unswizzle_psmt8(pixel_data, w, h)
         indices = bytes(pixel_data)
-        # rgba = _indices_to_rgba(pixel_data, palette, w, h)
 
     elif info.bpp == 4: # 4-bit per pixel
         footprint = 0x60 if info.padded_4bpp_clut else 0x40
@@ -315,11 +316,11 @@ def decode_fis(
 
 ###------------------------------------- Handler -----------------------------------------###
 @Registry.register(
-    name='FIS Texture',
+    name='FIS Handler',
     extensions=('.fis',),
     supported_actions=(
         ActionDef('Properties', ActionType.DIALOG),
-        ActionDef('Export as PNG', ActionType.EXPORT), # Override global export
+        ActionDef('Export as PNG', ActionType.EXPORT),
 ))
 class FisHandler(LeafHandler):
     '''Leaf handler for FIS textures. The editor widget owns decoding + display.'''
@@ -336,11 +337,14 @@ class FisHandler(LeafHandler):
         '''Transforms QImage and modified CLUT back into raw FIS bytes'''
         if isinstance(payload, bytes):
             return payload
-            
-        if not isinstance(payload, tuple) or len(payload) != 2:
+        
+        if isinstance(payload, FisEditorPayload):
+            img, original_bytes = payload.image, payload.raw_bytes
+        elif isinstance(payload, tuple) or len(payload) == 2:
+            img, original_bytes = payload
+        else:
             raise TypeError(f"{self.__class__.__name__} expects a tuple of (QImage, original_bytes)")
-            
-        img, original_bytes = payload
+        
         info = parse_fis(original_bytes)
         w, h = info.width, info.height
         
@@ -385,7 +389,9 @@ class FisHandler(LeafHandler):
                 pal += [(0, 0, 0, 0)] * (256 - len(pal)) # Ensure 256 colors
                 pal = _clut_interleave(pal)
                 
-                for i, (r, g, b, a) in enumerate(pal):
+                max_pal_bytes = len(out_bytes) - pal_off
+                entries_safe = min(256, max_pal_bytes // 4)
+                for i, (r, g, b, a) in enumerate(pal[:entries_safe]):
                     struct.pack_into('4B', out_bytes, pal_off + i * 4, r, g, b, a)
                     
             elif info.bpp == 4:
@@ -395,7 +401,9 @@ class FisHandler(LeafHandler):
                     if info.padded_4bpp_clut and i >= 8:
                         pos += 0x20
                     struct.pack_into('4B', out_bytes, pos, r, g, b, a)
-                
+        
+        if node.size != len(out_bytes):
+            logger.warning('Size of FIS texture has changed dispite texture resizing not implemented.')
         logger.debug(f'Original length: {node.size} New Length: {len(out_bytes)}')
         return bytes(out_bytes)
     
@@ -412,7 +420,7 @@ class FisHandler(LeafHandler):
                 return parse_fis(self._raw).summary()
             except Exception as e:
                 return f'Parse error: {e}'
-        elif action_name == 'Export':
+        elif action_name == 'Export as PNG':
             file_path: Path | None = kwargs.get('file_path')
             if not file_path:
                 return 'No output path provided'

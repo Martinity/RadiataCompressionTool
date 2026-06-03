@@ -1,6 +1,19 @@
+'''
+Contains all the Qt window logic hierarchy looks like (only 1 of each tier is displayed at a time):
+MainWindow
+    WelcomePage
+    WorkspacePage
+        tree_view - QAbstractItemModel
+        search_view - QAbstractListModel
+    StagingPage
+    RebuildPage
+    EditorPage
+
+MainWindow always contains log console
+WorkspacePage always contains FileDescriptorPanel and SearchOverlay
+'''
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from enum import IntEnum
 from typing import Any
@@ -8,20 +21,24 @@ from typing import Any
 from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer, QEvent
 from PyQt6.QtWidgets import (
     QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, 
-    QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QListWidget, 
-    QHBoxLayout, QListWidgetItem, QProgressBar, QTextEdit, QHeaderView,
-    QDialog, QScrollArea, QFrame, QGraphicsOpacityEffect
+    QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, 
+    QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QTextBrowser,
+    QScrollArea, QFrame, QGraphicsOpacityEffect, QAbstractItemView
 )
-from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent, QShortcut, QKeySequence, QImage, QPixmap
+from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent, QShortcut, QKeySequence
 
-from core.node import VfsNode, ModTracker
+from core.node import VfsNode
 from core.dispatcher import Dispatcher
 from core.registry import Registry, GLOBAL_ACTIONS
 from core.contracts import BaseEditor
-from core.workers import ActionStatus, ActionResult, ActionType, ActionDef
+from core.workers import ActionStatus, ActionResult, ActionType, ActionDef, EditorPayload
+from core.descriptor_manager import NodeDescriptorStore, NodeMeta
+from ui.editor_session import EditorSession
 from ui.logger import LoggingWindow
 from ui.tree_model import TreeProxyModel, VfsTreeModel, FlatSearchModel
 from ui.theme_manager import ThemeManager
+from ui.staging_page import StagingPage
+from ui.settings import AppSettings
 from utilities import human_size, get_resource_path
 
 import logging
@@ -36,19 +53,6 @@ _ACTION_TYPE_PRIORETY: dict[ActionType, int] = {
     ActionType.IMPORT:      4,
 }
 
-# Descriptor JSON loaded once
-_DESCRIPTORS: dict[str, dict] = {}
-
-def _load_descriptors(path: Path) -> None:
-    global _DESCRIPTORS
-    try:
-        _DESCRIPTORS = json.loads(path.read_text(encoding='utf-8'))
-        logger.info(f'Loaded {len(_DESCRIPTORS)} file descriptors.')
-    except FileNotFoundError:
-        logger.debug(f'No descriptor file at {path}')
-    except json.JSONDecodeError as e:
-        logger.warning(f'Descriptor JSON parse error: {e}')
-
 # Enums for page stack idx
 class AppPage(IntEnum):
     WELCOME   = 0
@@ -62,21 +66,23 @@ class AppPage(IntEnum):
 class MainWindow(QMainWindow):
     def __init__(self, dispatcher: Dispatcher) -> None:
         super().__init__(parent=None)
+        # Setup App
         self.dispatcher    = dispatcher
+        self.app_settings  = AppSettings()
         self.settings      = QSettings('RadiataModding', 'Tool')
-        saved_theme = self.settings.value('theme_name', 'Dark')
-        self.current_theme = saved_theme
-        self._setup_zoom_shortcuts()
-
+        self.current_theme = self.app_settings.theme_name
+        self._zoom_delta = self.app_settings.zoom_delta
+        # Setup descriptor database
+        self.descriptor_store = NodeDescriptorStore(get_resource_path('ui/assets/descriptors.json'), auto_save=True, parent=self)
+        self.descriptor_store.load()
+        self.dispatcher.set_descriptor_store(self.descriptor_store)
         # Setup View
         self.stack          = QStackedWidget()
-        self.welcome_page   = WelcomePage()
-        self.workspace_page = WorkspaceWidget()
-        self.staging_page   = StagingPage(self.dispatcher.tracker)
+        self.welcome_page   = WelcomePage(self.app_settings)
+        self.workspace_page = WorkspaceWidget(self.descriptor_store)
+        self.staging_page   = StagingPage(self.dispatcher)
         self.rebuild_page   = RebuildStatusPage()
         self.editor_page    = EditorPage()
-
-        _load_descriptors(get_resource_path('ui/assets/descriptor.json'))
         self._setup_ui()
 
         # Controllers
@@ -84,9 +90,9 @@ class MainWindow(QMainWindow):
             self.workspace_page, 
             self.editor_page,
             self.dispatcher, 
-            self.dispatcher.tracker,
+            self.descriptor_store,
         )
-        self.menu_manager = MainMenuBar(self, self.workspace_page, self.dispatcher)
+        self.menu_manager = MainMenuBar(self, self.workspace_page, self.dispatcher, self.descriptor_store, self.app_settings)
         self._setup_statusbar()
         self._connect_signals()
         self._restore_layout()
@@ -98,22 +104,17 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.staging_page)
         self.stack.addWidget(self.rebuild_page)
         self.stack.addWidget(self.editor_page)
-        self.adjust_zoom(0) # Initialize the style sheet via font, probably a scuffy way to do this
+
         self.setWindowTitle('Radiata Modding Tool 2.0 Alpha')
         self.resize(1400, 900)
     
     def _setup_statusbar(self) -> None:
         self.statusBar().showMessage('Ready', 3000)
 
-    def _setup_zoom_shortcuts(self):
-        QShortcut(QKeySequence('Ctrl+='), self).activated.connect(lambda: self.adjust_zoom(1))
-        QShortcut(QKeySequence('Ctrl++'), self).activated.connect(lambda: self.adjust_zoom(1))
-        QShortcut(QKeySequence('Ctrl+-'), self).activated.connect(lambda: self.adjust_zoom(-1))
-
     def _connect_signals(self) -> None:
         '''Only for main window state signals'''
         self.welcome_page.request_open.connect(self.attempt_load_iso)
-        self.workspace_page.btn_review.clicked.connect(lambda: self.stack.setCurrentWidget(self.staging_page))
+        self.workspace_page.btn_review.clicked.connect(lambda: self.stack.setCurrentIndex(AppPage.STAGING))
         self.staging_page.request_workspace.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
         self.editor_page.back_requested.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
         
@@ -125,20 +126,45 @@ class MainWindow(QMainWindow):
         self.dispatcher.io_progress.connect(lambda val, msg: self.statusBar().showMessage(msg))
         self.dispatcher.io_complete.connect(self._handle_io_completion)
 
+        self.dispatcher.workspace_log.connect(self.workspace_page.append_log)
+
+    ###------------------------------- Appearance ----------------------------------###
     def _restore_layout(self) -> None:
-        '''Restore window geometry'''
-        geometry = self.settings.value('geometry')
-        if geometry:
-            self.restoreGeometry(geometry)
-        if h_state := self.settings.value('h_splitter'):
-            self.workspace_page.h_splitter.restoreState(h_state)
-        if v_state := self.settings.value('v_splitter'):
-            self.workspace_page.v_splitter.restoreState(v_state)
+        '''Restore App State to previously used if any'''
+        s = self.app_settings
+        if s.geometry:
+            self.restoreGeometry(s.geometry)
+        if s.h_splitter:
+            self.workspace_page.h_splitter.restoreState(s.h_splitter)
+        if s.v_splitter:
+            self.workspace_page.v_splitter.restoreState(s.v_splitter)
+        self._apply_theme()
+        self.workspace_page.log_console.setVisible(s.show_log_console)
+
+    def _apply_theme(self) -> None:
+        '''Apply the current_theme at current _zoom_delta'''
+        ThemeManager.apply_theme(self.current_theme, self._zoom_delta)
 
     def adjust_zoom(self, delta: int):
+        self._zoom_delta += delta
         ThemeManager.apply_theme(self.current_theme, delta)
+        self.app_settings.zoom_delta = self._zoom_delta
         logger.debug(f'Zoom Adjusted (Font size set to: {ThemeManager.current_font_size})')
+
+    def reset_zoom(self) -> None:
+        DEFAULT = 0
+        delta_to_default = DEFAULT - self._zoom_delta
+        self.adjust_zoom(delta_to_default)
+        self._zoom_delta = DEFAULT
+        self.app_settings.zoom_delta = DEFAULT
+
+    def set_theme(self, theme_name: str) -> None:
+        self.current_theme = theme_name
+        self._apply_theme()
+        self.app_settings.theme_name = theme_name
     
+    ###----------------------------------- ISO ----------------------------------###
+
     def attempt_load_iso(self, path: Path) -> None:
         self.statusBar().showMessage(f'Loading {path.name}')
         result = self.dispatcher.load_source(path)
@@ -182,9 +208,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Task Error', msg)
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
-        self.settings.setValue('geometry', self.saveGeometry())
-        self.settings.setValue('h_splitter', self.workspace_page.h_splitter.saveState())
-        self.settings.setValue('v_splitter', self.workspace_page.v_splitter.saveState())
+        s = self.app_settings
+        s.geometry = self.saveGeometry()
+        s.h_splitter = self.workspace_page.h_splitter.saveState()
+        s.v_splitter = self.workspace_page.v_splitter.saveState()
+        s.sync()
         if self.dispatcher:
             self.dispatcher.close()
         return super().closeEvent(event)
@@ -192,8 +220,9 @@ class MainWindow(QMainWindow):
 ###------------------------------------------ Workspace UI -------------------------------------###
 
 class WorkspaceWidget(QWidget):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, descriptor_store: NodeDescriptorStore, parent=None) -> None:
         super().__init__(parent)
+        self.descriptor_store = descriptor_store
         self._init_views()
         self._assemble_layout()
 
@@ -204,11 +233,13 @@ class WorkspaceWidget(QWidget):
         self.tree_view.setAnimated(False)
 
         self.search_results_view = QListView()
+        self.search_results_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.search_results_view.setUniformItemSizes(True)
         self.sidebar_stack = QStackedWidget()
         self.sidebar_stack.addWidget(self.tree_view)
         self.sidebar_stack.addWidget(self.search_results_view)
 
-        self.descriptor_panel = FileDescriptorPanel()
+        self.descriptor_panel = FileDescriptorPanel(self.descriptor_store)
         self.log_console = LoggingWindow()
 
     def _assemble_layout(self) -> None:
@@ -251,22 +282,25 @@ class WorkspaceWidget(QWidget):
         self.review_bar.setVisible(has_mods)
         self.status_label.setText(f'{count} file(s) modified and ready for review')
 
+    def append_log(self, message: str) -> None:
+        self.log_console.append_log(f'{message} -log_callback', 1)
+
 ###-------------------------------------------- Workspace Signals -------------------------###
 
 class WorkspaceController(QObject):
     '''Handles all signals and logic for the workspace'''
     def __init__(
             self, 
-            workspace:   WorkspaceWidget, 
-            editor_page: EditorPage, 
-            dispatcher:  Dispatcher, 
-            tracker:     ModTracker,
+            workspace:        WorkspaceWidget, 
+            editor_page:      EditorPage, 
+            dispatcher:       Dispatcher, 
+            descriptor_store: NodeDescriptorStore,
     ) -> None:
         super().__init__(parent=workspace)
-        self.view        = workspace
-        self.editor_page = editor_page
-        self.dispatcher  = dispatcher
-        self.tracker     = tracker
+        self.view             = workspace
+        self.editor_page      = editor_page
+        self.dispatcher       = dispatcher
+        self.descriptor_store = descriptor_store
         self.tree_model:  VfsTreeModel | None = None
         self.proxy_model: TreeProxyModel | None = None
 
@@ -281,32 +315,38 @@ class WorkspaceController(QObject):
         self.dispatcher.tracking_update.connect(self.on_tracking_update)
         self.dispatcher.action_complete.connect(self.handle_action_result)
 
-        self._pending_editor: BaseEditor | None = None
+        self._current_session: EditorSession | None = None
 
     def init_workspace(self, root_node: VfsNode) -> None:
-        ### Models
+        if not self.dispatcher.vfs:
+            raise TypeError('No filesystem currenlty loaded - cant initialize workspace')
+        ### Tree Models
         self.tree_model  = VfsTreeModel(self.dispatcher.vfs)
         self.proxy_model = TreeProxyModel()
         self.proxy_model.setSourceModel(self.tree_model)
-        self.proxy_model.set_descriptors(_DESCRIPTORS)
 
-        ### Tree
+        ### State Memory
+        main_window = self.view.window()
+        if hasattr(main_window, 'app_settings'):
+            self.proxy_model.set_show_hidden(main_window.app_settings.show_hidden_files)
+
+        ### Tree View
         self.view.tree_view.setModel(self.proxy_model)
-        self.view.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.tree_view.setSortingEnabled(True)
         self.view.tree_view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         
         ### Search / Filter
-        self.search_results_view = QListView()
-        self.search_model = FlatSearchModel(self.dispatcher.vfs, _DESCRIPTORS)
-        self.search_results_view.setModel(self.search_model)
-
-        self.search_results_view.clicked.connect(self.handle_tree_select)
+        self.search_model = FlatSearchModel(self.dispatcher.vfs, self.descriptor_store)
+        self.view.search_results_view.setModel(self.search_model)
+        self.view.search_results_view.clicked.connect(self._on_search_result_clicked)
+        self.view.search_results_view.doubleClicked.connect(self._on_search_double_click)
+        self.view.search_results_view.customContextMenuRequested.connect(self.on_search_context_menu)
 
         self.search_overlay = SearchOverlay(self.view.window())
 
         self.view.installEventFilter(self)
         self.view.tree_view.installEventFilter(self)
+        self.view.search_results_view.installEventFilter(self)
         self.view.descriptor_panel.tagClicked.connect(self.on_tag_clicked)
 
         try:
@@ -314,7 +354,7 @@ class WorkspaceController(QObject):
         except TypeError:
             pass
 
-        self.view.tree_view.customContextMenuRequested.connect(self.handle_context_menu)
+        self.view.tree_view.customContextMenuRequested.connect(self.on_tree_context_menu)
 
         ### Tree Interactions
         tree_selection = self.view.tree_view.selectionModel()
@@ -332,18 +372,34 @@ class WorkspaceController(QObject):
         self.view.tree_view.setColumnWidth(2, 85)
 
         self.view.tree_view.expandToDepth(1)
-        self.view.tree_view.setUniformRowHeights(True)
         self.view.update_review_bar(False, 0)
         
-    def on_tracking_update(self, modified_count: int, staged_count: int):
+    def on_tracking_update(self, modified_count: int, staged_count: int) -> None:
         '''Controls the apply modifications button visibility'''
         total = modified_count + staged_count
         self.view.review_bar.setVisible(total > 0)
         self.view.status_label.setText(f'{total} modification(s) pending.')
 
+    def _on_layout_ready(self, node: VfsNode) -> None:
+        '''signaled when the layout has finished rendering the view swap'''
+        if not self.tree_model or not self.proxy_model:
+            return
+        source_index = self.tree_model.index_for_node(node)
+        if not source_index.isValid:
+            return
+        proxy_index = self.proxy_model.mapFromSource(source_index)
+        if not proxy_index.isValid():
+            logger.warning(f'Node {node.name} is not visible in current tree filter')
+            return
+
+        self.view.tree_view.expand(proxy_index)
+        self.view.tree_view.scrollTo(proxy_index, QAbstractItemView.ScrollHint.PositionAtTop)
+        self.view.tree_view.setCurrentIndex(proxy_index)
+
     ###----------------- Tree interactions-------------------###
 
     def handle_tree_select(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        '''Clicking mechanics for the tree view'''
         if not current.isValid() and not self.proxy_model: 
             return
         node: VfsNode | None = self.proxy_model.mapToSource(current).data(Qt.ItemDataRole.UserRole)
@@ -357,11 +413,33 @@ class WorkspaceController(QObject):
         else:
             self.view.descriptor_panel.set_properties_text('-')
 
+    def _on_search_result_clicked(self, index: QModelIndex) -> None:
+        '''Clicking mechanics for the search results'''
+        node = self.search_model.data(index, Qt.ItemDataRole.UserRole)
+        if not isinstance(node, VfsNode) or not node:
+            return
+        self.view.descriptor_panel.load_node(node)
+        prop_def = Registry.get_action(node, 'Properties')
+        if prop_def:
+            self.dispatcher.execute_node_action(node, 'Properties')
+        else:
+            self.view.descriptor_panel.set_properties_text('-')
+
+    def _on_search_double_click(self, index: QModelIndex) -> None:
+        if not self.search_model:
+            return
+        node: VfsNode | None = self.search_model.data(index, Qt.ItemDataRole.UserRole)
+        if not node:
+            return
+        editor_classes = Registry.get_editors(node)
+        if editor_classes:
+            self.launch_editor(node, editor_classes[0])
+
     def handle_tree_double_click(self, index: QModelIndex) -> None:
         if not self.proxy_model:
             return
         node: VfsNode | None = self.proxy_model.mapToSource(index).data(Qt.ItemDataRole.UserRole)
-        if not node or node.children:
+        if not node:
             return
         editor_classes = Registry.get_editors(node)
         if editor_classes:
@@ -369,20 +447,33 @@ class WorkspaceController(QObject):
 
     def on_tag_clicked(self, tag_name: str) -> None:
         self.search_buffer = tag_name
-        self.proxy_model.set_search_query(tag_name)
+        self.on_search_updated(tag_name)
         self.search_overlay.show_text(f'Tag: {tag_name}')
-        self.view.tree_view.expandAll()
 
     def on_search_updated(self, query: str):
         if not query:
-            self.sidebar_stack.setCurrentIndex(0)
+            self.view.sidebar_stack.setCurrentIndex(0)
             return
-        self.sidebar_stack.setCurrentIndex(1)
+        self.view.sidebar_stack.setCurrentIndex(1)
         self.search_model.set_query(query)
 
     ###---------------------- Context Menu -----------------------###
 
-    def handle_context_menu(self, position) -> None:
+    def on_search_context_menu(self, position) -> None:
+        '''get the node for the list model and pass to _build_context_menu'''
+        if not self.search_model:
+            return
+        index = self.view.search_results_view.indexAt(position)
+        if not index.isValid():
+            return
+        node: VfsNode | None = self.search_model.data(index, Qt.ItemDataRole.UserRole)
+        if not node:
+            return
+        
+        self._build_context_menu(node, self.view.search_results_view.mapToGlobal(position))
+
+    def on_tree_context_menu(self, position) -> None:
+        '''get the node for the tree model and pass to _build_context_menu'''
         if not self.proxy_model:
             return
         proxy_index = self.view.tree_view.indexAt(position)
@@ -391,6 +482,10 @@ class WorkspaceController(QObject):
         node: VfsNode | None = self.proxy_model.mapToSource(proxy_index).data(Qt.ItemDataRole.UserRole)
         if not node: 
             return
+        
+        self._build_context_menu(node, self.view.tree_view.viewport().mapToGlobal(position))
+
+    def _build_context_menu(self, node: VfsNode, position) -> None:
         menu = QMenu(self.view)
 
         # Get Editor Classes
@@ -407,7 +502,7 @@ class WorkspaceController(QObject):
 
         # Get ActionDefs
         action_defs: list[ActionDef] = []
-        profile = Registry.get_profile(node)
+        profile = Registry.get_handler_profile(node)
         if profile:
             action_defs.extend(profile.actions)
         if not node.is_hidden and node.size > 0:
@@ -421,7 +516,17 @@ class WorkspaceController(QObject):
             qt_action = menu.addAction(action_def.name)
             qt_action.triggered.connect(lambda checked=False, d=action_def, n=node: self.route_action(n, d))
         
-        menu.exec(self.view.tree_view.viewport().mapToGlobal(position))
+        if self.view.sidebar_stack.currentIndex() == 1: # Add go to in tree view in search view
+            search_action = menu.addAction('Go to in Tree View')
+            search_action.triggered.connect(lambda checked=False, n=node: self._handle_goto(n))
+
+        menu.exec(position)
+
+    def _handle_goto(self, node: VfsNode) -> None:
+        '''Go to selected search node in tree view'''
+        self.view.sidebar_stack.setCurrentIndex(0)
+        QTimer.singleShot(1, lambda: self._on_layout_ready(node))
+
 
     ###------------------------- Routing ---------------------------###
 
@@ -455,7 +560,7 @@ class WorkspaceController(QObject):
         
         action_def = Registry.get_action(result.node, result.action_name)
         if not action_def:
-            logger.debug(f'No ActionDef for completed action "{result.action_name}"')
+            logger.debug(f'No ActionDef for action "{result.action_name}"')
             return
         
         match action_def.action_type:
@@ -470,10 +575,7 @@ class WorkspaceController(QObject):
                         self.view, action_def.name, str(result.payload or result.message)
                     )
             case ActionType.TREE_EXPAND:
-                if self.tree_model and self.proxy_model: # expand to see new children
-                    source_index = self.tree_model.index_for_node(result.node)
-                    if source_index.isValid():
-                        self.view.tree_view.expand(self.proxy_model.mapFromSource(source_index))
+                self._on_expand_complete(result)
             case ActionType.PROCESS:
                 if isinstance(result.payload, bytes) and result.payload:
                     editor_classes = Registry.get_editors(result.node)
@@ -484,64 +586,75 @@ class WorkspaceController(QObject):
             case ActionType.IMPORT:
                 pass # tree is refreshed via signal
 
+    def _on_expand_complete(self, result: ActionResult) -> None:
+        if result.status != ActionStatus.SUCCESS or not self.tree_model or not self.proxy_model:
+            return
+        if result.action_name == 'Unpack' or hasattr(result, 'node'):
+            orig_node = result.node
+            source_parent_idx = self.tree_model.index_for_node(orig_node)
+            proxy_parent_idx = self.proxy_model.mapFromSource(source_parent_idx)
+            if proxy_parent_idx.isValid():
+                self.view.tree_view.setExpanded(proxy_parent_idx, True)
+                QTimer.singleShot(0, lambda: self._scroll_to(proxy_parent_idx))
+
+    def _scroll_to(self, proxy_index: QModelIndex) -> None:
+        '''Scroll to the selected proxy index'''
+        if proxy_index.isValid():
+            self.view.sidebar_stack.setCurrentIndex(0)
+            self.view.tree_view.scrollTo(proxy_index, QTreeView.ScrollHint.PositionAtTop)
+            self.view.tree_view.setCurrentIndex(proxy_index)
+
     ###------------------- Editor --------------------###
 
     def launch_editor(self, node: VfsNode, editor_class: type[BaseEditor]) -> None:
         '''Instantiate new editor and create view for it'''
-        if self._pending_editor is not None: # 
-            self._pending_editor.show_load_error('Cancelled... another file was opened')
-            self._pending_editor = None
-
+        if self._current_session and not self._current_session.is_done():
+            self._current_session.cancel()
         new_editor = editor_class()
+        session = EditorSession(node=node, editor=new_editor)
         new_editor.begin_loading(node)
         new_editor.apply_requested.connect(
             lambda node, data, e=new_editor: self.dispatcher.apply_edit(node, data, e)
         )
-        self.editor_page.load_editor(new_editor, node)
-        self._pending_editor = new_editor
+        self.editor_page.load_editor(session)
+        self._current_session = session
 
         window = self.view.window()
         if isinstance(window, QMainWindow) and hasattr(window, 'stack'):
             window.stack.setCurrentIndex(AppPage.EDITOR)
-        else: # Recursive main window fallback
-            widget = self.view
-            while widget and not isinstance(widget, QMainWindow):
-                widget = widget.parent()
-            if widget:
-                widget.stack.setCurrentWidget(self.editor_page)
-
         signals = self.dispatcher.open_editor(node, new_editor)
         if not signals:
+            session.fail('Navigator not initialised.')
             raise ValueError('Navigator not initialized')
         signals.finished.connect(
-            lambda succes, payload, e=new_editor: self._on_editor_data_ready(succes, payload, e)
+            lambda succes, payload, s=session: self._on_editor_data_ready(s, succes, payload)
         )
         plugin_name = getattr(editor_class, '_plugin_name', editor_class.__name__)
-        logger.info(f'Opening "{node.name}" in {plugin_name}')
+        logger.info(f'Opening "{node.name}" in {plugin_name} [{session!r}]')
 
-    def _on_editor_data_ready(self, success: bool, payload: Any, editor: BaseEditor) -> None:
-        '''Verifies that the payload matches the editors expected type'''
-        if editor is not self._pending_editor:
-            logger.debug('Editor data arrived for a superseded editor... discarding')
+    def _on_editor_data_ready(self, session: EditorSession, success: bool, payload: Any) -> None:
+        '''Pass processed handler data to editor. Passes through 5 guards first.'''
+        if not session.is_active(): # Session state
+            logger.debug(f'{session} result discarded - state is {session.state!r}')
+            session.editor.cleanup()
+            return
+        if session is not self._current_session: # Session currency
+            logger.debug(f'{session} discarded - superseded by newer session')
+            session.cancel()
+            session.editor.cleanup()
+            return
+        if not success: # Task success
+            session.fail(str(payload))
+            return
+        if not isinstance(payload, EditorPayload): # Payload type
+            session.fail(f'Unexpected payload type: {type(payload).__name__} (expected EditorPayload)')
+            return
+        if payload.node is not session.node: # Node Identity
+            session.fail(f'Payload node mismatch - received data for "{payload.node.name}", expected "{session.node.name}"')
             return
         
-        from core.workers import EditorPayload
-        if not success or not isinstance(payload, EditorPayload):
-            editor.show_load_error(str(payload)) if not success else 'Unexpected payload type'
-            self._pending_editor = None
-            return
-            error = str(payload) if not success else 'Unexpected payload type'
-            logger.error(f'Editor data preparation failed: {error}')
-            if hasattr(editor, 'info_label'):
-                editor.info_label.setText(f'Load failed: {error}')
-            return
-        if payload.node is not editor.current_node:
-            logger.debug('EditorPayload node mismatch')
-            return
-        
-        editor.receive_data(payload.data, self.dispatcher.get_node_data)
-        self._pending_editor = None
-        logger.debug(f'Editor populated for {payload.node.name}')
+        session.complete(payload.data, self.dispatcher.get_node_data)
+        logger.debug(f'{session} populated successfully.')
 
     ###-------------------- Search --------------------###
 
@@ -554,26 +667,27 @@ class WorkspaceController(QObject):
                                         Qt.KeyboardModifier.MetaModifier):
                 return super().eventFilter(obj, event)
 
-            if key_event.key() == Qt.Key.Key_Escape and self.proxy_model:
+            if key_event.key() == Qt.Key.Key_Escape: # Esc
                 self.search_buffer = ''
-                self.proxy_model.set_search_query('')
+                self.on_search_updated('')
                 self.search_overlay.hide_overlay()
                 self.search_timer.stop()
                 return True
             
-            if key_event.key() == Qt.Key.Key_Backspace and self.search_buffer and self.proxy_model:
+            if key_event.key() == Qt.Key.Key_Backspace and self.search_buffer: # Backspace
                 self.search_buffer = self.search_buffer[:-1]
-                self.proxy_model.set_search_query(self.search_buffer)
-                self.view.tree_view.expandAll()
+                if self.search_buffer == '':
+                    self.on_search_updated('')
+                    return True
+                self.on_search_updated(self.search_buffer)
                 self.search_overlay.show_text(self.search_buffer)
                 self.search_timer.start()
                 return True
 
             text = key_event.text()
-            if text and text.isprintable() and self.proxy_model:
+            if text and text.isprintable(): # Printable
                 self.search_buffer += text
-                self.proxy_model.set_search_query(self.search_buffer)
-                self.view.tree_view.expandAll()
+                self.on_search_updated(self.search_buffer)
                 self.search_overlay.show_text(self.search_buffer)
                 self.search_timer.start()
                 return True
@@ -582,6 +696,10 @@ class WorkspaceController(QObject):
     def clear_search_buffer(self) -> None:
         '''Clears the search buffer. To reset proxy "Esc" in eventFilter'''
         self.search_buffer = ''
+        self.search_model._query = ''
+        # self.on_search_updated('')
+        self.search_overlay.hide_overlay()
+
 
 ###----------------------------------- Descriptor Panel ------------------------------------###
 
@@ -589,8 +707,9 @@ class FileDescriptorPanel(QWidget):
     '''Right panel of the workspace'''
     tagClicked = pyqtSignal(str)
 
-    def __init__(self, parent: QWidget | None = None, controller = None) -> None:
+    def __init__(self, descriptor_store: NodeDescriptorStore, parent: QWidget | None = None, controller = None) -> None:
         super().__init__(parent)
+        self._store = descriptor_store
         self._current_node: VfsNode | None = None
         self._setup_ui()
         self.clear()
@@ -666,26 +785,26 @@ class FileDescriptorPanel(QWidget):
     ### -------------------- Public ----------------------###
 
     def load_node(self, node: VfsNode) -> None:
+        '''Populate the panel for the selected node.'''
         self._current_node = node
         hid = node.hierarchical_id_str
-        descriptor = _DESCRIPTORS.get(hid, {})
+        meta: NodeMeta | None = self._store.get(hid)
 
         ### Header
-        title = descriptor.get('title', node.name)
-        self._name_label.setText(title)
+        self._name_label.setText(node.name)
         self._hid_label.setText(hid)
 
         ### Tags
         _clear_layout(self._tags_row)
-        for tag in descriptor.get('tags', []):
+        for tag in (node.category if isinstance(node.category, tuple) else [node.category]):
             tag_clickable = ClickableTag(tag)
             tag_clickable.tagClicked.connect(self.tagClicked.emit)
             self._tags_row.addWidget(tag_clickable)
         self._tags_row.addStretch()
-        self._tags_container.setVisible(bool(descriptor.get('tags')))
+        self._tags_container.setVisible(bool(node.category))
 
         ### Description
-        self._description.setText(descriptor.get('description', 'No description available'))
+        self._description.setText(meta.description if (meta and meta.description) else 'No description for node.')
 
         ### Properties
         self._props_label.setText('Loading...')
@@ -698,6 +817,7 @@ class FileDescriptorPanel(QWidget):
             ('Size', human_size(node.size)),
             ('Offset', hex(node.offset) if node.offset else '-'),
             ('Physical', str(node.is_physical)),
+            ('Datacenter header HID', node.target)
         ]:
             row = QHBoxLayout()
             key_label = QLabel(f'{label}:')
@@ -734,7 +854,7 @@ class ClickableTag(QLabel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mousePressEvent(self, ev: QMouseEvent | None) -> None:
-        if ev.button() == Qt.MouseButton.LeftButton:
+        if ev and ev.button() == Qt.MouseButton.LeftButton:
             self.tagClicked.emit(self.text())
 
 ###-------------------------------------- Welcome Page --------------------------------------###
@@ -742,8 +862,9 @@ class ClickableTag(QLabel):
 class WelcomePage(QWidget):
     request_open = pyqtSignal(Path)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, settings, parent=None) -> None:
         super().__init__(parent)
+        self.settings = settings
         layout = QVBoxLayout(self)
         layout.setContentsMargins(50,50,50,50)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -759,106 +880,12 @@ class WelcomePage(QWidget):
         layout.addWidget(self.button)
 
     def open_file_dialog(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(self, 'Open ISO', '', 'ISO Files (*.iso);;All Files (*)')
-        if file_path:
-            self.request_open.emit(Path(file_path))
-
-###------------------------------------- Staging Page --------------------------------------###
-
-class StagingPage(QWidget):
-    '''UI for managing the filesystem vs Staging Area'''
-    request_workspace = pyqtSignal()
-
-    def __init__(self, mod_track: ModTracker, parent=None) -> None:
-        super().__init__(parent)
-        self.tracker = mod_track
-        self._setup_ui()
-        self._connect_signals()
-
-    def _setup_ui(self) -> None:
-        main_layout = QVBoxLayout(self)
-        lists_layout = QHBoxLayout()
-
-        # left side
-        unstaged_layout = QVBoxLayout()
-        unstage_label = QLabel('Unstage Changes')
-        unstage_label.setObjectName('SectionHeader')
-        unstaged_layout.addWidget(unstage_label)
-        self.unstaged_list = QListWidget()
-        unstaged_layout.addWidget(self.unstaged_list)
-
-        # middle acitons
-        button_layout = QVBoxLayout()
-        button_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.btn_stage = QPushButton('Stage >>')
-        self.btn_unstage = QPushButton('<< Unstage')
-        self.btn_revert = QPushButton('Revert Change')
-        button_layout.addWidget(self.btn_stage)
-        button_layout.addWidget(self.btn_unstage)
-        button_layout.addStretch()
-        button_layout.addWidget(self.btn_revert)
-
-        # right side
-        staged_layout = QVBoxLayout()
-        staged_label = QLabel('Staged Changes (Ready to Commit)')
-        staged_label.setObjectName('SectionHeader')
-        staged_layout.addWidget(staged_label)
-        self.staged_list = QListWidget()
-        staged_layout.addWidget(self.staged_list)
-
-        # assemble
-        lists_layout.addLayout(unstaged_layout)
-        lists_layout.addLayout(button_layout)
-        lists_layout.addLayout(staged_layout)
-
-        # bottom button
-        bottom_layout = QHBoxLayout()
-        self.btn_back = QPushButton('Back')
-        self.btn_back.setObjectName('FloatClearButton')
-        bottom_layout.addWidget(self.btn_back)
-        bottom_layout.addStretch()
-        self.btn_confirm = QPushButton('Build New ISO')
-        self.btn_confirm.setObjectName('ConfirmButton')
-        bottom_layout.addWidget(self.btn_confirm)
-
-        main_layout.addLayout(lists_layout)
-        main_layout.addLayout(bottom_layout)
-    
-    def _connect_signals(self) -> None:
-        self.btn_back.clicked.connect(self.request_workspace.emit)
-        self.btn_stage.clicked.connect(self._on_stage)
-        self.btn_unstage.clicked.connect(self._on_unstage)
-        self.btn_revert.clicked.connect(self._on_revert)
-        self.tracker.state_changed.connect(self.refresh_lists)
-        self.btn_confirm.clicked.connect(self.tracker.confirm_and_rebuild)
-        
-    def refresh_lists(self) -> None:
-        '''Modifies the list of modified nodes'''
-        self.unstaged_list.clear()
-        self.staged_list.clear()
-        for node in self.tracker.modified_nodes:
-            item = QListWidgetItem(f'{node.name} (ID: {node.hierarchical_id_str})')
-            item.setData(Qt.ItemDataRole.UserRole, node)
-            self.unstaged_list.addItem(item)
-        for node in self.tracker.rebuild_queue:
-            item = QListWidgetItem(f'{node.name} (ID: {node.hierarchical_id_str})')
-            item.setData(Qt.ItemDataRole.UserRole, node)
-            self.staged_list.addItem(item)
-        self.btn_confirm.setEnabled(len(self.tracker.rebuild_queue) > 0)
-
-    def _on_stage(self) -> None:
-        for item in self.unstaged_list.selectedItems():
-            self.tracker.stage_node(item.data(Qt.ItemDataRole.UserRole))
-
-    def _on_unstage(self) -> None:
-        for item in self.staged_list.selectedItems():
-            self.tracker.unstage_node(item.data(Qt.ItemDataRole.UserRole))
-
-    def _on_revert(self) -> None:
-        selected_items = self.unstaged_list.selectedItems() + self.staged_list.selectedItems()
-        for item in selected_items:
-            self.tracker.revert_node(item.data(Qt.ItemDataRole.UserRole))
-
+        start_dir = self.settings.last_iso_dir or ''
+        path, _ = QFileDialog.getOpenFileName(self, 'Open ISO', start_dir, 'ISO Files (*.iso);;All Files (*)')
+        if path:
+            self.settings.last_iso_dir = str(Path(path).parent)
+            self.request_open.emit(Path(path))
+            
 ###------------------------------------- Rebuilding Page -----------------------------------###
 
 class RebuildStatusPage(QWidget):
@@ -900,8 +927,9 @@ class EditorPage(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._current_editor: BaseEditor | None = None
+        self._current_session: EditorSession | None = None
         self._setup_ui()
+        self._setup_shortcuts()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -914,63 +942,217 @@ class EditorPage(QWidget):
         bar.setContentsMargins(10, 5, 10, 5)
 
         self._back_btn = QPushButton('Back')
-        self._back_shortcut = QShortcut(QKeySequence('Esc'), self)
         self._back_btn.setObjectName('FloatClearButton')
-        self._back_shortcut.activated.connect(self._back_btn.click)
         self._back_btn.clicked.connect(self._on_back)
 
         self._editor_title = QLabel('Editor')
         self._editor_title.setObjectName('SectionHeader')
 
+        self.btn_undo   = QPushButton('Undo')
+        self.btn_redo   = QPushButton('Redo')
+        self.btn_revert = QPushButton('Revert')
+        self.btn_save   = QPushButton('Save')
+
+        self.btn_undo.setToolTip('Ctrl+Z')
+        self.btn_redo.setToolTip('Ctrl+Y')
+        self.btn_revert.setToolTip('Ctrl+R')
+        self.btn_save.setToolTip('Ctrl+S')
+
+        self.btn_undo.clicked.connect(self._on_undo)
+        self.btn_redo.clicked.connect(self._on_redo)
+        self.btn_save.clicked.connect(self._on_save)
+        self.btn_revert.clicked.connect(self._on_revert)
+
         bar.addWidget(self._back_btn)
         bar.addWidget(self._editor_title)
         bar.addStretch()
+        bar.addWidget(self.btn_undo)
+        bar.addWidget(self.btn_redo)
+        bar.addSpacing(15)
+        bar.addWidget(self.btn_revert)
+        bar.addWidget(self.btn_save)
 
         layout.addWidget(toolbar)
-
         self._editor_area = QStackedWidget()
         layout.addWidget(self._editor_area)
 
-    def load_editor(self, editor: BaseEditor, node: VfsNode) -> None:
-        if self._current_editor:
-            self._current_editor.cleanup()
-            self._editor_area.removeWidget(self._current_editor)
-            self._current_editor.deleteLater()
+        self._set_toolbar_enabled(False)
 
-        self._current_editor = editor
-        self._editor_area.addWidget(editor)
-        self._editor_area.setCurrentWidget(editor)
-        plugin_name = getattr(editor.__class__, '_plugin_name', editor.__class__.__name__)
-        self._editor_title.setText(f'{plugin_name} / {node.name}')
+    def _setup_shortcuts(self) -> None:
+        self._back_shortcut = QShortcut(QKeySequence('Esc'), self)
+        self._back_shortcut.activated.connect(self._back_btn.click)
+
+        self.save_shortcut = QShortcut(QKeySequence('Ctrl+S'), self)
+        self.save_shortcut.activated.connect(self._on_save)
+
+        self.revert_shortcut = QShortcut(QKeySequence('Ctrl+R'), self)
+        self.revert_shortcut.activated.connect(self._on_revert)
+
+        self.undo_shortcut = QShortcut(QKeySequence('Ctrl+Z'), self)
+        self.undo_shortcut.activated.connect(self._on_undo)
+        
+        self.redo_shortcut = QShortcut(QKeySequence('Ctrl+Y'), self)
+        self.redo_shortcut.activated.connect(self._on_redo)
+
+    def load_editor(self, session: EditorSession) -> None:
+        if self._current_session:
+            self._deconstruct_old_session()
+
+        self._current_session = session
+        self._editor_area.addWidget(session.editor)
+        self._editor_area.setCurrentWidget(session.editor)
+
+        is_mutable = getattr(session.editor, 'is_mutable', True)
+        self.btn_save.setVisible(is_mutable)
+        self.btn_revert.setVisible(is_mutable)
+        has_history = hasattr(session.editor, 'undo') and hasattr(session.editor, 'redo')
+        self.btn_undo.setVisible(has_history)
+        self.btn_redo.setVisible(has_history)
+
+        if is_mutable:
+            session.editor.dataChanged.connect(self._on_editor_state_changed)
+            if hasattr(session.editor, 'history'):
+                session.editor.history. can_undo_changed.connect(self.btn_undo.setEnabled)
+                session.editor.history.can_redo_changed.connect(self.btn_redo.setEnabled)
+        
+        self._update_title(is_dirty=False)
+        self._set_toolbar_enabled(False)
+
+    def _deconstruct_old_session(self) -> None:
+        old_editor = self._current_session.editor if self._current_session else None
+        if not old_editor:
+            return
+        try:
+            old_editor.dataChanged.disconnect(self._on_apply_confirmed)
+        except TypeError:
+            pass
+        self._editor_area.removeWidget(old_editor)
+        old_editor.cleanup()
+        old_editor.deleteLater()
+        self._current_session = None
+
+    def finalize_load(self) -> None:
+        self._set_toolbar_enabled(True)
+        if self._current_session:
+            self._on_editor_state_changed(self._current_session.editor.is_dirty())
+
+    def _on_editor_state_changed(self, is_dirty: bool) -> None:
+        is_ready = self._current_session and self._current_session.state == 'ready'
+        self.btn_save.setEnabled(is_dirty and is_ready)
+        self.btn_revert.setEnabled(is_dirty and is_ready)
+        self._update_title(is_dirty)
+
+    def _update_title(self, is_dirty: bool) -> None:
+        if not self._current_session:
+            self._editor_title.setText('Editor')
+            return
+        plugin_name = getattr(
+            self._current_session.editor.__class__,
+            '_plugin_name',
+            self._current_session.editor.__class__.__name__
+        )
+        node_name = self._current_session.node.name
+        asterisk = ' *' if is_dirty else ''
+
+        self._editor_title.setText(f'{plugin_name} / {node_name}{asterisk}')
+
+    def _set_toolbar_enabled(self, enabled: bool) -> None:
+        self.btn_save.setEnabled(enabled)
+        self.btn_revert.setEnabled(enabled)
+        self.btn_undo.setEnabled(enabled)
+        self.btn_redo.setEnabled(enabled)
+
+    ###--------------------------------------- Triggers ----------------------------------###
 
     def _on_back(self) -> None:
-        if self._current_editor and self._current_editor.is_dirty():
-            if self._current_editor.is_mutable:
+        if not self._current_session:
+            self.back_requested.emit()
+            return
+        session = self._current_session
+        if session.state == 'loading':
+            reply = QMessageBox.question(
+                self, 'Loading in Progress', 'Data is still loading. Cancel and go back?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                session.cancel()
+                session.editor.cleanup()
+                self.back_requested.emit()
+            return
+        if session.state == 'ready':
+            editor = session.editor
+            if editor.is_mutable and editor.is_dirty():
                 reply = QMessageBox.question(
-                    self,
-                    'Unsaved Changes', 'You have unsaved changes. Apply before closing?',
+                    self, 'Unsaved Changes', 'Apply changes before closing?',
                     QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
                     QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save,
                 )
                 if reply == QMessageBox.StandardButton.Cancel:
                     return
                 if reply == QMessageBox.StandardButton.Save:
-                    self._current_editor.apply_changes()
+                    editor.dataChanged.connect(self._on_apply_confirmed)
+                    editor.apply_changes()
+                    return
                 else:
-                    self._current_editor.discard_changes()
+                    editor.discard_changes()
         self.back_requested.emit()
+
+    def _on_apply_confirmed(self, dirty: bool) -> None:
+        '''Insure that the editor instance gets the data during the closing state'''
+        if not dirty:
+            if self._current_session:
+                try:
+                    self._current_session.editor.dataChanged.disconnect(self._on_apply_confirmed)
+                except TypeError:
+                    pass
+            self.back_requested.emit()
+    
+    def _on_save(self) -> None:
+        editor = self._current_session.editor if self._current_session else None
+        if not editor or not self._current_session:
+            return
+        if editor.is_mutable and editor.is_dirty():
+            logger.info(f'Saved {self._current_session.node.name} modifications to staging queue.')
+            editor.apply_changes()
+
+    def _on_revert(self) -> None:
+        editor = self._current_session.editor if self._current_session else None
+        if not editor or not self._current_session:
+            return
+        if editor.is_mutable and editor.is_dirty():
+            editor.discard_changes()
+
+    def _on_undo(self) -> None:
+        if self._current_session and hasattr(self._current_session.editor, 'undo'):
+            self._current_session.editor.undo()
+
+    def _on_redo(self) -> None:
+        if self._current_session and hasattr(self._current_session.editor, 'redo'):
+            self._current_session.editor.redo()
 
 ###------------------------------------- Menu Bar ------------------------------------------###
 
 class MainMenuBar:
-    def __init__(self, main_window: QMainWindow, workspace_page: WorkspaceWidget, dispatcher: Dispatcher) -> None:
-        self.window = main_window
-        self.workspace = workspace_page
+    def __init__(
+            self, 
+            main_window:      QMainWindow, 
+            workspace_page:   WorkspaceWidget, 
+            dispatcher:       Dispatcher,
+            descriptor_store: NodeDescriptorStore,
+            app_settings:     AppSettings 
+        ) -> None:
+        self.window     = main_window
+        self.workspace  = workspace_page
         self.dispatcher = dispatcher
+        self._store     = descriptor_store
+        self.settings   = app_settings
 
         self.menu_bar = self.window.menuBar()
         self._build_file_menu()
         self._build_view_menu()
+        self._build_descriptor_menu()
+        self._build_info_menu()
 
     def _build_file_menu(self) -> None:
         file_menu = self.menu_bar.addMenu('&File')
@@ -995,35 +1177,68 @@ class MainMenuBar:
 
     def _build_view_menu(self) -> None:
         view_menu = self.menu_bar.addMenu('&View')
-
+        # Theme
+        theme_menu = view_menu.addMenu('Theme')
+        self._theme_actions: dict[str, QAction] = {}
         for name in ThemeManager.THEMES.keys():
             action = QAction(name, self.window)
             action.setCheckable(True)
-            action.setChecked(name == self.window.current_theme)
+            action.setChecked(name == self.settings.theme_name)
             action.triggered.connect(lambda checked, n=name: self._handle_theme_change(n))
-            view_menu.addAction(action)
+            theme_menu.addAction(action)
+            self._theme_actions[name] = action
+        # Zoom
+        view_menu.addSeparator()
+        zoom_in = QAction('Zoom In', self.window)
+        zoom_out = QAction('Zoom out', self.window)
+        zoom_rst = QAction('Reset Zoom', self.window)
+        zoom_in.setShortcut('Ctrl+=')
+        zoom_out.setShortcut('Ctrl+-')
+        zoom_rst.setShortcut('Ctrl+0')
+        zoom_in.triggered.connect(lambda: self.window.adjust_zoom(+1))
+        zoom_out.triggered.connect(lambda: self.window.adjust_zoom(-1))
+        zoom_rst.triggered.connect(lambda: self.window.reset_zoom())
+        for act in (zoom_in, zoom_out, zoom_rst):
+            view_menu.addAction(act)
 
+        # Toggles
         toggle_log = QAction('Show Log Console', self.window)
         toggle_log.setCheckable(True)
-        toggle_log.setChecked(True)
-        toggle_log.triggered.connect(self.workspace.log_console.setVisible)
+        toggle_log.setChecked(self.settings.show_log_console)
+        toggle_log.triggered.connect(self._handle_toggle_log)
         view_menu.addAction(toggle_log)
 
         toggle_hidden = QAction('Show Hidden Files', self.window)
         toggle_hidden.setCheckable(True)
-        toggle_hidden.setChecked(False)
+        toggle_hidden.setChecked(self.settings.show_hidden_files)
         toggle_hidden.triggered.connect(self._handle_toggle_hidden)
         view_menu.addAction(toggle_hidden)
 
+    def _build_descriptor_menu(self) -> None:
+        descriptor_menu = self.menu_bar.addMenu('Descriptors')
+
+        build_action = QAction('Export new JSON', self.window)
+        build_action.triggered.connect(self._handle_export_template)
+        descriptor_menu.addAction(build_action)
+
+        save_action = QAction('Save Now', self.window)
+        save_action.triggered.connect(self._store.save)
+        descriptor_menu.addAction(save_action)
+
+    def _build_info_menu(self) -> None:
+        info_menu = self.menu_bar.addMenu('Info')
+
+        legend_action = QAction('File Legend', self.window)
+        legend_action.triggered.connect(self._handle_legend)
+        info_menu.addAction(legend_action)
+
     #-------- Actions --------#
     def _handle_open(self) -> None:
-        if hasattr(self.window, 'welcome_page'):
-            self.window.welcome_page.open_file_dialog()
-        else: # fallback 
-            logger.warning('No welcome_page exists for MainWindow, falling back...')
-            file_path, _ = QFileDialog.getOpenFileName(self.window, "Open ISO", "", "ISO Files (*.iso);;All Files (*)")
-            if file_path:
-                self.window.attempt_load_iso(Path(file_path))
+        start_dir = self.settings.last_iso_dir or ''
+        path, _ = QFileDialog.getOpenFileName(self.window, 'Open ISO', start_dir, 'ISO Files (*.iso);;All Files (*)')
+        if path:
+            self.settings.last_iso_dir = str(Path(path).parent)
+            self.window.attempt_load_iso(Path(path))
 
     def _handle_close(self) -> None:
         self.dispatcher.close()
@@ -1033,13 +1248,34 @@ class MainMenuBar:
         QApplication.quit()
 
     def _handle_theme_change(self, theme_name: str) -> None:
-        self.window.current_theme = theme_name
-        self.window.adjust_zoom(0)
+        for name, action in self._theme_actions.items():
+            action.setChecked(name == theme_name)
+        self.window.set_theme(theme_name)
+
+    def _handle_toggle_log(self, checked: bool) -> None:
+        self.workspace.log_console.setVisible(checked)
+        self.settings.show_log_console = checked
 
     def _handle_toggle_hidden(self, checked: bool) -> None:
         '''Pass the toggle signal to the proxy model'''
-        if self.window.controller.proxy_model:
+        self.settings.show_hidden_files = checked
+        if self.window.controller.proxy_model: # Prevent crashing when no proxy_model is live
             self.window.controller.proxy_model.set_show_hidden(checked)
+
+    def _handle_export_template(self) -> None:
+        if not self.dispatcher.vfs:
+            return
+        path, _ = QFileDialog.getSaveFileName(self.window, 'Export Descriptor JSON', 'descriptors.json', 'JSON Files (*.json)')
+        if not path:
+            return
+        output = Path(path)
+        count = self._store.export_template(self.dispatcher.vfs, output)
+        QMessageBox.information(self.window, 'Template Exported', f'{count} new stub(s) added.\nSave to {output.name}')
+
+    def _handle_legend(self) -> None:
+        LegendViewer(self.window).exec()
+
+###------------------------------------------------- Search Overlay ---------------------------------------------------------###
 
 class SearchOverlay(QLabel):
     '''Floating centered text overlay that fades when idle for searching'''
@@ -1100,6 +1336,37 @@ class SearchOverlay(QLabel):
         self.idle_timer.stop()
         self.hide()
 
+###------------------------------------------- File Legend ------------------------------------------###
+
+class LegendViewer(QDialog):
+    '''Creates a paging dialog for known file magics and their supposed use as well as current support'''
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.pages = [Legend1, Legend2]
+        self.page = 0
+        self.setWindowTitle('File Legend for Radiata Stories')
+        layout = QVBoxLayout(self)
+        self.resize(500, 750)
+        self.browser = QTextBrowser()
+        self.browser.setHtml(self.pages[0])
+        self.next_btn = QPushButton('Next')
+        self.next_btn.setObjectName('FloatClearButton')
+        self.next_btn.clicked.connect(self.next_page)
+        layout.addWidget(self.browser)
+        layout.addWidget(self.next_btn)
+
+    def next_page(self) -> None:
+        self.page += 1
+
+        if self.page >= len(self.pages):
+            self.accept()
+            return
+        self.browser.setHtml(self.pages[self.page])
+        if self.page == len(self.pages) - 1:
+            self.next_btn.setText('Close')
+
+###------------------------------------------- Utility ------------------------------------------###
+
 def _divider() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.Shape.HLine)
@@ -1113,3 +1380,82 @@ def _clear_layout(layout) -> None:
             item.widget().deleteLater()
         if item.layout():
             _clear_layout(item.layout())
+
+Legend1 = '''
+<html><body>
+<h3>File Legend (1/2)</h3>
+<table border="1" cellspacing="0" cellpadding="4">    <tr>
+        <th>Extension</th>
+        <th>Description</th>
+        <th>Support</th>
+    </tr>
+
+    <tr><th colspan="3">File System</th></tr>
+    <tr><td>.slz</td><td>Compressed file</td><td>100%</td></tr>
+    <tr><td>.sle</td><td>Encrypted compressed file</td><td>100%</td></tr>
+    <tr><td>.kods</td><td>Custom archive</td><td>100%</td></tr>
+    <tr><td>.bcb</td><td>Packed entity data</td><td>100%</td></tr>
+    <tr><td>.vib</td><td>Vibration motor data</td><td>0%</td></tr>
+    <tr><td>.elf</td><td>Executables</td><td>---</td></tr>
+    <tr><td>.idx</td><td>TOC</td><td>100%</td></tr>
+
+    <tr><th colspan="3">Audio</th></tr>
+    <tr><td>.seqw</td><td>Sound data</td><td>0%</td></tr>
+    <tr><td>.VAG</td><td>PS2 standard audio format</td><td>0%</td></tr>
+    <tr><td>.020</td><td>TAC audio</td><td>Viewer / Export</td></tr>
+
+    <tr><th colspan="3">Movie</th></tr>
+    <tr><td>.fmv</td><td>Movies</td><td>0%</td></tr>
+
+    <tr><th colspan="3">Mesh</th></tr>
+    <tr><td>.fps</td><td>Mesh data</td><td></td></tr>
+    <tr><td>.fss</td><td>Mesh data</td><td></td></tr>
+    <tr><td>.idom</td><td>Mesh data</td><td></td></tr>
+    <tr><td>.lctp</td><td>Mesh data</td><td></td></tr>
+
+    <tr><th colspan="3">Event</th></tr>
+    <tr><td>.evd</td><td>Event VM dispatcher data</td><td>0%</td></tr>
+</table>
+</body></html>
+'''
+Legend2 = '''
+<html><body>
+<h3>Supported Formats (2/2)</h3>
+<table border="1" cellspacing="0" cellpadding="4">
+    <tr><th colspan="3">Animation</th></tr>
+    <tr><td>.fas</td><td>Animation data</td><td></td></tr>
+    <tr><td>.hfas</td><td>Animation data</td><td></td></tr>
+    <tr><td>.rmac</td><td>Animation data</td><td></td></tr>
+    <tr><td>.rta</td><td>Animation data</td><td></td></tr>
+    <tr><td>.paf</td><td>Animation data</td><td></td></tr>
+
+    <tr><th colspan="3">Texture</th></tr>
+    <tr><td>.fis</td><td>Texture data</td><td></td></tr>
+    <tr><td>.fisp</td><td>Texture data</td><td></td></tr>
+    <tr><td>.fisa</td><td>Texture data</td><td></td></tr>
+    <tr><td>.tim2</td><td>PS2 standard texture format</td><td>0%</td></tr>
+
+    <tr><th colspan="3">Scene</th></tr>
+    <tr><td>.rbad</td><td>Radiata Background Animation Data</td><td>0%</td></tr>
+    <tr><td>.rlf</td><td>Scene data</td><td></td></tr>
+    <tr><td>.rmf</td><td>Scene data</td><td></td></tr>
+    <tr><td>.ndnc</td><td>Scene data</td><td></td></tr>
+    <tr><td>.xbdc</td><td>Scene data</td><td></td></tr>
+    <tr><td>.pcdc</td><td>Scene data</td><td></td></tr>
+    <tr><td>.dnal</td><td>Scene data</td><td></td></tr>
+    <tr><td>.tgil</td><td>Container for map animation data</td><td></td></tr>
+
+    <tr><th colspan="3">Gameplay</th></tr>
+    <tr><td>.mpa</td><td>Sprite animation data</td><td></td></tr>
+    <tr><td>.dth</td><td>Gameplay data</td><td></td></tr>
+    <tr><td>.cpa</td><td>Gameplay data</td><td></td></tr>
+    <tr><td>.ipa</td><td>Gameplay data</td><td></td></tr>
+    <tr><td>.fdc</td><td>Gameplay data</td><td></td></tr>
+
+    <tr><th colspan="3">Unknown / Descriptor</th></tr>
+    <tr><td>.rcp</td><td>Unknown table of grouped IDs</td><td>0%</td></tr>
+    <tr><td>.rcad</td><td>Descriptor data</td><td></td></tr>
+    <tr><td>.png</td><td>PNG image</td><td></td></tr>
+</table>
+</body></html>
+'''

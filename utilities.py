@@ -1,5 +1,8 @@
+'''Anything that is repeated frequently I have been placing here as a global import utility.
+get_resource_path is not repeated frequently but may help for app building in the future so I included it here as a global utility'''
+from __future__ import annotations
+
 import sys
-import os
 from pathlib import Path
 
 def get_resource_path(relative_path: str | Path) -> Path:

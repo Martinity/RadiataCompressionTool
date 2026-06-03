@@ -1,3 +1,8 @@
+'''Global log signal for the application.
+For more advanced debugging implementation should use {__name__}
+Only signals messages to the workspace log console (or any build console where __name__ helps)'''
+from __future__ import annotations
+
 from PyQt6.QtWidgets import QGridLayout, QPushButton, QPlainTextEdit, QWidget
 from PyQt6.QtGui import QTextCursor, QColor
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt

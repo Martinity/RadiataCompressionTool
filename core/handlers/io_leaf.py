@@ -1,3 +1,6 @@
+'''LeafHandler for the global actions "Export as Raw Bytes" & "Import and Replace"'''
+from __future__ import annotations
+
 from pathlib import Path
 from core.node import VfsNode
 from core.contracts import LeafHandler
@@ -25,7 +28,7 @@ class IOHandler(LeafHandler):
         return new_data
 
     def execute_action(self, node: VfsNode, action: str, progress_callback, log_callback, **kwargs) -> bytes | str | None:
-        if action == 'Export':
+        if action == 'Export as Raw Bytes':
             return self.export_node(kwargs['raw_node'], kwargs['file_path'], progress_callback)
-        elif action == 'Import':
+        elif action == 'Import and Replace':
             return self.import_node(kwargs['file_path'], progress_callback)

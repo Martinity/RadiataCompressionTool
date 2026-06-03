@@ -16,7 +16,7 @@ QHeaderView::section, QPushButton, QLabel, QTextEdit, QLineEdit {
     font-size: {FONT_SIZE_LARGE};
 }
 
-#FloatClearButton, #GenericText, #LogOutput {
+#FloatClearButton, #GenericText, #LogOutput, QToolTip {
     font-size: {FONT_SIZE_SMALL};
 }
 

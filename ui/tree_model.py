@@ -1,12 +1,19 @@
-'''Complex UI mapping handler'''
+'''Holds all models for workspace. In other words takes nodes and converts their data into file browser like formats.
+VfsTreeModel - QAbstractItemModel, the hierarchical tree
+SearchModel - QAbstractListModel, the search list. List due to recursive hierarchical searching chugging UI
+TreeProxyModel - QSortFilterProxyModel, only gets applied to the tree. Search is hardcoded to avoid hidden nodes'''
 from __future__ import annotations
 
-from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel
+
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel, QAbstractListModel
+from PyQt6.QtGui import QColor
 from core.node import VfsManager
 from utilities import human_size
 if TYPE_CHECKING:
     from core.node import VfsNode
+    from core.descriptor_manager import NodeDescriptorStore
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -85,7 +92,7 @@ class VfsTreeModel(QAbstractItemModel):
             if col == 0:
                 return node.hierarchical_id_str
             if col == 1: 
-                return node.name
+                return node.name + node.extension
             if col == 2: 
                 return human_size(node.size)
             
@@ -130,10 +137,7 @@ class VfsTreeModel(QAbstractItemModel):
 class TreeProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.active_category: str = 'All'
         self.show_hidden  = False
-        self.search_query = ''
-        self._descriptors = {}
         # self.setDynamicSortFilter(True)
         self.setRecursiveFilteringEnabled(True)
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -142,122 +146,203 @@ class TreeProxyModel(QSortFilterProxyModel):
         '''Custom sorting logic for columns'''
         left_node: VfsNode = self.sourceModel().data(left, Qt.ItemDataRole.UserRole)
         right_node: VfsNode = self.sourceModel().data(right, Qt.ItemDataRole.UserRole)
-
         if not left_node or not right_node:
             return super().lessThan(left, right)
-        
         col = left.column()
-
         if col == 0:
-            try:
-                left_parts = list(left_node.hierarchical_id)
-                right_parts = list(right_node.hierarchical_id)
-                return left_parts < right_parts
-            except (ValueError, AttributeError):
-                return left_node.hierarchical_id < right_node.hierarchical_id
-        
+            return list(left_node.hierarchical_id) < list(right_node.hierarchical_id)
         if col == 2:
             return left_node.size < right_node.size
-        
         return super().lessThan(left, right)
-
-    def set_category(self, category: str):
-        self.active_category = category
-        self.invalidateFilter()
 
     def set_show_hidden(self, show: bool):
         '''refreshes view with the hidden toggle'''
+        logger.debug(f'hidden toggle from proxy model:{show}')
         self.show_hidden = show
         self.invalidateFilter()
-
-    def set_search_query(self, query: str):
-        self.search_query = query.lower().strip()
-        self.invalidateFilter()
-
-    def set_descriptors(self, data: dict):
-        self._descriptors = data
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
         index = self.sourceModel().index(source_row, 0 , source_parent)
         node = index.data(Qt.ItemDataRole.UserRole)
-
         if not node:
             return False
-
         if not self.show_hidden and node.is_hidden:
             return False
+        return True
 
-        if not self.search_query:
-            return True
-
-        query = self.search_query.lower()
-
-        node_name = getattr(node, 'name', '')
-        if query in node_name.lower(): # Search for name
-             return True
-        if query in node.hierarchical_id_str.lower(): # Search for ID
-            return True
-        from ui.ui_core import _DESCRIPTORS
-        descriptor = _DESCRIPTORS.get(node.hierarchical_id_str, {})
-        tags = descriptor.get('tags', [])
-
-        if query.startswith('tag:'): # Seach only tags/clicked tag
-            target_tag = query[4:].strip()
-            return any(target_tag in t.lower() for t in tags)
-        
-        for tag in tags: # Search for tag
-            if query in tag.lower():
-                return True
-        return False
-
-### -------------------------------
-
-class FlatSearchModel(QAbstractItemModel):
-    '''A model that provides a falt list of the VFS nodes'''
-    def __init__(self, vfs_manager, descriptors, parent=None):
-        super().__init__(parent)
-        self.vfs = vfs_manager
-        self.descriptors = descriptors
-        self.matches = []
-        self._query = ''
-
-    def set_query(self, query: str):
-        self._query = query.lower()
-        self.refresh()
-
-    def refresh(self):
-        self.beginResetModel()
-        self.matches = []
-        if self._query:
-            self._search_recursive(self.vfs.root)
-        self.endResetModel()
+### -------------------------------------- Flat Search Model -------------------------------------------###
     
-    def _search_recursive(self, node: VfsNode):
-        match = self._query in node.name.lower()
-        if not match:
-            node_data = self.descriptors.get(node.hierarchical_id_str, {})
-            tags = node_data.get('tags', [])
-            match = any(self._query in tag.lower() for tag in tags)
+_RANK_EXACT_NAME  = 100
+_RANK_HID         = 90
+_RANK_NAME_PREFIX = 80
+_RANK_NAME        = 60
+_RANK_TAG         = 40
+_RANK_DESCRIPTION = 10
 
-        if match:
-            self.matches.append(node)
+@dataclass
+class _SearchEntry:
+    '''Stores: node, name, hid, tokens, base_rank, tags. Calculates score.'''
+    node:       VfsNode
+    name_lower: str
+    hid_str:    str
+    tokens:     frozenset[str]
+    base_rank:  int
+    tags:       tuple[str, ...]
 
-        for child in node.children:
-            self._search_recursive(child)
+    def score(self, query: str) -> int:
+        '''return score for query. Higher is more relevant'''
+        if not query:
+            return 0
+        if query == self.name_lower: # Name exact
+            return _RANK_EXACT_NAME + self.base_rank
+        if self.name_lower.startswith(query): # Name startswith
+            return _RANK_NAME_PREFIX + self.base_rank
+        if query in self.name_lower: # Name contains
+            return _RANK_NAME + self.base_rank
+        if self.hid_str.startswith(query) or query == self.hid_str: # HID match
+            return _RANK_HID
+        for token in self.tokens:
+            if query == token: # Exact token match
+                return _RANK_TAG + self.base_rank if self.base_rank > 0 else _RANK_DESCRIPTION
+            if token.startswith(query): # Patial token match
+                return _RANK_DESCRIPTION + self.base_rank
+        return 0
+
+@dataclass
+class _QueryResult:
+    '''_SearchEntry, score'''
+    entry: _SearchEntry
+    score: int
+
+class FlatSearchModel(QAbstractListModel):
+    '''Flat list of search results. Built as nodes are inserted'''
+    TagsRole = Qt.ItemDataRole.UserRole + 1
+
+    def __init__(self,  vfs: VfsManager, descriptor_store: NodeDescriptorStore, parent=None,) -> None:
+        super().__init__(parent)
+        self._store    = descriptor_store
+        self._index:   list[_SearchEntry] = []
+        self._results: list[_QueryResult] = []
+        self._query    = ''
+
+        self._index_subtree(vfs.root)
+        vfs.insert_start.connect(self._on_insert_start)
+        vfs.insert_finished.connect(self._on_insert_finished)
 
     def rowCount(self, parent=QModelIndex()) -> int:
-        return len(self.matches)
+        return 0 if parent.isValid() else len(self._results)
     
-    def data(self, index, role):
-        if not index.isValid():
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        '''Returns different type of data depending on requested Role'''
+        if not index.isValid() or index.row() >= len(self._results):
             return None
-        node = self.matches[index.row()]
+        result = self._results[index.row()]
+        entry = result.entry
 
-        if role == Qt.ItemDataRole.DisplayRole:
-            return f'{node.name} ({node.hierarchical_id_str})'
-        if role == Qt.ItemDataRole.UserRole:
-            return node
-        return None
+        if role == Qt.ItemDataRole.DisplayRole: # Name
+            return f'{entry.node.name}  ({entry.hid_str})'
+        if role == Qt.ItemDataRole.UserRole: # Node
+            return entry.node
+        if role == self.TagsRole: # Tags
+            return entry.tags
+        if role == Qt.ItemDataRole.ToolTipRole: # ToolTip
+            meta = self._store.get(entry.hid_str)
+            desc = meta.description if meta and meta.description else ''
+            return f'{entry.hid_str}\n{desc}' if desc else entry.hid_str
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if result.score < _RANK_TAG:
+                return QColor('#888888')
+        return 
     
-    def columnCount(self, parent: QModelIndex) -> int:
-        return 1
+    def set_query(self, query: str) -> None:
+        q = query.lower().strip()
+        if q == self._query:
+            return
+        self._query = q
+        self._recompute_results()
+
+    def _recompute_results(self) -> None:
+        self.beginResetModel()
+        if not self._query:
+            self._results = []
+            self.endResetModel()
+        else:
+            scored = [
+                _QueryResult(entry=e, score=e.score(self._query))
+                for e in self._index
+                if not e.node.is_hidden
+            ]
+            self._results = sorted(
+                (r for r in scored if r.score > 0),
+                key=lambda r: -r.score,
+            )
+            self.endResetModel()
+
+    def result_count(self) -> int:
+        return len(self._results)
+    
+    def _on_insert_start(self, parent: VfsNode, first: int, last: int) -> None:
+        index = self.index_for_node(parent)
+        self.beginInsertRows(index, first, last)
+        self._on_children_inserted(parent, first, last)
+
+    def _on_insert_finished(self):
+        self.endInsertRows()
+
+    def index_for_node(self, target_node: VfsNode) -> QModelIndex:
+        '''Get the QModelIndex for a node'''
+        if target_node is None:
+            return QModelIndex()
+        return self.createIndex(target_node.row(), 0, target_node)
+
+    
+    def _on_children_inserted(self, parent: VfsNode, first: int, last: int) -> None:
+        '''Index newly inserted children'''
+        new_children = parent.children[first : last + 1]
+        new_entries = [self._build_entry(c) for c in new_children if not c.is_hidden]
+        if not new_entries:
+            return
+        self._index.extend(new_entries)
+        if self._query:
+            self._recompute_results()
+
+    def _index_subtree(self, node: VfsNode) -> None:
+        '''Recursively index all non-hidden nodes'''
+        for child in node.children:
+            if not child.is_hidden:
+                self._index.append(self._build_entry(child))
+                if child.children:
+                    self._index_subtree(child)
+
+    def _build_entry(self, node: VfsNode) -> _SearchEntry:
+        meta       = self._store.get(node.hierarchical_id_str)
+        name_lower = node.name.lower()
+        hid_str    = node.hierarchical_id_str
+        tokens: set[str] = set(name_lower.split())
+        tags:   tuple[str, ...] = ()
+        base_rank  = 0
+
+        tokens.add(hid_str)
+        tokens.update(c.lower() for c in node.category)
+
+        if meta:
+            if meta.title:
+                tokens.update(meta.title.lower().split())
+                base_rank += 20
+            if meta.tags:
+                tags = meta.tags
+                tokens.update(t.lower() for t in meta.title)
+                base_rank += 10 * len(meta.tags)
+            if meta.description:
+                tokens.update(
+                    w for w in meta.description.lower().split()
+                    if len(w) > 2
+                )
+        return _SearchEntry(
+            node=node,
+            name_lower=name_lower,
+            hid_str=hid_str,
+            tokens=frozenset(tokens),
+            base_rank=base_rank,
+            tags=tags
+        )

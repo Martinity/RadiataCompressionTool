@@ -1,3 +1,13 @@
+'''
+Contains all background task defining logic. 
+
+- ActionType and ActionDef are used when registering profiles as well as for routing logic to distinct UI outcomes
+
+- Tasks section manages threading and associated signals
+
+- Actions routes background tasks to the appropriate logic.
+
+'''
 from __future__ import annotations
 
 from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool
@@ -5,10 +15,11 @@ from typing import Callable, Any, TYPE_CHECKING
 from dataclasses import dataclass
 from enum import auto, Enum
 from pathlib import Path
+from core.contracts import LeafHandler, ContainerHandler
 if TYPE_CHECKING:
     from core.node import VfsNode
     from core.contracts import BaseHandler
-    from core.handlers.iso_handler import IsoHandler
+    from core.handlers.iso_container import IsoHandler
     from core.navigator import VfsNavigator
 
 import logging
@@ -132,16 +143,17 @@ class Actions:
         '''
         log_callback(f'Preparing editor data for {node.name}...')
         progress_callback(20, 'Unwrapping nodes...')
-        if node.pending_data:
-            raw_bytes = node.pending_data
-        else:
-            raw_bytes = navigator.unwrap_chain(node)
+        raw_bytes = node.pending_data or navigator.unwrap_chain(node)
         if not raw_bytes:
             raise ValueError(f'unwrap_chain returned empty bytes for {node.name}')
-        header_bytes = navigator.resolve_data_from_hid(getattr(node, 'target', None))
+        header_bytes = navigator.resolve_data_from_hid(node.target)
+        if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
+            raise TypeError(
+                f'{handler_class.__name__} must be ContainerHandler or LeafHandler.'
+            )
         with handler_class(raw_bytes, node.parent) as handler:
             if header_bytes and hasattr(handler, 'datacenter_headers'):
-                handler.datacenter_headers = header_bytes
+                handler.datacenter_headers = [header_bytes]
             result = handler.prepare_editor_data(node, raw_bytes)
         progress_callback(100, 'Done')
         logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__} from {handler_class.__name__}')
@@ -161,12 +173,8 @@ class Actions:
         '''
         log_callback(f'Decoding data for {node.name}')
         progress_callback(50, 'Decoding payload...')
-        from core.contracts import PhysicalHandler
-        if issubclass(handler_class, PhysicalHandler):
-            raise TypeError(
-                f'{handler_class.__name__} is a PhysicalHandler. decode_editor_data '
-                'requires a ContainerHandler or LeafHandler.'
-            )
+        if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
+            raise TypeError(f'{handler_class.__name__} must be ContainerHandler or LeafHandler.')
         with handler_class(b'', node.parent) as handler:
             result = handler.decode_editor_data(node, payload)
         if not isinstance(result, bytes):
@@ -212,6 +220,20 @@ class Actions:
                         action_name=action_def.name, node=node,
                         status=ActionStatus.FAILURE, message='No output path provided'
                     )
+                handler_class = Registry.get_handler(node)
+                profile = Registry.get_handler_profile(node)
+                has_custom_export = (handler_class and profile and profile.get_action(action_def.name) is not None)
+                if has_custom_export: # Custom Export - PNG, WAV... etc
+                    return Actions.run_handler_action(
+                        handler_class,
+                        node,
+                        action_def.name,
+                        navigator,
+                        progress_callback,
+                        log_callback, 
+                        **kwargs
+                    )
+                # Fallback - Raw Bytes
                 return Actions.export_node(
                     node, file_path, navigator, progress_callback, log_callback
                 )
@@ -247,7 +269,7 @@ class Actions:
             log_callback('Starting ISO build sequence...')
             progress_callback(10, 'Performing VFS rollup...')
 
-            physical_staged_nodes = navigator.rollup_nodes(staged_nodes)
+            physical_staged_nodes = navigator.rollup_nodes(staged_nodes, log_callback)
             progress_callback(40, 'Writing sectors to disk...')
             success = handler.rebuild_node(root_node, physical_staged_nodes, output_path, progress_callback=progress_callback)
 
@@ -332,7 +354,7 @@ class Actions:
             progress_callback(100, 'Import complete')
             log_callback(f'Loaded {len(data)} bytes from {import_path.name}')
             return ActionResult(
-                action_name='Import',
+                action_name='Import and Replace',
                 node=node,
                 status=ActionStatus.SUCCESS,
                 payload=data
@@ -340,7 +362,7 @@ class Actions:
         except Exception as e:
             logger.error(f'Import failed: {e}', exc_info=True)
             return ActionResult(
-                action_name='Import',
+                action_name='Import and Replace',
                 node=node,
                 status=ActionStatus.FAILURE, message=str(e)
             )
@@ -348,26 +370,25 @@ class Actions:
     ### Container actions
     @staticmethod
     def run_handler_action(
-        handler_class: type['BaseHandler'],
-        node:         'VfsNode',
+        handler_class: type[BaseHandler],
+        node:          VfsNode,
         action_name:   str,
-        navigator:    'VfsNavigator',
+        navigator:     VfsNavigator,
         progress_callback: Callable,
         log_callback:      Callable,
         **kwargs,
     ) -> ActionResult:
         '''Unwrap the node, resolve datacenter headers, instantiate the handler,
         and call execute_action.  All I/O happens on the worker thread.'''
-        log_callback(f'{action_name} on node: {node.hierarchical_id_str}...')
+        log_callback(f'{action_name} on node: {node.name}...')
         try:
             node_bytes   = navigator.unwrap_chain(node)
-            if not node_bytes:
-                raise ValueError(f'unwrap_chain returned empty bytes for {node.name}')
-            header_bytes = navigator.resolve_data_from_hid(getattr(node, 'target', None))
-
+            header_bytes = navigator.resolve_data_from_hid(node.target)
+            if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
+                raise TypeError(f'{handler_class.__name__} must be ContainerHandler or LeafHandler.')
             with handler_class(node_bytes, node.parent) as handler:
                 if header_bytes and hasattr(handler, 'datacenter_headers'):
-                    handler.datacenter_headers = header_bytes
+                    handler.datacenter_headers = [header_bytes]
                 payload = handler.execute_action(node, action_name, progress_callback, log_callback, **kwargs)
 
             log_callback(f'{action_name} complete.')

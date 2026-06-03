@@ -1,3 +1,4 @@
+'''BaseEditor Global editor for any format. Takes any raw byte stream as input. Shitty hex editor :"v'''
 from __future__ import annotations
 
 import struct
@@ -9,6 +10,7 @@ from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelection
 from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction
 
 from core.contracts import BaseEditor
+from core.handlers.generic_binary_leaf import GenericBinaryHandler
 from core.registry import Registry
 from core.node import VfsNode
 from utilities import human_size
@@ -17,7 +19,7 @@ import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
 
-@Registry.register(name='Hex Editor', extensions=(), is_fallback=True)
+@Registry.register_editor(name='Hex Editor', extensions=(), handler=GenericBinaryHandler, is_fallback=True)
 class HexEditorWidget(BaseEditor):
     '''Mutable global fallback editor'''
 
@@ -55,14 +57,14 @@ class HexEditorWidget(BaseEditor):
         lay.setContentsMargins(10, 5, 10, 5)
 
         self.info_label = QLabel('Hex View')
-        self.btn_apply  = QPushButton('Apply Changes')
-        self.btn_apply.setFixedWidth(120)
-        self.btn_apply.setEnabled(False)
-        self.btn_apply.clicked.connect(self._on_apply_clicked)
+        # self.btn_apply  = QPushButton('Apply Changes')
+        # self.btn_apply.setFixedWidth(120)
+        # self.btn_apply.setEnabled(False)
+        # self.btn_apply.clicked.connect(self._on_apply_clicked)
 
         lay.addWidget(self.info_label)
-        lay.addStretch()
-        lay.addWidget(self.btn_apply)
+        # lay.addStretch()
+        # lay.addWidget(self.btn_apply)
         return bar
 
     def _build_search_bar(self) -> QWidget:
@@ -123,7 +125,7 @@ class HexEditorWidget(BaseEditor):
 
     def show_load_error(self, message: str) -> None:
         self.info_label.setText(f'Load failed: {message}')
-        self.btn_apply.setEnabled(False)
+        # self.btn_apply.setEnabled(False)
         logger.error(f'HexEditor: {message}')
 
     ###---------------------------- Contractuals ---------------------------------###
@@ -132,7 +134,7 @@ class HexEditorWidget(BaseEditor):
         '''Shows placeholder while the worker thread fetches data'''
         super().begin_loading(node)
         self.info_label.setText(f'Loading {node.name}...')
-        self.btn_apply.setEnabled(False)
+        # self.btn_apply.setEnabled(False)
         if self.model:
             self.table_view.setModel(None)
             self.model = None
@@ -165,7 +167,7 @@ class HexEditorWidget(BaseEditor):
             f'Editing: {self.current_node.name} {size_str}' if self.current_node
             else f'Hex View {size_str}'
         )
-        self.btn_apply.setEnabled(True)
+        # self.btn_apply.setEnabled(True)
         logger.debug(f'HexEditor: populated {len(data)} bytes.')
 
     def get_modified_data(self) -> bytes:

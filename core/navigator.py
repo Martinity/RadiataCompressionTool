@@ -1,7 +1,8 @@
+'''Logic for any VFS tree traversal'''
 from __future__ import annotations
 
 import threading
-from typing import Callable, Tuple
+from typing import Callable
 from core.node import VfsNode, VfsManager
 from core.registry import Registry
 from core.contracts import ContainerHandler
@@ -14,7 +15,12 @@ logger = logging.getLogger(f'radiata.{__name__}')
 class VfsNavigator:
     '''Handles all tree traveling logic'''
     EXPANSION_TIMEOUT = 1.0
-    def __init__(self, vfs: VfsManager, data_reader: Callable[[VfsNode], bytes], expansion_callback: Callable[[VfsNode, threading.Event], None]):
+    def __init__(
+            self, 
+            vfs: VfsManager, 
+            data_reader: Callable[[VfsNode], bytes], 
+            expansion_callback: Callable[[VfsNode, threading.Event], None],
+        ):
         self.vfs  = vfs
         self.read = data_reader                      # dispatcher.get_node_data
         self.expansion_callback = expansion_callback # dispatcher._expand_node
@@ -29,67 +35,81 @@ class VfsNavigator:
             return b''
         return self._walk_chain(chain)
 
-    def resolve_data_from_hid(self, hids: list[tuple[int, ...]] | None) -> list[bytes]:
+    def resolve_data_from_hid(self, target: tuple[int, ...] | None) -> bytes | None:
         '''Resolve HID to raw bytes. snapshot -> expand missing -> re-read. In order of hids idx'''
-        if not hids:
-            return []
-        logger.debug(f'Resolving {len(hids)} datacenter header(s).')
-        max_attempts = 10
-        attempts = 0
-        while attempts < max_attempts:
-            snapshot = self.vfs.snapshot_hids(hids) # Get VFS snapshot
-            if not snapshot.unresolved: # Check snapshot against nodes that need expanding
+        if not target:
+            return None
+        logger.debug(f'Resolving datacenter header ID:{target}.')
+        previous_depth = -1
+
+        while True:
+            snapshot = self.vfs.snapshot_hids([target]) # Get VFS snapshot
+            if not snapshot.unresolved: # expand first if needed
                 break
+            nearest = self.vfs.find_nearest_ancestor(target)
+            current_depth = len(nearest.hierarchical_id) if nearest else 0
+            if current_depth <= previous_depth:
+                logger.error(f'Expansion stalled at {nearest.hierarchical_id_str}. Failed to reach target: {target}')
+            previous_depth = current_depth
             self._expand_pending(snapshot.unresolved)
-            attempts += 1
-            
-        result: list[bytes] = []
-        failed: list[Tuple[int,...]] = []
-        for hid in hids:
-            node = self.vfs.get_node_by_id(hid)
-            if node:
-                result.append(self.read(node))
-            else:
-                failed.append(hid)
-                logger.warning(f'Could not resolve node: {hid}')
 
-        if failed:
-            logger.error(f'{len(failed)}/{len(hids)} nodes unresolved: {failed}')
+        node = self.vfs.get_node_by_id(target)
+        if not node:
+            logger.warning(f'Could not resolve datacenter header: {target}')
+            return None
+        return self.read(node)
 
-        return result
-
-    def rollup_nodes(self, staged_nodes: list[VfsNode]) -> list[VfsNode]:
+    def rollup_nodes(self, staged_nodes: list[VfsNode], log_callback: Callable) -> list[VfsNode]:
         '''For Rebuilding the VFS from deepest layer to physical (children -> parent)'''
-        logger.info('Initiating virtual node roll-up...')
-        current_queue = set(staged_nodes)
+        from core.contracts import RebuildResult
+        log_callback('Initiating virtual node roll-up...')
+        current_queue: set[VfsNode] = set(staged_nodes)
         while not all(node.is_physical for node in current_queue): # deepest -> physical layer
-            max_depth     = max(len(node.hierarchical_id) for node in current_queue)
-            deepest_nodes = [n for n in current_queue if len(n.hierarchical_id) == max_depth]
-            parent_map: dict[VfsNode, list[VfsNode]] = {}
+            max_depth:     int = max(len(node.hierarchical_id) for node in current_queue)
+            deepest_nodes: list[VfsNode] = [n for n in current_queue if len(n.hierarchical_id) == max_depth]
+            parent_map:    dict[VfsNode, list[VfsNode]] = {}
 
             for node in deepest_nodes: # build the parent-child map
                 if node.parent is None:
-                    logger.error(f'Cannot roll up {node.name}; No parent node.')
+                    log_callback(f'Cannot roll up {node.name}; No parent node.')
                     continue
                 parent_map.setdefault(node.parent, []).append(node)
+            log_callback('Rebuild map built.')
 
             for parent, modified_children in parent_map.items(): # build the parents
                 handler_class = Registry.get_handler(parent)
                 if not handler_class:
-                    logger.error(f'No handler found for {parent.name}')
+                    log_callback(f'No handler found for {parent.name}')
+                    continue
+                if not issubclass(handler_class, ContainerHandler):
+                    logger.error(f'Subcontract {handler_class.__name__} must be ContainerHandler for virtual tree navigation.')
                     continue
                 parent_bytes = self.read(parent)
-                header_bytes = self.resolve_data_from_hid(getattr(parent, 'target', None))
+                header_bytes = self.resolve_data_from_hid(parent.target)
                 with handler_class(parent_bytes, parent.parent) as handler:
-                    if header_bytes and hasattr(handler, 'datacenter_headers'):
-                        handler.datacenter_headers = header_bytes
-                    parent.pending_data = handler.rebuild_node(parent, modified_children)
+                    if header_bytes is not None and hasattr(handler, 'datacenter_headers'):
+                        handler.datacenter_headers = [header_bytes]
+                    result = handler.rebuild_node(parent, modified_children, log_callback)
+                    if isinstance(result, RebuildResult):
+                        payload, target_data = result
+                        parent.pending_data = payload
+                        if target_data and parent.target:
+                            target_node = self.vfs.get_node_by_id(parent.target)
+                            if target_node:
+                                target_node.pending_data = target_data
+                                current_queue.add(target_node)
+                                log_callback(f'Intercepted datacenter modification: {target_node.hierarchical_id}')
+                            else:
+                                log_callback(f'CRITICAL: Could not find target node {parent.target} in VFS')
+                    else:
+                        parent.pending_data = result
                     current_queue.add(parent)
+            log_callback('Parents rebuilt')
 
             for node in deepest_nodes: # update the queue
                 current_queue.discard(node)
 
-        logger.info('Virtual node roll-up complete')
+        log_callback('Virtual node roll-up complete')
         return list(current_queue)
 
     ###---------------------- helpers -------------------------###
@@ -150,18 +170,17 @@ class VfsNavigator:
             container     = chain[i -1]
             target        = chain[i]
             handler_class = Registry.get_handler(container)
+            logger.debug(f'Currently at {container.hierarchical_id} searching until {target.hierarchical_id}')
             if not handler_class:
                 logger.warning(f'No handler for {container.name}')
                 return b''
+            if not issubclass(handler_class, ContainerHandler):
+                logger.error(f'Subcontract {handler_class.__name__} must be ContainerHandler for virtual tree navigation.')
+                continue
             with handler_class(current_bytes, container) as handler:
-                hid        = getattr(target, 'target', None)
-                mapped_hid = hid[0] if hid else []
-                # Temp placeholder '2' checking for entity packs which may need buffered data
-                if len(mapped_hid) > 2 and hasattr(handler, 'get_buffer_data'):
-                    current_bytes = handler.get_buffer_data(target).tobytes()
-                else:
-                    current_bytes = handler.get_raw_node(target)
+                current_bytes = handler.get_raw_node(target)
 
+        logger.debug(f'Found a match {current_bytes[:64]}:64')
         return current_bytes
 
     ###---------------- Expansion Detection ---------------###
@@ -170,7 +189,7 @@ class VfsNavigator:
         '''True if node is a container that has not been expanded and registered'''
         if node.children:
             return False
-        profile = Registry.get_profile(node)
+        profile = Registry.get_handler_profile(node)
         if not profile:
             return False
         return issubclass(profile.handler_class, (ContainerHandler))

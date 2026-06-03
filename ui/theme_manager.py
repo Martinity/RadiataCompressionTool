@@ -59,6 +59,9 @@ class ThemeManager:
 
     @classmethod
     def apply_theme(cls, theme_name: str = 'Dark', delta: int = 0) -> None:
+        if not cls._app:
+            logger.warning('No application initialized. Make sure that a window exists to apply a theme to.')
+            return
         if theme_name in cls.THEMES:
             cls.active_theme = cls.THEMES[theme_name]
 
@@ -68,8 +71,8 @@ class ThemeManager:
 
         # Cache the raw string templates so we don't hit the disk constantly
         if cls._raw_template is None:
-            qss_path = get_resource_path('ui/assets/style_sheet.qss')
-            font_path = get_resource_path('ui/assets/font_sheet.qss')
+            qss_path = get_resource_path('ui/assets/static_sheet.qss')
+            font_path = get_resource_path('ui/assets/dynamic_sheet.qss')
 
             base_qss = qss_path.read_text(encoding='utf-8') if qss_path.exists() else ''
             font_qss = font_path.read_text(encoding='utf-8') if font_path.exists() else ''

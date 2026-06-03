@@ -1,25 +1,95 @@
+'''BaseEditor for modifiying FIS textures. All FIS textures are displayed as Indexed QImage'''
 from __future__ import annotations
 
 from typing import Callable, Any
 from pathlib import Path
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint, QTimer, QObject
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, QScrollArea, QSizePolicy, 
-    QFrame, QFileDialog, QListWidget, QListView, QAbstractItemView, QListWidgetItem
+    QFrame, QFileDialog, QListWidget, QListView, QAbstractItemView, QListWidgetItem, QColorDialog
 )
-from PyQt6.QtGui import QMouseEvent, QPixmap, QImage, QColor, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import QPixmap, QImage, QColor, QIcon
 
 from core.contracts import BaseEditor
 from core.registry import Registry
 from core.node import VfsNode
-from core.handlers.fis_handler import FisEditorPayload, FISInfo
+from core.handlers.fis_leaf import FisEditorPayload, FISInfo, FisHandler
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
+###----------------------------------------- History ------------------------------------------------###
+
+class HistoryManager(QObject):
+    can_undo_changed = pyqtSignal(bool)
+    can_redo_changed = pyqtSignal(bool)
+
+    def __init__(self, debounce_ms: int = 400, parent=None):
+        super().__init__(parent)
+        self.undo_stack: list[QImage] = []
+        self.redo_stack: list[QImage] = []
+
+        self._current_state:  QImage | None = None
+        self._baseline_state: QImage | None = None
+        self._pending_state:  QImage | None = None
+
+        self.debounce_timer = QTimer(self)
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.setInterval(debounce_ms)
+        self.debounce_timer.timeout.connect(self._commit_state)
+
+    def initialize(self, initial_state: QImage) -> None:
+        self._current_state = initial_state.copy()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._emit_status()
+
+    def push_change(self, new_state: QImage) -> None:
+        if not self.debounce_timer.isActive():
+            self._baseline_state = self._current_state.copy() if self._current_state else new_state.copy()
+        self._pending_state = new_state.copy()
+        self.debounce_timer.start()
+
+    def _commit_state(self) -> None:
+        if self._baseline_state:
+            self.undo_stack.append(self._baseline_state)
+        self._current_state = self._pending_state.copy() if self._pending_state else None
+        self.redo_stack.clear()
+        self._emit_status()
+
+    def undo(self) -> QImage | None:
+        if self.debounce_timer.isActive():
+            self._commit_state()
+            self.debounce_timer.stop()
+        if not self.undo_stack or not self._current_state:
+            return None
+        
+        self.redo_stack.append(self._current_state.copy())
+        self._current_state = self.undo_stack.pop()
+        self._emit_status()
+        return self._current_state.copy()
+
+    def redo(self) -> QImage | None:
+        if self.debounce_timer.isActive():
+            self._commit_state()
+            self.debounce_timer.stop()
+        if not self.redo_stack or not self._current_state:
+            return None
+
+        self.undo_stack.append(self._current_state.copy())
+        self._current_state = self.redo_stack.pop()
+        return self._current_state.copy()
+
+    def _emit_status(self):
+        self.can_undo_changed.emit(bool(self.undo_stack))
+        self.can_redo_changed.emit(bool(self.can_redo_changed))
+
+###----------------------------------------- Canvas ------------------------------------------------###
+
 class InteractiveCanvas(QLabel):
     '''Zoom-aware canvas for editing indexed QImages'''
-    painted = pyqtSignal()
+    editing_started = pyqtSignal()
+    painted         = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,6 +119,7 @@ class InteractiveCanvas(QLabel):
 
     def mousePressEvent(self, event) -> None:
         if event.button() & Qt.MouseButton.LeftButton:
+            self.editing_started.emit()
             self._paint_pixel(event.position().toPoint())
         super().mousePressEvent(event)
 
@@ -68,7 +139,9 @@ class InteractiveCanvas(QLabel):
                 self.update_display()
                 self.painted.emit()    
 
-@Registry.register(name='FIS Texture')
+###-------------------------------------------------- Editor -------------------------------------------------###
+
+@Registry.register_editor(name='FIS Texture Editor', handler=FisHandler, extensions=('.fis',))
 class FisEditorWidget(BaseEditor):
     '''Displays a decoded FIS texture with metadata.'''
 
@@ -77,7 +150,9 @@ class FisEditorWidget(BaseEditor):
         self.node:  VfsNode | None = None
         self.img:   QImage  | None = None
         self.info:  FISInfo | None = None
-        self.rwa_fis: bytes | None = None
+        self.raw_fis: bytes | None = None
+
+        self.history = HistoryManager(debounce_ms=400, parent=self)
 
         self._zoom_factor: float = 1.0
         self._zoom_step:   float = 1.2
@@ -86,9 +161,7 @@ class FisEditorWidget(BaseEditor):
         self._is_panning:  bool  = False
 
         self._setup_ui()
-        QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self.apply_changes)
-
-
+        
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -169,70 +242,70 @@ class FisEditorWidget(BaseEditor):
         self._palette_list.setMovement(QListView.Movement.Static)
         self._palette_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._palette_list.currentRowChanged.connect(self._on_color_selected)
+        self._palette_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._palette_list.customContextMenuRequested.connect(self._on_palette_context)
+
         lay.addWidget(self._palette_list, stretch=1)
     
         return frame
-    
-    def _export_png(self) -> None:
-        if not self.img or not self.node:
+
+    ###------------------------------------------ Editing SLots ------------------------------------------###
+
+    def _on_editing_started(self) -> None:
+        if self.img:
+            self.history.push_change(self.img)
+
+    def _on_painted(self) -> None:
+        if self.img:
+            self.history.push_change(self.img)
+        self._update_dirty_state()
+
+    def _on_palette_context(self, pos: QPoint) -> None:
+        item = self._palette_list.itemAt(pos)
+        if not item or not self.img:
             return
-        path, _ = QFileDialog.getSaveFileName(self, 'Export PNG', f'{self.node.name}.png', 'PNG Images (*.png)')
-        if not path:
-            return
-        if not self.img.save(path, 'PNG'):
-            logger.error(f'FIS: QImage.save() failed for {path}')
-        else:
-            logger.info(f'FIS: exported to {Path(path).name}')
 
-    def eventFilter(self, source, event) -> bool:
-        '''Intercept viewport and label events to handle middle-mouse panning'''
-        if source in (self._scroll_area.viewport(), self._image_label):
-            if event.type() == event.Type.MouseButtonPress: # Middle Mouse Event
-                if event.button() == Qt.MouseButton.MiddleButton:
-                    self._is_panning = True
-                    self._pan_start_pos = event.globalPosition().toPoint()
-                    self._pan_start_h_bar = self._scroll_area.horizontalScrollBar().value()
-                    self._pan_start_v_bar = self._scroll_area.verticalScrollBar().value()
-                    self._scroll_area.setCursor(Qt.CursorShape.ClosedHandCursor)
-                    return True
-            elif event.type() == event.Type.MouseMove: # Mouse Drag Event
-                if self._is_panning:
-                    delta = event.globalPosition().toPoint() - self._pan_start_pos
-                    self._scroll_area.horizontalScrollBar().setValue(self._pan_start_h_bar - delta.x())
-                    self._scroll_area.verticalScrollBar().setValue(self._pan_start_v_bar - delta.y())
-                    return True
-            elif event.type() == event.Type.MouseButtonRelease: # Release Middle Mouse Event
-                if event.button() == Qt.MouseButton.MiddleButton and getattr(self, '_is_panning', False):
-                    self._is_panning = False
-                    self._scroll_area.unsetCursor()
-                    return True
-        return super().eventFilter(source, event)
-    
-    def wheelEvent(self, event):
-        '''Ctrl+scroll to adjust image size'''
-        modifiers = event.modifiers()
-        if modifiers & Qt.KeyboardModifier.ControlModifier:
-            delta = event.angleDelta().y()
-            if delta > 0:
-                self._zoom_in()
-            elif delta < 0:
-                self._zoom_out()
-            event.accept()
-            return
-        super().wheelEvent(event)
+        idx = self._palette_list.row(item)
+        current_rgb = self.img.color(idx)
+        current_color = QColor.fromRgba(current_rgb)
 
-    def _zoom_in(self):
-        self._zoom_factor *= self._zoom_step
-        if self._zoom_factor > self._max_zoom:
-            self._zoom_factor = self._max_zoom
-        self._apply_zoom()
+        new_color = QColorDialog.getColor(
+            initial=current_color,
+            parent=self,
+            title=f'Overwrite CLUT Color [{idx}]',
+            options=QColorDialog.ColorDialogOption.DontUseNativeDialog
+        )
+        if new_color.isValid() and new_color != current_color:
+            self.history.push_change(self.img)
+            self.img.setColor(idx, new_color.rgba())
+            self.history.push_change(self.img)
+            pixmap = QPixmap(20, 20)
+            pixmap.fill(new_color)
+            item.setIcon(QIcon(pixmap))
+            item.setToolTip(f'Index: {idx} (Hex: {new_color.name()})')
+            self._image_label.update_display()
+            self._update_dirty_state()
 
-    def _zoom_out(self):
-        self._zoom_factor /= self._zoom_step
-        if self._zoom_factor < self._min_zoom:
-            self._zoom_factor = self._min_zoom
-        self._apply_zoom()
+    def undo(self) -> None:
+        '''Undo action and sync states'''
+        prev_img = self.history.undo()
+        if prev_img:
+            self.img = prev_img
+            self._apply_zoom()
+            self._populate_palette()
+            self._update_dirty_state()
 
+    def redo(self) -> None:
+        next_img = self.history.redo()
+        if next_img:
+            self.img = next_img
+            self._apply_zoom()
+            self._populate_palette()
+            self._update_dirty_state()
+
+    def _update_dirty_state(self) -> None:
+        is_dirty = bool(self.history.undo_stack) or self.history.debounce_timer.isActive()
+        self.set_dirty(is_dirty)
 
 ###----------------------------------- Contractuals ---------------------------------------------###
 
@@ -249,7 +322,7 @@ class FisEditorWidget(BaseEditor):
         if isinstance(result, FisEditorPayload):
             self.img     = result.image
             self.info    = result.info
-            self.rwa_fis = result.raw_bytes
+            self.raw_fis = result.raw_bytes
             self._populate_ui()
         else:
             self._image_label.setText(f'Error loading texture: Got {type(result)} expected "FisEditorPayload"')
@@ -257,6 +330,7 @@ class FisEditorWidget(BaseEditor):
     def _populate_ui(self, data: bytes = b'') -> None:
         if not self.img or not self.info:
             return
+        self.history.initialize(self.img)
         self._populate_palette()
         self._display_image(self.img)
         self._populate_info(self.info)
@@ -267,9 +341,9 @@ class FisEditorWidget(BaseEditor):
         logger.debug(f'FIS: loaded {self.node.name} ({self.info.width}×{self.info.height} {self.info.psm_name})')
 
     def get_modified_data(self) -> Any:
-        if not self.is_dirty() or not self.img or not self.rwa_fis:
+        if not self.is_dirty() or not self.img or not self.raw_fis:
             return self._original_data
-        return (self.img, self.rwa_fis)
+        return (self.img, self.raw_fis)
 
     def show_load_error(self, message: str) -> None:
         self._show_error(message)
@@ -345,3 +419,64 @@ class FisEditorWidget(BaseEditor):
                 self._image_label.image_ref = self.img
             self._image_label.zoom_factor = self._zoom_factor
             self._image_label.update_display()
+
+    def _export_png(self) -> None:
+        if not self.img or not self.node:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, 'Export PNG', f'{self.node.name}.png', 'PNG Images (*.png)')
+        if not path:
+            return
+        if not self.img.save(path, 'PNG'):
+            logger.error(f'FIS: QImage.save() failed for {path}')
+        else:
+            logger.info(f'FIS: exported to {Path(path).name}')
+
+    def eventFilter(self, source, event) -> bool:
+        '''Intercept viewport and label events to handle middle-mouse panning'''
+        if source in (self._scroll_area.viewport(), self._image_label):
+            if event.type() == event.Type.MouseButtonPress: # Middle Mouse Event
+                if event.button() == Qt.MouseButton.MiddleButton:
+                    self._is_panning = True
+                    self._pan_start_pos = event.globalPosition().toPoint()
+                    self._pan_start_h_bar = self._scroll_area.horizontalScrollBar().value()
+                    self._pan_start_v_bar = self._scroll_area.verticalScrollBar().value()
+                    self._scroll_area.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    return True
+            elif event.type() == event.Type.MouseMove: # Mouse Drag Event
+                if self._is_panning:
+                    delta = event.globalPosition().toPoint() - self._pan_start_pos
+                    self._scroll_area.horizontalScrollBar().setValue(self._pan_start_h_bar - delta.x())
+                    self._scroll_area.verticalScrollBar().setValue(self._pan_start_v_bar - delta.y())
+                    return True
+            elif event.type() == event.Type.MouseButtonRelease: # Release Middle Mouse Event
+                if event.button() == Qt.MouseButton.MiddleButton and getattr(self, '_is_panning', False):
+                    self._is_panning = False
+                    self._scroll_area.unsetCursor()
+                    return True
+        return super().eventFilter(source, event)
+    
+    def wheelEvent(self, event):
+        '''Ctrl+scroll to adjust image size'''
+        modifiers = event.modifiers()
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self._zoom_in()
+            elif delta < 0:
+                self._zoom_out()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def _zoom_in(self):
+        self._zoom_factor *= self._zoom_step
+        if self._zoom_factor > self._max_zoom:
+            self._zoom_factor = self._max_zoom
+        self._apply_zoom()
+
+    def _zoom_out(self):
+        self._zoom_factor /= self._zoom_step
+        if self._zoom_factor < self._min_zoom:
+            self._zoom_factor = self._min_zoom
+        self._apply_zoom()
+

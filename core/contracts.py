@@ -1,14 +1,10 @@
-'''Contracts for handlers and editors.
-- Basehandler: format logic (ISO, SLZ, Kods... etc)
-- BaseEditorWidget: file editors (hex... etc)
-- Utility widgets (logger, properties) inherit QWidget
-'''
+'''Contracts for handlers and editors'''
 from __future__ import annotations
 
 import io
 import abc
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import pyqtSignal
 from core.node import VfsNode
@@ -16,6 +12,12 @@ from core.node import VfsNode
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
+###-------------------------------------------- Special Return --------------------------------------------------###
+
+class RebuildResult(NamedTuple):
+    '''Structured return value for handlers that mutate linked nodes (kods w/datacenter)'''
+    payload:     bytes
+    target_data: bytes | None = None
 
 ###---------------------------------------------- Base Handler contract ------------------------------------------------###
 
@@ -99,8 +101,8 @@ class BaseHandler(abc.ABC):
         '''Return the root VfsNode representing this format's internal structure.'''
  
     @abc.abstractmethod
-    def rebuild_node(self, node: 'VfsNode', staged_nodes: list['VfsNode']) -> bytes:
-        '''Return rebuilt container bytes incorporating pending edits.'''
+    def rebuild_node(self, node: 'VfsNode', staged_nodes: list['VfsNode'], log_callback: Callable) -> bytes | RebuildResult:
+        '''Return rebuilt container bytes incorporating pending edits. + any dependant node bytes'''
  
     @abc.abstractmethod
     def get_raw_node(self, node: 'VfsNode') -> bytes:
@@ -119,6 +121,13 @@ class PhysicalHandler(BaseHandler):
         self.path        = source_path
         self.handle      = open(source_path, 'rb')
         self.owns_handle = True
+
+    def release_handle(self) -> None:
+        '''Close the init handle after all files have been added to VFS'''
+        if self.handle and not self.handle.closed:
+            self.handle.close()
+        self.handle = None
+        self.owns_handle = False
 
     @abc.abstractmethod
     def rebuild_node(
@@ -163,10 +172,12 @@ class LeafHandler(BaseHandler):
         self.handle.seek(0)
         return self.handle.read()
     
-    def rebuild_node(self, node: 'VfsNode', staged_nodes: list['VfsNode']) -> bytes:
+    def rebuild_node(self, node: 'VfsNode', staged_nodes: list['VfsNode'], log_callback: Callable) -> bytes:
+        if node in staged_nodes and node.pending_data:
+            log_callback(f'Node has been modified. Original size:{node.size} New size:{len(node.pending_data)}')
+            return node.pending_data
         self.handle.seek(0)
         return self.handle.read()
-    
 
 ###---------------------------------------------- Widget contract ----------------------------------------------###
 
@@ -203,7 +214,8 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         self.current_node:   VfsNode | None = None
         self._is_dirty:      bool           = False
         self._original_data: bytes          = b''
-        self._pending_data: bytes | None    = None
+        self._pending_data:  bytes | None   = None
+        self._apply_in_flight: bool         = False
         self._data_resolver: Callable[['VfsNode'], bytes] | None = None
 
     def __repr__(self) -> str:
@@ -231,7 +243,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
             self._populate_ui(result)
         else:
             logger.error(
-                f'{self.__class__.__name__} return {type(result).__name__}. Override receive_data for non-bytes results '
+                f'{self.__class__.__name__} returned {type(result).__name__}. Override receive_data for non-bytes results '
             )
             
     @abc.abstractmethod
@@ -244,6 +256,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         self.current_node = None
         self._original_data = b''
         self._data_resolver = None
+        self._apply_in_flight = False
         self.set_dirty(False)
 
     ### Data access
@@ -260,19 +273,26 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     ### Mutability management
     def apply_changes(self) -> None:
         '''Pushes changed snapshot to the Dispatcher/ModTracker'''
-        if self.is_dirty() and self.current_node:
-            self._pending_data = self.get_modified_data()
-            self.apply_requested.emit(self.current_node, self._pending_data)
+        if self._apply_in_flight or not self.is_dirty() or not self.current_node:
+            logger.warning(f'Bailed out of apply_changes in_flight={self._apply_in_flight} is_dirty={self._is_dirty} current_node={type(self.current_node)}')
+            return
+        self._apply_in_flight = True
+        self._pending_data = self.get_modified_data()
+        self.apply_requested.emit(self.current_node, self._pending_data)
 
     def confirm_changes_applied(self) -> None:
         '''Called by dispatcher after handler successfully applied decoded editor data to node'''
-        if self.current_node and self._pending_data:
-            self._original_data = self.get_modified_data()
-            self._pending_data  = None
-            self.set_dirty(False)
+        if not self._apply_in_flight or not self._pending_data or not self.current_node:
+            return
+        self._original_data   = self.get_modified_data()
+        self._pending_data    = None
+        self._apply_in_flight = False
+        self.set_dirty(False)
 
     def reject_changes_applied(self, reason: str) -> None:
         '''Called by dispatcher when handler failed to decode editor data'''
+        self._apply_in_flight = False
+        self._pending_data    = None
         logger.error(f'{self.__class__.__name__} failed to apply changes: {reason}')
 
     def discard_changes(self) -> None:
@@ -291,7 +311,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         return self._is_dirty
     
     def show_load_error(self, message: str) -> None:
-        '''Called when prepare_editor fails. Ovverride for custom output'''
+        '''Called when prepare_editor fails. Ovverride for custom output.'''
         logger.error(f'{self.__class__.__name__}: load error... {message}')
 
 ###----------------------------------- Read Only Editors ----------------------------------###

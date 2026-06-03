@@ -1,11 +1,11 @@
-'''Custom Compressor for use with tri-ace ps2 era games.'''
+'''ContainerHandler Custom Compressor for tri-ace ps2 era games.'''
 from dataclasses import dataclass
 from core.registry import Registry
 from core.contracts import ContainerHandler
 from core.extension_overrides import generate_ext_overrides
 from core.node import VfsNode
 from core.workers import ActionDef, ActionType
-from typing import Optional, Any
+from typing import Optional, Any, Callable
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -37,11 +37,7 @@ class CompressorHandler(ContainerHandler):
     
     def get_file_tree(self) -> VfsNode:
         '''Return a node for the compressed file'''
-        root = VfsNode(
-            name=f"{getattr(self.handler_parent, 'name', 'SLZ')}_contents",
-            category=getattr(self.handler_parent, 'category', 'Unknown'),
-            parent=self.handler_parent,
-        )
+        root = VfsNode() # dummy nodes
 
         extension_dict: dict[bytes, str] = generate_ext_overrides()
         current_offset = 0
@@ -67,7 +63,7 @@ class CompressorHandler(ContainerHandler):
             ext: str = next((match for sig, match in extension_dict.items() if inline_header.startswith(sig)), '.bin')
 
             node = VfsNode(
-                name=f'{chunk_idx:04d}{ext}',
+                name=f'{chunk_idx:04d}',
                 offset=current_offset,
                 size=header_obj.decompressed_size,
                 header=inline_header,
@@ -75,15 +71,6 @@ class CompressorHandler(ContainerHandler):
                 parent=root,
             )
             node.compressed_header = header_obj
-
-            # hid = getattr(self.parent_node, 'target', None)
-            # mapped_hid = hid[0] if hid else None
-            # if mapped_hid:
-            #     header_idx = 1 if chunk_idx == 7 else chunk_idx + 1 # SLOT assignement logic from MIPS
-            #     new_target = mapped_hid[:-1] + (header_idx, )
-            #     node.target = [new_target]
-            #     node.extension = '.kods'
-
 
             if inline_header[0:4] == b'1bcb': # bcb size + sector aligned to find next bcb
                 sector_size = 0x800
@@ -110,12 +97,14 @@ class CompressorHandler(ContainerHandler):
         compressor = RadiCompressor(compressed_view)
         return compressor.decompress()
 
-    def rebuild_node(self, root: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
+    def rebuild_node(self, root: VfsNode, staged_nodes: list[VfsNode], log_callback: Callable) -> bytes:
         '''Compress the bytes back to SLZ/SLE'''
         new_compressed_file = b''
         for i, child in enumerate(root.children):
             is_final_payload = i == len(root.children) - 1
             if child in staged_nodes and child.compressed_header: # Modified child
+                if not child.pending_data:
+                    continue
                 raw_bytes = child.pending_data
                 target_mode = child.compressed_header.mode
                 is_encrypted = child.compressed_header.magic == 'SLE'
@@ -129,7 +118,7 @@ class CompressorHandler(ContainerHandler):
                 padding_size = (-len(compressed_output)) & (0x800 - 1) if raw_bytes[2:6] == b'1bcb' else 0 # bcb sector alignment
                 new_compressed_file += compressed_output + (b'\00' * padding_size)
 
-            else: # Unmodified child, TODO check 1bcb for unmodified nodes I am struggling to find good samples
+            else: # Unmodified child
                 compressed_size = child.compressed_header.compressed_size
                 next_file_offset = child.compressed_header.decompressed_size
                 chunk_size = next_file_offset if next_file_offset > 0 else (compressed_size + 16)
@@ -138,6 +127,7 @@ class CompressorHandler(ContainerHandler):
                     original_chunk[12:16] = (0).to_bytes(4, 'little')
                 new_compressed_file += original_chunk
 
+        log_callback(f'Rebuilt SLZ container. Original size:{len(self.raw_source)} New size:{len(new_compressed_file)}')
         return new_compressed_file
 
     def get_properties(self, node: VfsNode) -> str:
@@ -464,7 +454,7 @@ class RadiCompressor():
         
         if self.is_encrypted: # Convert SLEs back to SLE
             compressed = self._scramble_slz_payload(compressed)
-            header = header[:2] + b'E' + header[3:] 
+            header = header[:2] + b'E' + header[3:]
 
         return bytes(header + compressed)
 

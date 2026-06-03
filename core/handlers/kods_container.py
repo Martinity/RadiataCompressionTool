@@ -1,10 +1,12 @@
+'''ContainerHandler for handling all kods format and datacenter'''
 from __future__ import annotations
 
 import struct
+from io import BytesIO
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
-from core.contracts import ContainerHandler
+from core.contracts import ContainerHandler, RebuildResult
 from core.extension_overrides import generate_ext_overrides
 from core.registry import Registry
 from core.node import VfsNode
@@ -19,9 +21,8 @@ logger = logging.getLogger(f'radiata.{__name__}')
     name='Kods Archiver',
     extensions=('.kods',),
     supported_actions=(
-        ActionDef('Unpack', ActionType.TREE_EXPAND),
+        ActionDef('Unpack',     ActionType.TREE_EXPAND),
         ActionDef('Properties', ActionType.DIALOG),
-        ActionDef('Scan', ActionType.PROCESS)
     ))
 class KodsHandler(ContainerHandler):
     '''Wrapper for Kods archiver class'''
@@ -36,25 +37,24 @@ class KodsHandler(ContainerHandler):
         '''System unifies all unpacks to one header thus can unpack generically'''
         root = VfsNode(
             name=f'{getattr(self.handler_parent, "name", "KODS")} contents',
-            category=getattr(self.handler_parent, 'category', 'Unknown'),
             parent=self.handler_parent,        
         )
 
-        has_external_mapping = bool(self.datacenter_headers)
-        is_internal = not has_external_mapping and self.payload_view[:4].tobytes() == b'Kods'
+        is_internal = True if not self.datacenter_headers else False
 
         headers = self._collect_headers(include_internal=is_internal)
         if not headers:
             logger.error('No valid headers found for unpacking')
             return root
         
-        bruteforce_offsets = []#self.find_all_embeds()
         master_map = self.archiver.get_kods_map(headers, is_internal)
         extensions = generate_ext_overrides()
-        primary_nodes = master_map.get(0, [])
+        total = []
+        for value in master_map.values():
+            total += value
 
-        for logical_type, meta in enumerate(primary_nodes):
-            if not meta.is_valid or meta.size == 0:
+        for logical_type, meta in enumerate(total):
+            if not meta.is_valid or meta.size == 0 or meta.size == -1:
                 dummy_node = VfsNode(
                     name=f'sentinel {logical_type:03d}',
                     offset=meta.offset,
@@ -67,7 +67,8 @@ class KodsHandler(ContainerHandler):
             
             header = bytes(self.payload_view[meta.offset : meta.offset + 8])
             ext: str = next((match for sig, match in extensions.items() if header.startswith(sig)), '.bin')
-            name = f'{meta.node_index:04d}{ext}' if is_internal else f'Entry {meta.node_index:02d}{ext}'
+            name = f'{meta.node_index:04d}' if is_internal else f'Entry {meta.node_index:02d}'
+            # target = DatacenterTargets.get_target(self.handler_parent.hierarchical_id + (meta.node_index,))
 
             node = VfsNode(
                 name=name,
@@ -78,26 +79,6 @@ class KodsHandler(ContainerHandler):
                 parent=root,
             )
             root.append_child(node)
-
-        seen = []
-        for node in root.children:
-            seen.append(node.offset)
-
-        for i, offset in enumerate(bruteforce_offsets):
-            if offset in seen:
-                continue
-            header = bytes(self.payload_view[offset : offset + 8])
-            ext: str = next((match for sig, match in extensions.items() if header.startswith(sig)), '.bin')
-            node = VfsNode(
-                name=f'Bruteforce {i:02d}{ext}',
-                offset=offset,
-                size=int.from_bytes(header[4:8], 'little') + 8,
-                header=header,
-                extension=ext,
-                parent=root
-            )
-            root.append_child(node)
-            logger.info(f'Added bruteforce node {i} from offset {offset}')
 
         logger.info(f'Successfully unpacked {len(root.children)} sections')
         return root
@@ -112,42 +93,112 @@ class KodsHandler(ContainerHandler):
         if include_internal: # Check internal header
             magic = self.payload_view[:4].tobytes()
             if magic == b'Kods':
+                logger.debug('Adding internal header...')
                 all_headers.append(self.payload_view)
         if self.datacenter_headers: # Check datacenter headers
-            for header in self.datacenter_headers:
-                all_headers.append(memoryview(header))
+            logger.debug(f'Adding datacenter header... {self.datacenter_headers[0]}')
+            all_headers.append(memoryview(self.datacenter_headers[0]))
+        logger.debug(f'total number of headers= {len(all_headers)}')
         return all_headers
 
-    def rebuild_node(self, parent: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode], log_callback: Callable) -> RebuildResult:
         '''Routes to the correct rebuild strategy based on node state'''
-        if getattr(parent, 'is_composite_buffer', False):
-            return self._rebuild_composite_buffer(staged_nodes)
-        return self._rebuild_static_archive(staged_nodes)
+        staged_set = set(staged_nodes)
 
-    def _rebuild_composite_buffer(self, staged_nodes: list[VfsNode]) -> bytes:
-        '''Layer 1: Patching modified variant (.bin) bytes into the raw decompressed buffer'''
-        logger.info('Rebuilding decompressed composite buffer...')
-        buffer = bytearray(self.payload_view)
-        for child in staged_nodes:
-            buffer[child.offset : child.offset + child.size] = child.pending_data
-        return bytes(buffer)
+        # Correctly determine if this is an internal container
+        is_internal = not bool(self.datacenter_headers)
+        header = self.datacenter_headers[0] if self.datacenter_headers else None
+        header_view = memoryview(header) if header else memoryview(b'')
 
-    def _rebuild_static_archive(self, staged_nodes: list[VfsNode]) -> bytes:
-        '''Layer 3: Patching newly compressed (.slz) chunks back into the physical Kods archive'''
-        logger.info('Rebuilding physical Kods archive...')
-        new_kods = bytearray(self.payload_view)
-        
-        for child in staged_nodes:
-            # Note: Offset/Size shift correction logic will go here eventually
-            new_kods[child.offset : child.offset + len(child.pending_data)] = child.pending_data
-            
-        return bytes(new_kods)
-    
+        # Parse header with correct internal flag
+        header_obj = self.archiver.parse_header(header_view, is_internal)
+
+        # Build map of child data (use pending if modified)
+        child_data_map: dict[int, bytes] = {}
+        for child in node.children:
+            idx = child.hierarchical_id[-1]
+            if child in staged_set and child.pending_data:
+                child_data_map[idx] = child.pending_data
+            else:
+                child_data_map[idx] = self.get_raw_node(child)
+
+        # Rebuild payload with proper alignment
+        payload_stream = BytesIO()
+        new_offsets: list[int] = []
+        new_sizes: list[int] = []
+
+        # For internal containers, payload starts after header + tables
+        if is_internal:
+            current_payload_offset = header_obj.header_size + (header_obj.num_entries * header_obj.stride)
+            if header_obj.has_second_table:
+                current_payload_offset += (header_obj.num_entries * header_obj.stride)
+        else:
+            current_payload_offset = 0  # Datacenter payload is separate
+
+        for idx in range(header_obj.num_entries):
+            data = child_data_map.get(idx, b'')
+            if not data:
+                new_offsets.append(-1)
+                new_sizes.append(0)
+                continue
+
+            # Apply alignment padding
+            pad_modulo = (1 << header_obj.shift)
+            current_pos = payload_stream.tell()
+            if current_pos % pad_modulo != 0:
+                padding_needed = pad_modulo - (current_pos % pad_modulo)
+                payload_stream.write(b'\x00' * padding_needed)
+
+            assigned_offset = current_payload_offset + payload_stream.tell()
+            new_offsets.append(assigned_offset)
+            new_sizes.append(len(data))
+            payload_stream.write(data)
+
+        # Build the complete header (magic + control + offset table + optional size table)
+        header_block = BytesIO()
+        orig_header_view = self.payload_view[:header_obj.header_size] if is_internal else header_view
+        base_header = self.archiver.build_header(orig_header_view, new_offsets, is_internal)
+        header_block.write(base_header)
+
+        # Write offset table
+        for offset in new_offsets:
+            if offset == -1:
+                val = header_obj.sentinel
+            elif offset == header_obj.payload_offset:
+                val = 0
+            else:
+                val = (offset - header_obj.payload_offset) >> header_obj.shift
+            header_block.write(struct.pack(header_obj.format, val))
+
+        # Write size table if present
+        if header_obj.has_second_table:
+            for size in new_sizes:
+                val = (size >> header_obj.shift) if size > 0 else header_obj.sentinel
+                header_block.write(struct.pack(header_obj.format, val))
+
+        # Final assembly
+        if is_internal:
+            final_payload = header_block.getvalue() + payload_stream.getvalue()
+            target_header_data = None
+        else:
+            final_payload = payload_stream.getvalue()
+            target_header_data = header_block.getvalue()
+
+        log_callback(
+            f'Container {node.name} rebuilt successfully. '
+            f'Original size: {node.size} → New size: {len(final_payload)} '
+            f'({"Internal" if is_internal else "Datacenter"} mode)'
+        )
+        if target_header_data:
+            log_callback(f'Datacenter header rebuilt: {len(target_header_data)} bytes')
+        log_callback(str(final_payload))
+        return RebuildResult(final_payload, target_header_data)
+
     def get_properties(self) -> str:
-        headers_view = self._collect_headers()
+        is_internal = True if not self.datacenter_headers else False
+        headers_view = self._collect_headers(include_internal=is_internal)
         lines = [f"Number of Headers: {len(headers_view)}"]
         for i, header_view in enumerate(headers_view):
-            is_internal = (i == 0) and header_view
             p = self.archiver.parse_header(
                 header_view,
                 is_internal=is_internal
@@ -159,11 +210,7 @@ class KodsHandler(ContainerHandler):
                 if not p.mode
                 else "16bit aligned"
             )
-            header_title = (
-                "Inline"
-                if i == 0
-                else f"Datacenter Index {i}"
-            )
+            header_title = (f"Datacenter Index {i}")
             lines.extend([
                 f"Header: {header_title}",
                 f"Number of Entries: {p.num_entries}",
@@ -175,30 +222,15 @@ class KodsHandler(ContainerHandler):
                 lines.append(
                     f"Size of Pre-Payload data: {p.payload_offset} bytes"
                 )
-            lines.append("")  # blank separator line
+            lines.append("")
         return "\n".join(lines)
-    
-    def find_all_embeds(self) -> list[int]:
-        '''Return all offsets where SLZ can be found'''
-        record_slz = []
-        record_kods = []
-        pos = 0
-        while pos < len(self.payload_view) + 3:
-            if self.payload_view[pos:pos+3] == b'SLZ':
-                record_slz.append(pos)
-            elif self.payload_view[pos:pos+3] == b'Kods':
-                record_kods.append(pos)
-            pos += 1
-        return record_slz
             
     def execute_action(self, node: VfsNode, action_name: str, progress_callback, log_callback, **kwargs) -> Any:
         if action_name == 'Unpack':
-            log_callback(f'Unpacking {node.name}...')
+            log_callback(f'Unpacking {node.name}...') if log_callback else None
             return self.get_file_tree()
         elif action_name == 'Properties':
             return self.get_properties()
-        elif action_name == 'Scan':
-            return self.find_all_embeds()
         return None
     
 ###----------------------------------------------- Archiver ----------------------------------------------------###
@@ -236,10 +268,11 @@ class KodsArchiver:
     def get_kods_map(self, headers: list[memoryview], is_internal: bool) -> dict[int, list[KodsArchiver.FileNodeMeta]]:
         '''Generate a single offset map into the payload from all provided headers'''
         kods_map: dict[int, list[KodsArchiver.FileNodeMeta]] = {}
+        logger.warning(f'{len(headers)} header(s)')
 
         for header_idx, header_view in enumerate(headers): # Get Headers, offsets, and shifts
             header_obj = self.parse_header(header_view, is_internal)
-            if len(header_view) <= 8:
+            if len(header_view) <= 8: # WTF is this?
                 continue
             offsets = self._get_offsets(header_view, header_obj)
             header_nodes: list[KodsArchiver.FileNodeMeta] = []
@@ -311,7 +344,7 @@ class KodsArchiver:
         )
 
     def _get_offsets(self, header_view: memoryview, header_obj: KodsArchiver.KodsHeader) -> list[int]:
-        '''Return list of (offset, alias) for files inside the Kods container'''
+        '''Return list of offsets for files inside the Kods container'''
         offsets = []
         for i in range(header_obj.num_entries):
             offset_pos = header_obj.header_size + (i * header_obj.stride)
@@ -325,3 +358,27 @@ class KodsArchiver:
                 offset = header_obj.payload_offset + (raw_offset << header_obj.shift)
             offsets.append(offset)
         return offsets
+
+    def build_header(self, header_view: memoryview, new_offsets: list[int], is_internal: bool) -> bytes:
+        '''Build the base header (magic + control word). The offset/size tables are built separately.'''
+        if len(header_view) < 8:
+            # Fallback: create minimal valid header
+            magic = 0x73646F4B  # 'Kods'
+            control_word = (len(new_offsets) & 0xFFFF) | (4 << 16)  # default shift=4
+            if not is_internal:
+                control_word |= (1 << 30)
+            return struct.pack('<II', magic, control_word)
+
+        magic, control_word = struct.unpack('<II', header_view[:8])
+
+        # Preserve most fields, only update bit 30 (internal/datacenter flag)
+        if is_internal:
+            control_word &= ~(1 << 30)
+        else:
+            control_word |= (1 << 30)
+
+        # Update num_entries if it changed
+        num_entries = len(new_offsets) & 0xFFFF
+        control_word = (control_word & ~0xFFFF) | num_entries
+
+        return struct.pack('<II', magic, control_word)
