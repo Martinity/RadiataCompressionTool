@@ -20,7 +20,6 @@ logger = logging.getLogger(f'radiata.{__name__}')
 '''
 fps payload [28:32] offset to FIS payload + header size (0x40)
 [20:24] 6 = fis is contained?
-[34:36] seems to be C0 B4 or similar
 '''
 @Registry.register(
     name='Chain Handler', 
