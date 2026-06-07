@@ -515,23 +515,23 @@ StagingPage → tracker.confirm_and_rebuild()
 
 ---
 
-### Rebuild:
-**Recursion** Post order
-**Disk** Front to back
-
 ## Current TODO list:
 
-- Perfect rebuilding Kods containers -> `/core/handlers/kods_container.py`
-- FIS Undo/Revert seem to revert canvas state not image state fix the wiring -> `/ui/editors/fis_editor.py`
 - Standardize saving mechanics for BaseEditors -> `/ui/ui_core.py` & `/ui/editors/...`
-- Consider changing the contract to recieve data being the abstract over populate ui
+- Fix clearing all caches when changing ISOs. I think the editor state needs to be cleared opennig the same ID in another ISO causes crash.
+- Fix editor dirty state marking. Still results in save in flight unintentionally when saving.
+
+- Streamline ease of use for editor contract
+- write a user guide for plugins
+- Fully deprecate the get_handler_profile in place of get_handler_profiles? If needed -> `/core/...` & `/ui/ui_core.py`
+- Fix search filtering for 'tag:' and 'desc:' -> `/ui/tree_model.py`
+- Fix HexEditor font not scalling the refresh automatically. To fix '...' need to change zoom currently.
 
 ## Future TODO list:
 
 - Fix background task bailout/timeout, if spammed infinite loops -> `/core/workers.py`
 - FPS chain unpacking needs to be reevaluated since fps heads may contain other fps chains within -> `/core/handlers/chain_handler.py`
-- FIS editor decoding CLUT shifts 7F to 80 -> `/core/handlers/fis_leaf.py`
-- Support multiple handlers on a file rather than just the most valid. -> `/core/...` & `/ui/ui_core.py`
+- FIS editor decoding CLUT shifts 7F to 80, does it matter? -> `/core/handlers/fis_leaf.py`
 - Hex editor toggle for bottom values to display in hex or dec -> `/ui/editors/hex_editor.py`
 - Staging page diff... This could be greatly improved but I don't want to spend a ton of time on anything beyond the basics to allow better analysis of custom format building -> `/ui/ui_core.py`
 - 0FDC unpacking, seems to be an archive of slz format -> `/core/handlers/fdc_handler.py`
@@ -539,7 +539,3 @@ StagingPage → tracker.confirm_and_rebuild()
 - Icons? -> `/ui/...`
 - seqw handler -> `/core/handler/seqw_handler.py`
 - Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
-
-
-Rebuilding kods nodes returns tuple. Element 1 being the payload. Element 2 being the datacenter header if valid.
-After datacenter dependant modification the ModTracker, Dispatcher, and Navigator will need to handle the kods rebuild payloads correctly to ensure that Element 1 is applied to the original modified node, and Element 2 is applied to the target node of the original modified node.

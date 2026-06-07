@@ -146,7 +146,7 @@ class HexDiffPanel(QWidget):
             (_COL_ADDED_FG,   'Added'),
             (_COL_REMOVED_FG, 'Removed')
         ):
-            dot = QLabel('||')
+            dot = QLabel('■')
             dot.setStyleSheet(f'color: {colour.name()}')
             lbl = QLabel(text)
             legend.addWidget(dot)

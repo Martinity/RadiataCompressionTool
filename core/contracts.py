@@ -205,7 +205,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     BaseViewer, is_mutable = False
         Provides no-op for dirty/apply/discard. Editors function as Viewers.
     '''
-    apply_requested = pyqtSignal(object, object) # (VfsNode, Editor Payload for Handler)
+    # apply_requested = pyqtSignal(object, object) # (VfsNode, Editor Payload for Handler)
     dataChanged = pyqtSignal(bool)
     is_mutable = True
 
@@ -215,7 +215,6 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         self._is_dirty:      bool           = False
         self._original_data: bytes          = b''
         self._pending_data:  bytes | None   = None
-        self._apply_in_flight: bool         = False
         self._data_resolver: Callable[['VfsNode'], bytes] | None = None
 
     def __repr__(self) -> str:
@@ -253,10 +252,9 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     ### Lifecycle
     def cleanup(self) -> None:
         '''Editor Destructor'''
-        self.current_node = None
+        self.current_node   = None
         self._original_data = b''
         self._data_resolver = None
-        self._apply_in_flight = False
         self.set_dirty(False)
 
     ### Data access
@@ -269,35 +267,41 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     def get_modified_data(self) -> bytes:
         '''Return the current state of loaded node'''
         return self._original_data
+
+    def stage_pending_data(self) -> None:
+        '''Returns the frozen state for diff'''
+        self._pending_data = self.get_modified_data()
     
     ### Mutability management
     def apply_changes(self) -> None:
         '''Pushes changed snapshot to the Dispatcher/ModTracker'''
-        if self._apply_in_flight or not self.is_dirty() or not self.current_node:
-            logger.warning(f'Bailed out of apply_changes in_flight={self._apply_in_flight} is_dirty={self._is_dirty} current_node={type(self.current_node)}')
+        if  not self.is_dirty() or not self.current_node:
+            logger.warning(f'Bailed out of apply_changes is_dirty={self._is_dirty} current_node={type(self.current_node)}')
             return
-        self._apply_in_flight = True
+        # self._apply_in_flight = True
         self._pending_data = self.get_modified_data()
-        self.apply_requested.emit(self.current_node, self._pending_data)
 
     def confirm_changes_applied(self) -> None:
         '''Called by dispatcher after handler successfully applied decoded editor data to node'''
-        if not self._apply_in_flight or not self._pending_data or not self.current_node:
-            return
-        self._original_data   = self.get_modified_data()
-        self._pending_data    = None
-        self._apply_in_flight = False
+        if self._pending_data is not None:
+            self._original_data = self._pending_data
+            self._pending_data  = None
         self.set_dirty(False)
 
     def reject_changes_applied(self, reason: str) -> None:
         '''Called by dispatcher when handler failed to decode editor data'''
-        self._apply_in_flight = False
-        self._pending_data    = None
+        self._pending_data = None
         logger.error(f'{self.__class__.__name__} failed to apply changes: {reason}')
+
+    def mark_clean(self) -> None:
+        '''Called by session when state is saved successfully'''
+        self._pending_data = self.get_modified_data()
+        self.set_dirty(False)
 
     def discard_changes(self) -> None:
         '''Reverts the UI back to the original state'''
         if self.is_dirty() and self.current_node:
+            self._pending_data = None
             self._populate_ui(self._original_data)
             self.set_dirty(False)
 

@@ -243,7 +243,6 @@ class Dispatcher(QObject):
         signals.progress.connect(lambda pct, _msg: self.rebuild_progress.emit(pct))
         signals.log_message.connect(self.rebuild_log.emit)
         signals.finished.connect(self._on_rebuild_finished)
-        self._rebuild_active = False
 
     def close(self) -> None:
         '''For exiting the dispatch'''
@@ -340,6 +339,7 @@ class Dispatcher(QObject):
         
     def _on_rebuild_finished(self, success: bool, result: Any) -> None:
         '''Verify type of result and pack signal'''
+        self._rebuild_active
         if isinstance(result, ActionResult):
             msg = result.message or ('Rebuild succeeded.' if success else 'Rebuild failed.')
         else:
@@ -394,12 +394,21 @@ class Dispatcher(QObject):
     def _on_decode_done(self, success: bool, result: Any, node: VfsNode, editor: BaseEditor) -> None:
         '''Callback for when handler finishes decoding'''
         logger.info('In _on_decode_done')
+        session = getattr(editor, '_session', None)
+
         if success and isinstance(result, bytes):
             original = self.get_node_data(node) if node not in self.tracker._originals else b''
             self.tracker.mark_modified(node, result, original)
             logger.info(f'Edit applied after background compilation: {node.name}')
-            editor.confirm_changes_applied()
+            if session and hasattr(session, 'confirm_save'):
+                session.confirm_save()
+            else:
+                editor.confirm_changes_applied()
+            self.node_changed.emit(node)
         else:
             error_msg = str(result) if not success else f'Compilation returned {type(result).__name__}, expected bytes'
             logger.error(f'Payload compilation failed: {error_msg}')
-            editor.reject_changes_applied(error_msg)
+            if session and hasattr(session, 'reject_save'):
+                session.reject_save(error_msg)
+            else:
+                editor.reject_changes_applied(error_msg)

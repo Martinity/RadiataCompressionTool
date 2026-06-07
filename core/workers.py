@@ -152,8 +152,8 @@ class Actions:
                 f'{handler_class.__name__} must be ContainerHandler or LeafHandler.'
             )
         with handler_class(raw_bytes, node.parent) as handler:
-            if header_bytes and hasattr(handler, 'datacenter_headers'):
-                handler.datacenter_headers = [header_bytes]
+            if header_bytes and hasattr(handler, 'datacenter_header'):
+                handler.datacenter_header = header_bytes
             result = handler.prepare_editor_data(node, raw_bytes)
         progress_callback(100, 'Done')
         logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__} from {handler_class.__name__}')
@@ -267,9 +267,17 @@ class Actions:
     ) -> ActionResult:
         try:
             log_callback('Starting ISO build sequence...')
-            progress_callback(10, 'Performing VFS rollup...')
+            progress_callback(5, 'Starting Pass 1...')
+            log_callback('Precomputing Datacenter...')
 
-            physical_staged_nodes = navigator.rollup_nodes(staged_nodes, log_callback)
+            extra_targets: list[VfsNode] = navigator.precompute_datacenter(staged_nodes, log_callback)
+            all_staged:    list[VfsNode] = list(staged_nodes) + extra_targets
+            log_callback(f'Pass 1 complete - {len(extra_targets)} datacenter target(s) cached and queued')
+
+            progress_callback(15, 'Starting Pass2...')
+            log_callback('Performing VFS rollup...')
+
+            physical_staged_nodes = navigator.rollup_nodes(all_staged, log_callback)
             progress_callback(40, 'Writing sectors to disk...')
             success = handler.rebuild_node(root_node, physical_staged_nodes, output_path, progress_callback=progress_callback)
 
@@ -281,7 +289,7 @@ class Actions:
                     node=root_node, 
                     status=ActionStatus.SUCCESS,
                 )
-            raise ValueError('Build completed but failed to return success.')
+            raise ValueError('handler.rebuild_node returned false')
         except Exception as e:
             logger.error(f'Rebuild failed: {e}', exc_info=True)
             return ActionResult(
@@ -384,11 +392,14 @@ class Actions:
         try:
             node_bytes   = navigator.unwrap_chain(node)
             header_bytes = navigator.resolve_data_from_hid(node.target)
+            if header_bytes:
+                logger.warning(f'Node:{node.name} has datacenter header:{node.target}'
+                f'New header is {len(header_bytes)} bytes long.')
             if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
                 raise TypeError(f'{handler_class.__name__} must be ContainerHandler or LeafHandler.')
             with handler_class(node_bytes, node.parent) as handler:
-                if header_bytes and hasattr(handler, 'datacenter_headers'):
-                    handler.datacenter_headers = [header_bytes]
+                if header_bytes and hasattr(handler, 'datacenter_header'):
+                    handler.datacenter_header = header_bytes
                 payload = handler.execute_action(node, action_name, progress_callback, log_callback, **kwargs)
 
             log_callback(f'{action_name} complete.')

@@ -20,7 +20,7 @@ class DarkTheme:
     SCROLL_BG         = 'rgba(255, 255, 255, 0.05)'
     SCROLL_HOVER      = 'rgba(255, 255, 255, 0.2)'
     FONT_SANS         = '"Segoe UI", "Open Sans", sans-serif'
-    FONT_MONO         = '"Cascadia Code", "Consolas", "Courier New", monospace'
+    FONT_MONO         = '"Courier New", monospace'
     BASE_FONT_WEIGHT  = 'normal'
 
 class RadiataTheme:
@@ -37,7 +37,7 @@ class RadiataTheme:
     SCROLL_BG         = 'rgba(255, 255, 255, 0.05)'
     SCROLL_HOVER      = 'rgba(255, 255, 255, 0.2)'
     FONT_SANS         = '"Segoe UI", "Open Sans", sans-serif'
-    FONT_MONO         = '"Cascadia Code", "Consolas", "Courier New", monospace'
+    FONT_MONO         = '"Courier New", monospace'
     BASE_FONT_WEIGHT  = 'bold'
 
 class ThemeManager:

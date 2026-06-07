@@ -6,7 +6,8 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint, QTimer, QObject
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, QScrollArea, QSizePolicy, 
-    QFrame, QFileDialog, QListWidget, QListView, QAbstractItemView, QListWidgetItem, QColorDialog
+    QFrame, QFileDialog, QListWidget, QListView, QAbstractItemView, QListWidgetItem, QColorDialog,
+    QSlider, QButtonGroup
 )
 from PyQt6.QtGui import QPixmap, QImage, QColor, QIcon
 
@@ -78,11 +79,12 @@ class HistoryManager(QObject):
 
         self.undo_stack.append(self._current_state.copy())
         self._current_state = self.redo_stack.pop()
+        self._emit_status()
         return self._current_state.copy()
 
     def _emit_status(self):
         self.can_undo_changed.emit(bool(self.undo_stack))
-        self.can_redo_changed.emit(bool(self.can_redo_changed))
+        self.can_redo_changed.emit(bool(self.redo_stack))
 
 ###----------------------------------------- Canvas ------------------------------------------------###
 
@@ -96,6 +98,9 @@ class InteractiveCanvas(QLabel):
         self.image_ref: QImage | None = None
         self.zoom_factor:       float = 1.0
         self.selected_color_idx:  int = -1
+
+        self.current_tool: str = 'brush'
+        self.brush_size:   int = 1
 
     def set_image(self, img: QImage, zoom: float):
         self.image_ref = img
@@ -118,14 +123,18 @@ class InteractiveCanvas(QLabel):
         self.resize(pixmap.size())
 
     def mousePressEvent(self, event) -> None:
-        if event.button() & Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self.editing_started.emit()
-            self._paint_pixel(event.position().toPoint())
+            if self.current_tool == 'bucket':
+                self._flood_fill(event.position().toPoint())
+            else:
+                self._paint_pixel(event.position().toPoint())
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.MouseButton.LeftButton:
-            self._paint_pixel(event.position().toPoint())
+            if self.current_tool == 'brush':
+                self._paint_pixel(event.position().toPoint())
         super().mouseMoveEvent(event)
 
     def _paint_pixel(self, pos: QPoint):
@@ -133,11 +142,50 @@ class InteractiveCanvas(QLabel):
             return
         x = int(pos.x() / self.zoom_factor)
         y = int(pos.y() / self.zoom_factor)
-        if 0 <= x < self.image_ref.width() and 0 <= y < self.image_ref.height():
-            if self.image_ref.pixelIndex(x, y) != self.selected_color_idx:
-                self.image_ref.setPixel(x, y, self.selected_color_idx)
-                self.update_display()
-                self.painted.emit()    
+        w, h = self.image_ref.width(), self.image_ref.height()
+
+        changed = False
+        offset_start = -(self.brush_size // 2) if self.brush_size != 1 else 0
+        logger.debug(f'Brush Size:{self.brush_size}')
+        offset_end   = offset_start + self.brush_size if self.brush_size != 1 else 1
+
+        for dx in range(offset_start, offset_end):
+            for dy in range(offset_start, offset_end):
+                nx, ny = x + dx, y + dy # apply scale factor to coord
+                if 0 <= nx < w and 0 <= ny < h:
+                    if self.image_ref.pixelIndex(nx, ny) != self.selected_color_idx:
+                        self.image_ref.setPixel(nx, ny, self.selected_color_idx)
+                        changed = True
+        if changed:
+            self.update_display()
+            self.painted.emit() 
+
+    def _flood_fill(self, pos: QPoint):
+        '''Flood fill enforced by palette index'''
+        if not self.image_ref or self.selected_color_idx < 0:
+            return
+
+        x = int(pos.x() / self.zoom_factor)
+        y = int(pos.y() / self.zoom_factor)
+        w, h = self.image_ref.width(), self.image_ref.height()
+        if not (0 <= x < w and 0 <= y < h):
+            return
+        target_idx = self.image_ref.pixelIndex(x, y)
+        if target_idx == self.selected_color_idx:
+            return
+
+        stack = [(x, y)]   
+        self.image_ref.setPixel(x, y, self.selected_color_idx)
+        while stack:
+            cx, cy = stack.pop() # get temp central pos
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)): # check adjacent
+                nx, ny = cx + dx, cy + dy # adjacent pos calculation
+                if 0 <= nx < w and 0 <= ny < h:
+                    if self.image_ref.pixelIndex(nx, ny) == target_idx:
+                        self.image_ref.setPixel(nx, ny, self.selected_color_idx)
+                        stack.append((nx, ny))
+        self.update_display()
+        self.painted.emit()
 
 ###-------------------------------------------------- Editor -------------------------------------------------###
 
@@ -199,7 +247,8 @@ class FisEditorWidget(BaseEditor):
         self._image_label.setMinimumSize(64, 64)
         self._image_label.setText('No texture loaded')
 
-        self._image_label.painted.connect(lambda: self.set_dirty(True))
+        self._image_label.editing_started.connect(self._on_editing_started)
+        self._image_label.painted.connect(lambda: self._on_painted)
 
         area = QScrollArea()
         area.setWidget(self._image_label)
@@ -218,6 +267,7 @@ class FisEditorWidget(BaseEditor):
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(4)
 
+        ### INFO Section
         self._info_rows: dict[str, QLabel] = {}
         for key in ('Name', 'PSM', 'BPP', 'Width', 'Height',
                     'Dim mode', 'Swizzled', 'Padded CLUT',
@@ -231,7 +281,41 @@ class FisEditorWidget(BaseEditor):
             lay.addLayout(row)
             self._info_rows[key] = val
         lay.addStretch()
+        lay.addSpacing(10)
+
+        ### TOOLS Sections
+        lay.addWidget(QLabel('<b>Tools<\b>'))
+        tools_row = QHBoxLayout()
+
+        self.btn_brush = QPushButton('Brush')
+        self.btn_bucket = QPushButton('Bucket')
+        self.btn_brush.setCheckable(True)
+        self.btn_bucket.setCheckable(True)
+        self.btn_brush.setChecked(True)
+
+        self._tool_group = QButtonGroup(self)
+        self._tool_group.addButton(self.btn_brush, 0)
+        self._tool_group.addButton(self.btn_bucket, 1)
+        self._tool_group.idClicked.connect(self._on_tool_changed)
+
+        tools_row.addWidget(self.btn_brush)
+        tools_row.addWidget(self.btn_bucket)
+        lay.addLayout(tools_row)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel('Brush Size:'))
+        self._slider_size = QSlider(Qt.Orientation.Horizontal)
+        self._slider_size.setRange(1, 10)
+        self._slider_size.setValue(1)
+        self._slider_size.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._slider_size.setTickInterval(1)
+        self._slider_size.valueChanged.connect(self._on_brush_size_changed)
+        size_row.addWidget(self._slider_size)
+        lay.addLayout(size_row)
         lay.addSpacing(15)
+
+
+        ### CLUT Section
         lay.addWidget(QLabel('<b>Color Look-Up Table (CLUT)</b>'))
 
         self._palette_list = QListWidget()
@@ -289,18 +373,22 @@ class FisEditorWidget(BaseEditor):
     def undo(self) -> None:
         '''Undo action and sync states'''
         prev_img = self.history.undo()
-        if prev_img:
+        if prev_img and self.img:
+            clut_changed = self.img.colorTable() != prev_img.colorTable()
             self.img = prev_img
             self._apply_zoom()
-            self._populate_palette()
+            if clut_changed:
+                self._update_palette_icons()
             self._update_dirty_state()
 
     def redo(self) -> None:
         next_img = self.history.redo()
-        if next_img:
+        if next_img and self.img:
+            clut_changed = self.img.colorTable() != next_img.colorTable()
             self.img = next_img
             self._apply_zoom()
-            self._populate_palette()
+            if clut_changed:
+                self._update_palette_icons()
             self._update_dirty_state()
 
     def _update_dirty_state(self) -> None:
@@ -408,10 +496,33 @@ class FisEditorWidget(BaseEditor):
         if colors:
             self._palette_list.setCurrentRow(0)
 
+    def _update_palette_icons(self) -> None:
+        '''Updates color icons in place'''
+        if not self.img:
+            return
+        colors = self.img.colorTable()
+        for idx, rgb in enumerate(colors):
+            item = self._palette_list.item(idx)
+            if item:
+                color = QColor.fromRgba(rgb)
+                pixmap = QPixmap(20, 20)
+                pixmap.fill(color)
+                item.setIcon(QIcon(pixmap))
+                item.setToolTip(f'Index: {idx} (Hex: {color.name()})')
+
     def _on_color_selected(self, index: int):
         '''Passes the selected CLUT index to the drawing canvas'''
         if isinstance(self._image_label, InteractiveCanvas):
             self._image_label.selected_color_idx = index
+
+    def _on_tool_changed(self, button_id: int):
+        '''0 = Brush, 1 = Bucket'''
+        if isinstance(self._image_label, InteractiveCanvas):
+            self._image_label.current_tool = 'brush' if button_id == 0 else 'bucket'
+    
+    def _on_brush_size_changed(self, size: int):
+        if isinstance(self._image_label, InteractiveCanvas):
+            self._image_label.brush_size = size
 
     def _apply_zoom(self):
         if isinstance(self._image_label, InteractiveCanvas):

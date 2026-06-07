@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QTableView, QHeaderView, QWidget, QMenu, QApplication, QLineEdit, QFrame,
 )
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelection
-from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction
+from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction, QFont
 
 from core.contracts import BaseEditor
 from core.handlers.generic_binary_leaf import GenericBinaryHandler
@@ -34,8 +34,10 @@ class HexEditorWidget(BaseEditor):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        layout.addWidget(self._build_toolbar())
-        layout.addWidget(self._build_search_bar())
+        layout.addWidget(self._build_header_bar())
+
+        # layout.addWidget(self._build_toolbar())
+        # layout.addWidget(self._build_search_bar())
 
         self.table_view = QTableView()
         self.table_view.setObjectName('HexView')
@@ -49,6 +51,42 @@ class HexEditorWidget(BaseEditor):
         layout.addWidget(self.table_view)
 
         layout.addWidget(self._build_inspector())
+
+    def _build_header_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName('EditorToolbar')
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(10, 5, 10, 5)
+
+        self.info_label = QLabel('Hex View')
+        self.info_label.setObjectName('SectionHeader') # Give it visual weight
+
+        # Restrict search bar width so it doesn't stretch awkwardly across the screen
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText('Search bytes (e.g. 4A 2F)...')
+        self.search_input.setFixedWidth(250) 
+        self.search_input.setFixedHeight(24)
+        self.search_input.returnPressed.connect(self._search_next)
+
+        self.search_status = QLabel('')
+        self.search_status.setFixedWidth(100)
+        self.search_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        btn_prev = QPushButton('◀')
+        btn_next = QPushButton('▶')
+        btn_prev.setFixedSize(24, 24)
+        btn_next.setFixedSize(24, 24)
+        btn_prev.clicked.connect(self._search_prev)
+        btn_next.clicked.connect(self._search_next)
+
+        lay.addWidget(self.info_label)
+        lay.addStretch()
+        lay.addWidget(QLabel('Find:'))
+        lay.addWidget(self.search_input)
+        lay.addWidget(btn_prev)
+        lay.addWidget(btn_next)
+        lay.addWidget(self.search_status)
+        return bar
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -407,6 +445,7 @@ class HexTableModel(QAbstractTableModel):
         pos = row * 16 + (col - 1)
 
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            
             if col == 0:
                 return f'{row * 16:08X}'
             if 1 <= col <= 16:
@@ -415,9 +454,16 @@ class HexTableModel(QAbstractTableModel):
                 chunk = self._data[row * 16: (row + 1) * 16]
                 return ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
 
-        if role == Qt.ItemDataRole.ForegroundRole and 1 <= col <= 16:
-            if pos in self._modified:
-                return QBrush(self._MODIFIED_FG)
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if 1 <= col <= 16:
+                if pos in self._modified:
+                    return QBrush(self._MODIFIED_FG)
+            elif col == 0:
+                # Mute the offset address column
+                return QBrush(QColor('#777777')) 
+            elif col == 17:
+                # Mute the ASCII dump column
+                return QBrush(QColor('#888888'))
 
         if role == Qt.ItemDataRole.BackgroundRole and 1 <= col <= 16:
             if pos in self._modified:

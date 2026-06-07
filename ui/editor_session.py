@@ -14,8 +14,9 @@ class EditorSession:
     '''Manages the lifecycle of an editor'''
     _VALID_TRANSITIONS: dict[str, set[str]] = {
         'loading': {'ready', 'error', 'cancelled'},
-        'ready':   {'cancelled'},
-        'error':   {'cancelled'},
+        'ready':   {'saving', 'cancelled'},
+        'saving':  {'ready', 'error', 'cancelled'},
+        'error':   {'cancelled', 'ready'},
         'cancelled': set()
     }
     _counter_lock = threading.Lock()
@@ -28,7 +29,30 @@ class EditorSession:
         self.node = node
         self.editor = editor
         self._state = 'loading'
+        self.state_changed_callback: Callable[[str], None] | None = None
         logger.debug(f'EditorSession #{self.session_id} created for "{node.name}"')
+
+    def apply_changes(self, dispatch_callback: Callable) -> None:
+        '''Handles save state transition'''
+        if self._state != 'ready':
+            logger.warning(f'Session #{self.session_id} cannot save from state: {self._state}')
+            return
+        if not self.editor.is_dirty():
+            return
+
+        self._transition('saving')
+        self.editor.stage_pending_data()
+        dispatch_callback(self.node, self.editor._pending_data, self.editor)
+
+    def confirm_save(self) -> None:
+        '''Dispatcher calls this when save complete'''
+        self.editor.confirm_changes_applied()
+        self._transition('ready')
+
+    def reject_save(self, reason: str) -> None:
+        '''Dispatcher calls this when save fails'''
+        self.editor.reject_changes_applied(reason)
+        self._transition('ready')
 
     @property
     def state(self) -> str:
@@ -48,6 +72,8 @@ class EditorSession:
             raise ValueError(f'EditorSession #{self.session_id}: invalid transition {self._state!r}->{target!r}')
         logger.debug(f'EditorSession #{self.session_id} ("{self.node.name}"): {self._state}->{target}')
         self._state = target
+        if self.state_changed_callback:
+            self.state_changed_callback(target)
 
     def complete(self, data: Any, data_resolver: Callable | None = None) -> None:
         '''Populate the editor with processed data'''

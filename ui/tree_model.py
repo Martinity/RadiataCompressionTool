@@ -185,6 +185,8 @@ class _SearchEntry:
     node:       VfsNode
     name_lower: str
     hid_str:    str
+    desc_lower: str
+    tags_lower: tuple[str, ...]
     tokens:     frozenset[str]
     base_rank:  int
     tags:       tuple[str, ...]
@@ -193,6 +195,30 @@ class _SearchEntry:
         '''return score for query. Higher is more relevant'''
         if not query:
             return 0
+
+        if ':' in query: # Filter Search
+            prefix, _, val = query.partition(':')
+            val = val.lower().strip()
+            if not val:
+                return 0
+            if prefix in ('tag', 'tags'): # Tag filter
+                return _RANK_TAG + self.base_rank if any(val in t for t in self.tags_lower) else 0
+            if prefix in ('desc', 'description'): # Description filter
+                return _RANK_DESCRIPTION + self.base_rank if val in self.desc_lower else 0
+            if prefix == 'name': # Name filter
+                if val == self.name_lower:
+                    return _RANK_EXACT_NAME + self.base_rank
+                if self.name_lower.startswith(val):
+                    return _RANK_NAME_PREFIX + self.base_rank
+                if val in self.name_lower:
+                    return _RANK_NAME + self.base_rank
+                return 0
+            if prefix == 'hid': # HID filter
+                if self.hid_str.startswith(val) or val == self.hid_str:
+                    return _RANK_HID
+                return 0
+
+        # Global Search
         if query == self.name_lower: # Name exact
             return _RANK_EXACT_NAME + self.base_rank
         if self.name_lower.startswith(query): # Name startswith
@@ -316,12 +342,14 @@ class FlatSearchModel(QAbstractListModel):
 
     def _build_entry(self, node: VfsNode) -> _SearchEntry:
         meta       = self._store.get(node.hierarchical_id_str)
-        name_lower = node.name.lower()
-        hid_str    = node.hierarchical_id_str
-        tokens: set[str] = set(name_lower.split())
+        name_lower: str = node.name.lower()
+        hid_str: str    = node.hierarchical_id_str
         tags:   tuple[str, ...] = ()
+        desc_lower = ''
+        tags_lower = ()
         base_rank  = 0
 
+        tokens: set[str] = set(name_lower.split())
         tokens.add(hid_str)
         tokens.update(c.lower() for c in node.category)
 
@@ -331,17 +359,21 @@ class FlatSearchModel(QAbstractListModel):
                 base_rank += 20
             if meta.tags:
                 tags = meta.tags
-                tokens.update(t.lower() for t in meta.title)
+                tags_lower = tuple(t.lower() for t in meta.tags)
+                tokens.update(tags_lower)
                 base_rank += 10 * len(meta.tags)
             if meta.description:
+                desc_lower = meta.description.lower()
                 tokens.update(
-                    w for w in meta.description.lower().split()
+                    w for w in desc_lower.split()
                     if len(w) > 2
                 )
         return _SearchEntry(
             node=node,
             name_lower=name_lower,
             hid_str=hid_str,
+            desc_lower=desc_lower,
+            tags_lower=tags_lower,
             tokens=frozenset(tokens),
             base_rank=base_rank,
             tags=tags

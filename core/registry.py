@@ -36,6 +36,7 @@ _GLOBAL_ACTIONS_BY_NAME: dict[str, ActionDef] = {a.name: a for a in GLOBAL_ACTIO
 class FormatResolver(Protocol):
     '''Inject FormatResolver rather than importing Registry directly to decouple subsystems.'''
     def get_handler_profile(self, node: 'VfsNode') -> 'HandlerProfile | None': ...
+    def get_handler_profiles(self, node: 'VfsNode'): ...
     def get_editor_profile(self, editor_class: 'type[BaseEditor]') -> 'type[EditorProfile] | None': ...
     def get_handler(self, source: 'VfsNode | Path') -> 'type[BaseHandler] | None': ...
     def get_editors(self, node: 'VfsNode') -> 'list[type[BaseHandler]]': ...
@@ -91,8 +92,8 @@ class Registry:
     '''
     _handler_profiles: list[HandlerProfile] = []
     _editor_profiles:  list[EditorProfile] = []
-    _handler_by_ext:   dict[str, HandlerProfile] = {}
-    _handler_by_cat:   dict[str, HandlerProfile] = {}
+    _handler_by_ext:   dict[str, list[HandlerProfile]] = {}
+    _handler_by_cat:   dict[str, list[HandlerProfile]] = {}
     _editor_by_ext:    dict[str, list[EditorProfile]] = {}
     _editor_by_cat:    dict[str, list[EditorProfile]] = {}
     _global_editors:   list[EditorProfile] = []
@@ -164,10 +165,10 @@ class Registry:
 
             for ext in extensions:
                 if ext not in cls._handler_by_ext or not profile.is_fallback:
-                    cls._handler_by_ext[ext] = profile
+                    cls._handler_by_ext.setdefault(ext, []).append(profile)
             for cat in categories:
                 if cat not in cls._handler_by_cat or not profile.is_fallback:
-                    cls._handler_by_cat[cat] = profile
+                    cls._handler_by_cat.setdefault(cat, []).append(profile)
 
             return cls_or_func
         return decorator
@@ -226,32 +227,48 @@ class Registry:
     @classmethod
     def get_handler_profile(cls, node: VfsNode) -> HandlerProfile | None:
         '''Returns best handler profile for a node'''
-        fallback: HandlerProfile | None = None
-        if node.extension:
-            p = cls._handler_by_ext.get(node.extension)
-            if p:
-                if p.is_fallback:
-                    fallback = fallback or p
+        profiles = cls.get_handler_profiles(node)
+        return profiles[0] if profiles else None
+
+    @classmethod
+    def get_handler_profiles(cls, node: VfsNode) -> list[HandlerProfile] | None:
+        '''Return list of valid handler profiles for a node'''
+        matches: list[HandlerProfile] = []
+        seen_names: set[str] = set()
+
+        def _add(profile: HandlerProfile):
+            if profile.name not in seen_names:
+                matches.append(profile)
+                seen_names.add(profile.name)
+        
+        if node.extension: # Gather extension matches
+            profiles = cls._handler_by_ext.get(node.extension)
+            if profiles:
+                if isinstance(profiles, list):
+                    for p in profiles:
+                        _add(p)
                 else:
-                    return p
-        if node.category:
+                    _add(profiles)
+        if node.category: # Gather category matches
             for cat in node.category:
                 if cat == 'Unknown':
                     continue
-                p = cls._handler_by_cat.get(cat)
-                if p:
-                    if p.is_fallback:
-                        fallback = fallback or p
+                profiles = cls._handler_by_cat.get(cat)
+                if profiles:
+                    if isinstance(profiles, list):
+                        for p in profiles:
+                            _add(p)
                     else:
-                        return p
-        return fallback
+                        _add(profiles)
+        
+        return matches
 
     @classmethod
     def get_handler(cls, source: VfsNode | Path) -> type[BaseHandler] | None:
         '''Return handler class for source type'''
         if isinstance(source, Path):
             p = cls._handler_by_ext.get(source.suffix.lower())
-            return p.handler_class if p else None
+            return p[0].handler_class if p else None
         profile = cls.get_handler_profile(source)
         return profile.handler_class if profile else None
 

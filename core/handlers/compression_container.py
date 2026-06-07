@@ -127,7 +127,7 @@ class CompressorHandler(ContainerHandler):
                     original_chunk[12:16] = (0).to_bytes(4, 'little')
                 new_compressed_file += original_chunk
 
-        log_callback(f'Rebuilt SLZ container. Original size:{len(self.raw_source)} New size:{len(new_compressed_file)}')
+        log_callback(f'{root.hierarchical_id} Rebuilt SLZ container. Original size:{len(self.raw_source)} New size:{len(new_compressed_file)}')
         return new_compressed_file
 
     def get_properties(self, node: VfsNode) -> str:

@@ -49,7 +49,7 @@ class ChainHandler(ContainerHandler):
         ext: str = next((match for sig, match in extensions.items() if raw_header.startswith(sig)), '.bin')
 
         node = VfsNode(
-            name='FIS texture',
+            name=f'FIS texture ({self.handler_parent.hierarchical_id_str}.*)',
             category=self.handler_parent.category,
             offset=fis_offset,
             size=len(fis_payload),
@@ -69,7 +69,7 @@ class ChainHandler(ContainerHandler):
             log_callback(f'Rebuilding FPS with {len(node.children)} children. Old texture size:{len(self.data[fis_offset:])}')
             if child.pending_data:
                 new_node.extend(child.pending_data)
-                log_callback(f'New FPS container built with new texture size:{len(child.pending_data)}. Original size:{node.size} New size:{len(new_node)}')
+                log_callback(f'{node.hierarchical_id} New FPS container built with new texture size:{len(child.pending_data)}. Original size:{node.size} New size:{len(new_node)}')
                 return bytes(new_node)
             else:
                 log_callback(f'No FPS changes size stays the same: {node.size}={len(self.data)}')

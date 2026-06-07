@@ -315,6 +315,7 @@ class WorkspaceController(QObject):
         self.dispatcher.tracking_update.connect(self.on_tracking_update)
         self.dispatcher.action_complete.connect(self.handle_action_result)
 
+        self.editor_page.save_requested.connect(self.request_save)
         self._current_session: EditorSession | None = None
 
     def init_workspace(self, root_node: VfsNode) -> None:
@@ -502,9 +503,10 @@ class WorkspaceController(QObject):
 
         # Get ActionDefs
         action_defs: list[ActionDef] = []
-        profile = Registry.get_handler_profile(node)
-        if profile:
-            action_defs.extend(profile.actions)
+        profiles = Registry.get_handler_profiles(node)
+        if profiles:
+            for profile in profiles:
+                action_defs.extend(profile.actions)
         if not node.is_hidden and node.size > 0:
             action_defs.extend(GLOBAL_ACTIONS)
         # Sort by ActionType priority
@@ -612,10 +614,8 @@ class WorkspaceController(QObject):
             self._current_session.cancel()
         new_editor = editor_class()
         session = EditorSession(node=node, editor=new_editor)
+        new_editor._session = session
         new_editor.begin_loading(node)
-        new_editor.apply_requested.connect(
-            lambda node, data, e=new_editor: self.dispatcher.apply_edit(node, data, e)
-        )
         self.editor_page.load_editor(session)
         self._current_session = session
 
@@ -631,6 +631,11 @@ class WorkspaceController(QObject):
         )
         plugin_name = getattr(editor_class, '_plugin_name', editor_class.__name__)
         logger.info(f'Opening "{node.name}" in {plugin_name} [{session!r}]')
+
+    def request_save(self) -> None:
+        '''Called to save editor data'''
+        if self._current_session:
+            self._current_session.apply_changes(self.dispatcher.apply_edit)
 
     def _on_editor_data_ready(self, session: EditorSession, success: bool, payload: Any) -> None:
         '''Pass processed handler data to editor. Passes through 5 guards first.'''
@@ -924,10 +929,12 @@ class RebuildStatusPage(QWidget):
 class EditorPage(QWidget):
     '''UX is not final. Especially for this...'''
     back_requested = pyqtSignal()
+    save_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_session: EditorSession | None = None
+        self._waiting_to_close: bool = False
         self._setup_ui()
         self._setup_shortcuts()
 
@@ -1011,6 +1018,7 @@ class EditorPage(QWidget):
 
         if is_mutable:
             session.editor.dataChanged.connect(self._on_editor_state_changed)
+            session.state_changed_callback = self._on_session_state_changed
             if hasattr(session.editor, 'history'):
                 session.editor.history. can_undo_changed.connect(self.btn_undo.setEnabled)
                 session.editor.history.can_redo_changed.connect(self.btn_redo.setEnabled)
@@ -1022,10 +1030,6 @@ class EditorPage(QWidget):
         old_editor = self._current_session.editor if self._current_session else None
         if not old_editor:
             return
-        try:
-            old_editor.dataChanged.disconnect(self._on_apply_confirmed)
-        except TypeError:
-            pass
         self._editor_area.removeWidget(old_editor)
         old_editor.cleanup()
         old_editor.deleteLater()
@@ -1036,8 +1040,21 @@ class EditorPage(QWidget):
         if self._current_session:
             self._on_editor_state_changed(self._current_session.editor.is_dirty())
 
+    def _on_session_state_changed(self, state: str) -> None:
+        ''''''
+        if not self._current_session:
+            return
+        self._on_editor_state_changed(self._current_session.editor.is_dirty())
+        if self._waiting_to_close:
+            if state == 'ready':
+                self._waiting_to_close = False
+                self.back_requested.emit()
+            elif state == 'error':
+                self._waiting_to_close = False
+                QMessageBox.warning(self, 'Save Failed', 'Could not save changes. Error message in console...')
+
     def _on_editor_state_changed(self, is_dirty: bool) -> None:
-        is_ready = self._current_session and self._current_session.state == 'ready'
+        is_ready = bool(self._current_session and self._current_session.state == 'ready')
         self.btn_save.setEnabled(is_dirty and is_ready)
         self.btn_revert.setEnabled(is_dirty and is_ready)
         self._update_title(is_dirty)
@@ -1080,7 +1097,7 @@ class EditorPage(QWidget):
                 session.editor.cleanup()
                 self.back_requested.emit()
             return
-        if session.state == 'ready':
+        if session.state == ('ready', 'error'):
             editor = session.editor
             if editor.is_mutable and editor.is_dirty():
                 reply = QMessageBox.question(
@@ -1091,37 +1108,34 @@ class EditorPage(QWidget):
                 if reply == QMessageBox.StandardButton.Cancel:
                     return
                 if reply == QMessageBox.StandardButton.Save:
-                    editor.dataChanged.connect(self._on_apply_confirmed)
-                    editor.apply_changes()
+                    self._waiting_to_close = True
+                    self.save_requested.emit()
                     return
                 else:
                     editor.discard_changes()
         self.back_requested.emit()
 
-    def _on_apply_confirmed(self, dirty: bool) -> None:
-        '''Insure that the editor instance gets the data during the closing state'''
-        if not dirty:
-            if self._current_session:
-                try:
-                    self._current_session.editor.dataChanged.disconnect(self._on_apply_confirmed)
-                except TypeError:
-                    pass
-            self.back_requested.emit()
+    # def _on_apply_confirmed(self, dirty: bool) -> None:
+    #     '''Insure that the editor instance gets the data during the closing state'''
+    #     if not dirty:
+    #         if self._current_session:
+    #             try:
+    #                 self._current_session.editor.dataChanged.disconnect(self._on_apply_confirmed)
+    #             except TypeError:
+    #                 pass
+    #         self.back_requested.emit()
     
     def _on_save(self) -> None:
-        editor = self._current_session.editor if self._current_session else None
-        if not editor or not self._current_session:
+        if not self._current_session:
             return
-        if editor.is_mutable and editor.is_dirty():
-            logger.info(f'Saved {self._current_session.node.name} modifications to staging queue.')
-            editor.apply_changes()
+        editor = self._current_session.editor if self._current_session else None
+        if editor and editor.is_mutable and editor.is_dirty():
+            logger.info(f'Staging modifications for {self._current_session.node.name}...')
+            self.save_requested.emit()
 
     def _on_revert(self) -> None:
-        editor = self._current_session.editor if self._current_session else None
-        if not editor or not self._current_session:
-            return
-        if editor.is_mutable and editor.is_dirty():
-            editor.discard_changes()
+        if self._current_session and self._current_session.editor.is_mutable:
+            self._current_session.editor.discard_changes()
 
     def _on_undo(self) -> None:
         if self._current_session and hasattr(self._current_session.editor, 'undo'):

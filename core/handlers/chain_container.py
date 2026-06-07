@@ -23,7 +23,7 @@ fps payload [28:32] offset to FIS payload + header size (0x40)
 '''
 @Registry.register(
     name='Chain Handler', 
-    extensions=('.fps','.fas', '.rmac', '.tgil', '.xbdc', '.dnal', '.lctp', '.idom'), 
+    extensions=('.fps','.fas', '.rmac', '.tgil', '.xbdc', '.dnal', '.lctp', '.idom', '.ndnc'), 
     supported_actions=(
         ActionDef('Deconstruct Chain', ActionType.TREE_EXPAND),
         ActionDef('Properties', ActionType.DIALOG)
@@ -91,7 +91,7 @@ class ChainHandler(ContainerHandler):
             new_node += payload
 
             previous_size = len(payload)
-        log_callback(f'New spf chain built. Original size:{node.size} New size:{len(new_node)}')
+        log_callback(f'{node.hierarchical_id} New spf chain built . Original size:{node.size} New size:{len(new_node)}')
         return new_node
     
     def get_properties(self, node: VfsNode):
