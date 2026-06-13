@@ -10,11 +10,12 @@ Contains all background task defining logic.
 '''
 from __future__ import annotations
 
-from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool
-from typing import Callable, Any, TYPE_CHECKING
-from dataclasses import dataclass
-from enum import auto, Enum
+import threading
 from pathlib import Path
+from enum import auto, Enum
+from dataclasses import dataclass
+from typing import Callable, Any, TYPE_CHECKING
+from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool
 from core.contracts import LeafHandler, ContainerHandler
 if TYPE_CHECKING:
     from core.node import VfsNode
@@ -31,10 +32,10 @@ class ActionType(Enum):
     '''
     Defines how the disatcher and Action.dispatch handle results
 
-    TREE_EXPAND  - execute_action returns a VfsNode — dispatcher inserts children\n
-    PROCESS      - execute_action returns node data in Any format — stored as payload\n
-    DIALOG       - execute_action returns a display string — shown in descriptor panel or dialog\n
-    EXPORT       - write node data to disk\n
+    TREE_EXPAND  - execute_action returns a VfsNode — dispatcher inserts children
+    PROCESS      - execute_action returns node data in Any format — stored as payload
+    DIALOG       - execute_action returns a display string — shown in descriptor panel or dialog
+    EXPORT       - write node data to disk
     IMPORT       - read file from disk into node
     '''
     TREE_EXPAND = 'tree_expand'
@@ -72,32 +73,28 @@ class EditorPayload:
 
 ###---------------------------------------- Tasks ------------------------------------------###
 
-class TaskSignals(QObject):
-    '''Signal for task states of background tasks'''
-    finished    = pyqtSignal(bool, object)  # (Success, result_message)
-    log_message = pyqtSignal(str)           # log output
-    progress    = pyqtSignal(int, str)      # (percentage, status_message)
-
 class GenericTask(QRunnable):
     '''Generic background worker'''
-    def __init__(self, function: Callable, *args, **kwargs) -> None:
+    def __init__(self, handle: TaskHandle, function: Callable, *args, **kwargs) -> None:
         super().__init__()
+        self.handle  = handle
         self.fn      = function
         self.args    = args
-        self.signals = TaskSignals()
         self.kwargs  = dict(kwargs)
-        self.kwargs.setdefault('progress_callback', self.signals.progress.emit)
-        self.kwargs.setdefault('log_callback', self.signals.log_message.emit)
 
     @pyqtSlot()
     def run(self) -> None:
-        '''Execute the function, catch errors'''
+        '''Execute the function, catch errors, and advance the state machine'''
+        self.handle.mark_running()
         try:
             result = self.fn(*self.args, **self.kwargs)
-            self.signals.finished.emit(True, result)
+            self.handle.complete(result)
+        except InterruptedError as e:
+            logger.warning(f'Task aborted: {e}')
+            self.handle.fail('Cancelled by user')
         except Exception as e:
             logger.error('Background task failed', exc_info=True)
-            self.signals.finished.emit(False, str(e))
+            self.handle.fail(e)
 
 class TaskCoordinator(QObject):
     def __init__(self):
@@ -105,17 +102,95 @@ class TaskCoordinator(QObject):
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(4)
 
-    def start_task(self, function: Callable, *args, **kwargs) -> TaskSignals:
-        '''Setup task and its signals'''
-        worker = GenericTask(function, *args, **kwargs)
+    def start_task(self, function: Callable, *args, **kwargs) -> TaskHandle:
+        '''Spin up thread. Link handle'''
+        task_name = function.__name__
+        handle = TaskHandle(task_name)
+
+        kwargs['task_handle'] = handle
+
+        worker = GenericTask(handle, function, *args, **kwargs)
         self.thread_pool.start(worker)
-        return worker.signals
+        return handle
     
     def shutdown(self):
         logger.info('TaskCoordiantor: Canceling pending tasks...')
         self.thread_pool.clear()
         if not self.thread_pool.waitForDone(2000):
             logger.warning('TaskCoordinator: Some threads did not finish in time.')
+
+class TaskHandle(QObject):
+    '''State machine and handle for background tasks, thread-safe'''
+    state_changed = pyqtSignal(str)           # State name
+    progress      = pyqtSignal(int, str)      # (percentage, message)
+    finished      = pyqtSignal(bool, object)  # (success, payload)
+    log_message   = pyqtSignal(str)           # log output
+
+    _VALID_TRANSITIONS: dict[str, set[str]] = {
+        'pending':    {'running', 'cancelled'},
+        'running':    {'cancelling', 'completed', 'failed'},
+        'cancelling': {'cancelled'},
+        'completed':  set(),
+        'failed':     set(),
+        'cancelled':  set()
+    }
+
+    def __init__(self, task_name: str):
+        super().__init__()
+        self.task_name  = task_name
+        self._state     = 'pending'
+        self._lock      = threading.Lock()
+        self._cancel_token = threading.Event()
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            return self._state
+
+    def _transition(self, target: str) -> None:
+        with self._lock:
+            valid = self._VALID_TRANSITIONS.get(self._state, set())
+            if target not in valid:
+                logger.warning(f'Task {self.task_name}: invalid transition {self._state}->{target}')
+                return
+            self._state = target
+        self.state_changed.emit(target)
+        logger.debug(f'Task [{self.task_name}]: -> {target}')
+
+    ### from main thread
+    def cancel(self) -> None:
+        '''Cancel the current task from the main thread'''
+        with self._lock:
+            if self._state not in ('pending', 'running'):
+                return
+            target = 'cancelled' if self._state == 'pending' else 'cancelling'
+            self._cancel_token.set()
+            self._state = target
+        self.state_changed.emit(target)
+        logger.debug(f'Task [{self.task_name}]: -> {target}')
+
+    ### from background thread
+    def is_cancelling(self) -> bool:
+        return self._cancel_token.is_set()
+
+    def checkpoint(self) -> None:
+        if self.is_cancelling():
+            raise InterruptedError(f'Task [{self.task_name}] cancelled at checkpoint.')
+
+    def mark_running(self) -> None:
+        self._transition('running')
+
+    def complete(self, result: object) -> None:
+        if self.is_cancelling():
+            self._transition('cancelled')
+            self.finished.emit(False, 'Task cancelled by user.')
+        else:
+            self._transition('completed')
+            self.finished.emit(True, result)
+    
+    def fail(self, error: Exception | str) -> None:
+        self._transition('failed')
+        self.finished.emit(False, str(error))
 
 ###---------------------------------------- Actions --------------------------------------###
 
@@ -133,16 +208,14 @@ class Actions:
         handler_class:     type['BaseHandler'],
         node:             'VfsNode',
         navigator:        'VfsNavigator',
-        progress_callback: Callable,
-        log_callback:      Callable,
+        task_handle:       TaskHandle
     ) -> EditorPayload:
         '''
-        Unwraps the node and calls handler.prepare_editor_data() on a worker thread.
+        Unwraps the node and calls handler.prepare_editor_data() on a background thread.
 
         Returns EditorPayload(node, data) 
         '''
-        log_callback(f'Preparing editor data for {node.name}...')
-        progress_callback(20, 'Unwrapping nodes...')
+        task_handle.log_message.emit(f'Preparing editor data for {node.name}...')
         raw_bytes = node.pending_data or navigator.unwrap_chain(node)
         if not raw_bytes:
             raise ValueError(f'unwrap_chain returned empty bytes for {node.name}')
@@ -152,36 +225,33 @@ class Actions:
                 f'{handler_class.__name__} must be ContainerHandler or LeafHandler.'
             )
         with handler_class(raw_bytes, node.parent) as handler:
+            handler.task_handle = task_handle
             if header_bytes and hasattr(handler, 'datacenter_header'):
                 handler.datacenter_header = header_bytes
             result = handler.prepare_editor_data(node, raw_bytes)
-        progress_callback(100, 'Done')
         logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__} from {handler_class.__name__}')
         return EditorPayload(node=node, data=result)
     
     @staticmethod
     def decode_editor_data(
-        handler_class: type['BaseHandler'],
-        node: 'VfsNode',
-        payload: Any,
-        progress_callback: Callable,
-        log_callback: Callable,
+        handler_class:     type['BaseHandler'],
+        node:             'VfsNode',
+        payload:           Any,
+        task_handle:       TaskHandle
     ) -> bytes:
         '''
         Takes a complex UI payload and routes it through the node's handler
         converting it back to raw bytes on a background thread
         '''
-        log_callback(f'Decoding data for {node.name}')
-        progress_callback(50, 'Decoding payload...')
+        task_handle.log_message.emit(f'Decoding data for {node.name}')
         if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
             raise TypeError(f'{handler_class.__name__} must be ContainerHandler or LeafHandler.')
         with handler_class(b'', node.parent) as handler:
+            handler.task_handle = task_handle
             result = handler.decode_editor_data(node, payload)
         if not isinstance(result, bytes):
             raise TypeError(f'Handler {handler_class.__name__} returned {type(result).__name__}, expected bytes')
-            
-        progress_callback(100, 'Decoding complete')
-        logger.debug('Editor payload encoded to bytes')
+        task_handle.log_message.emit(f'Editor payload for {node.name} encoded to bytes')
         return result
 
     ### Entry point for all node actions
@@ -190,8 +260,7 @@ class Actions:
         action_def: 'ActionDef',
         node:       'VfsNode',
         navigator:  'VfsNavigator',
-        progress_callback: Callable,
-        log_callback:      Callable,
+        task_handle:       TaskHandle,
         **kwargs,
     ) -> ActionResult:
         '''
@@ -211,7 +280,7 @@ class Actions:
                     )
                 return Actions.run_handler_action(
                     handler_class, node, action_def.name, navigator, 
-                    progress_callback, log_callback, **kwargs
+                    task_handle, **kwargs
                 )
             case ActionType.EXPORT:
                 file_path: Path | None = kwargs.get('file_path')
@@ -229,13 +298,12 @@ class Actions:
                         node,
                         action_def.name,
                         navigator,
-                        progress_callback,
-                        log_callback, 
+                        task_handle,
                         **kwargs
                     )
                 # Fallback - Raw Bytes
                 return Actions.export_node(
-                    node, file_path, navigator, progress_callback, log_callback
+                    node, file_path, navigator, task_handle
                 )
             case ActionType.IMPORT:
                 file_path = kwargs.get('file_path')
@@ -245,7 +313,7 @@ class Actions:
                         status=ActionStatus.FAILURE, message='No import path provided'
                     )
                 return Actions.import_node(
-                    node, file_path, progress_callback, log_callback
+                    node, file_path, task_handle
                 )
             case _:
                 return ActionResult(
@@ -262,28 +330,27 @@ class Actions:
         navigator:    'VfsNavigator',
         staged_nodes: list['VfsNode'],
         output_path:  Path,
-        progress_callback: Callable,
-        log_callback:      Callable,
+        task_handle:       TaskHandle,
     ) -> ActionResult:
         try:
-            log_callback('Starting ISO build sequence...')
-            progress_callback(5, 'Starting Pass 1...')
-            log_callback('Precomputing Datacenter...')
+            task_handle.log_message.emit('Starting ISO build sequence...')
+            task_handle.progress.emit(5, 'Starting Pass 1...')
+            task_handle.log_message.emit('Precomputing Datacenter...')
 
-            extra_targets: list[VfsNode] = navigator.precompute_datacenter(staged_nodes, log_callback)
+            extra_targets: list[VfsNode] = navigator.precompute_datacenter(staged_nodes, task_handle.log_message.emit)
             all_staged:    list[VfsNode] = list(staged_nodes) + extra_targets
-            log_callback(f'Pass 1 complete - {len(extra_targets)} datacenter target(s) cached and queued')
+            task_handle.log_message.emit(f'Pass 1 complete - {len(extra_targets)} datacenter target(s) cached and queued')
 
-            progress_callback(15, 'Starting Pass2...')
-            log_callback('Performing VFS rollup...')
+            task_handle.progress.emit(15, 'Starting Pass2...')
+            task_handle.log_message.emit('Performing VFS rollup...')
 
-            physical_staged_nodes = navigator.rollup_nodes(all_staged, log_callback)
-            progress_callback(40, 'Writing sectors to disk...')
-            success = handler.rebuild_node(root_node, physical_staged_nodes, output_path, progress_callback=progress_callback)
+            physical_staged_nodes = navigator.rollup_nodes(all_staged, task_handle.log_message.emit)
+            task_handle.progress.emit(40, 'Writing sectors to disk...')
+            success = handler.rebuild_node(root_node, physical_staged_nodes, output_path, task_handle)
 
             if success:
-                progress_callback(100, 'Complete')
-                log_callback('ISO Build Successful.')
+                task_handle.progress.emit(100, 'Complete')
+                task_handle.log_message.emit('ISO Build Successful.')
                 return ActionResult(
                     action_name='Build ISO',
                     node=root_node, 
@@ -302,37 +369,33 @@ class Actions:
     @staticmethod
     def verify_iso(
         handler: IsoHandler,
-        progress_callback: Callable,
-        log_callback:      Callable,
+        task_handle:       TaskHandle,
     ) -> str:
-        log_callback('Verifying ISO...')
-        progress_callback(10, 'Hashing disk...')
-        result = handler.verify_iso_integrity()
-        progress_callback(100, 'Done')
-        log_callback(f'Build identified: {result}')
-        logger.info(f'ISO verified: {result}')
+        task_handle.log_message.emit('Verifying ISO...')
+        result = handler.verify_iso_integrity(task_handle)
+        task_handle.log_message.emit(f'ISO verified, build: {result}')
         return result
     
     ### IO specific actions
     @staticmethod
     def export_node(
         node:        'VfsNode',
-        output_path: Path, 
+        output_path:  Path, 
         navigator:   'VfsNavigator',
-        progress_callback: Callable,
-        log_callback:      Callable,
+        task_handle:  TaskHandle,
     ) -> ActionResult:
         try:
-            log_callback(f'Resolving data chain for {node.hierarchical_id_str}')
-            progress_callback(20, 'Unwrapping...')
+            task_handle.log_message.emit(f'Resolving data chain for {node.hierarchical_id_str}')
             data = navigator.unwrap_chain(node)
             if not data:
                 raise ValueError('Resolved data is empty')
-            progress_callback(70, f'Writing {len(data)} bytes to disk...')
+            total_size = len(data)
+            chunk_size = 1024 * 1024 * 10
             with open(output_path, 'wb') as f:
-                f.write(data)
+                for i in range(0, total_size, chunk_size):
+                    task_handle.checkpoint()
+                    f.write(data[i : i + chunk_size])
 
-            progress_callback(100, 'Export complete')
             return ActionResult(
                 action_name='Export',
                 node=node,
@@ -352,15 +415,12 @@ class Actions:
     def import_node(
             node:       'VfsNode',
             import_path: Path,
-            progress_callback: Callable,
-            log_callback: Callable,
+            task_handle:       TaskHandle
     ) -> ActionResult:
         try:
-            log_callback(f'Importing {import_path.name}...')
-            progress_callback(10, 'Reading file...')
+            task_handle.log_message.emit(f'Importing {import_path.name}...')
             data = import_path.read_bytes()
-            progress_callback(100, 'Import complete')
-            log_callback(f'Loaded {len(data)} bytes from {import_path.name}')
+            task_handle.log_message.emit(f'Loaded {len(data)} bytes from {import_path.name}')
             return ActionResult(
                 action_name='Import and Replace',
                 node=node,
@@ -375,35 +435,36 @@ class Actions:
                 status=ActionStatus.FAILURE, message=str(e)
             )
     
-    ### Container actions
+    ### Handler actions
     @staticmethod
     def run_handler_action(
         handler_class: type[BaseHandler],
         node:          VfsNode,
         action_name:   str,
         navigator:     VfsNavigator,
-        progress_callback: Callable,
-        log_callback:      Callable,
+        task_handle:       TaskHandle,
         **kwargs,
     ) -> ActionResult:
-        '''Unwrap the node, resolve datacenter headers, instantiate the handler,
-        and call execute_action.  All I/O happens on the worker thread.'''
-        log_callback(f'{action_name} on node: {node.name}...')
+        '''
+        Find requested data, 
+        open a handle, 
+        inject handle with dependencies, 
+        execute action with handle
+        '''
+        if action_name != 'Properties':
+            task_handle.log_message.emit(f'Starting {action_name} on node: {node.name}...')
         try:
             node_bytes   = navigator.unwrap_chain(node)
             header_bytes = navigator.resolve_data_from_hid(node.target)
-            if header_bytes:
-                logger.warning(f'Node:{node.name} has datacenter header:{node.target}'
-                f'New header is {len(header_bytes)} bytes long.')
             if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
                 raise TypeError(f'{handler_class.__name__} must be ContainerHandler or LeafHandler.')
             with handler_class(node_bytes, node.parent) as handler:
+                handler.task_handle = task_handle
                 if header_bytes and hasattr(handler, 'datacenter_header'):
                     handler.datacenter_header = header_bytes
-                payload = handler.execute_action(node, action_name, progress_callback, log_callback, **kwargs)
-
-            log_callback(f'{action_name} complete.')
-            logger.debug(f'Action "{action_name}" succeeded for {node.name}')
+                payload = handler.execute_action(node, action_name, **kwargs)
+            if action_name != 'Properties':
+                task_handle.log_message.emit(f'Action "{action_name}" succeeded for {node.name}')
             return ActionResult(
                 action_name=action_name, 
                 node=node, 

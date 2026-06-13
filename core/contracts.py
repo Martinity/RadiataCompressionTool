@@ -4,10 +4,12 @@ from __future__ import annotations
 import io
 import abc
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, TYPE_CHECKING
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import pyqtSignal
 from core.node import VfsNode
+if TYPE_CHECKING:
+    from core.workers import TaskHandle
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -39,6 +41,7 @@ class BaseHandler(abc.ABC):
         self.parent_node = parent_node
         self.handle: io.IOBase | None = None
         self.owns_handle: bool = False
+        self.task_handle: TaskHandle | None = None
 
     def __enter__(self):
         return self
@@ -65,12 +68,23 @@ class BaseHandler(abc.ABC):
                 self.owns_handle = False
                 self.handle = None
 
+    def is_cancelling(self) -> bool:
+        return self.task_handle.is_cancelling() if self.task_handle else False
+
+    def report_progress(self, percentage:int, message: str = '') -> None:
+        if self.task_handle:
+            self.task_handle.progress.emit(percentage, message)
+
+    def log(self, message: str) -> None:
+        if self.task_handle:
+            self.task_handle.log_message.emit(message)
+        else:
+            logger.info(message)
+
     def execute_action(
         self, 
-        node:             'VfsNode', 
+        node:             VfsNode, 
         action_name:       str, 
-        progress_callback: Callable | None = None,
-        log_callback:      Callable | None = None,
         **kwargs,
     ) -> Any:
         '''Execute custom actions registered with the Registry'''
@@ -84,7 +98,6 @@ class BaseHandler(abc.ABC):
         '''Processed data return directly to the editor. 
         Use this for things such as audio decoding, swizzling...etc 
         to keep entensive data processing off Main thread and prevent UI from freezing.
-        Overwrite return type for complexe editors
         '''
         return raw_bytes
     
@@ -97,15 +110,15 @@ class BaseHandler(abc.ABC):
         )
 
     @abc.abstractmethod
-    def get_file_tree(self) -> 'VfsNode':
+    def get_file_tree(self) -> VfsNode:
         '''Return the root VfsNode representing this format's internal structure.'''
  
     @abc.abstractmethod
-    def rebuild_node(self, node: 'VfsNode', staged_nodes: list['VfsNode'], log_callback: Callable) -> bytes | RebuildResult:
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes | RebuildResult:
         '''Return rebuilt container bytes incorporating pending edits. + any dependant node bytes'''
  
     @abc.abstractmethod
-    def get_raw_node(self, node: 'VfsNode') -> bytes:
+    def get_raw_node(self, node: VfsNode) -> bytes:
         '''Return raw original bytes for a node, bypassing any pending edits.'''
 
 ###------------------------------------------ Specialized Handler Contracts ----------------------------------------###
@@ -135,7 +148,7 @@ class PhysicalHandler(BaseHandler):
         node:         VfsNode, 
         staged_nodes: list[VfsNode], 
         output_path:  Path,
-        progress_callback: Callable | None = None,
+        task_handle:  TaskHandle,
         ) -> bool:
         '''Rebuild and write a collection of nodes to disk. Returns True on success'''
 
@@ -164,17 +177,17 @@ class LeafHandler(BaseHandler):
         self.handle: io.BytesIO = io.BytesIO(source_data)
         self.owns_handle = True
 
-    def get_file_tree(self) -> 'VfsNode':
+    def get_file_tree(self) -> VfsNode:
         '''Leaf nodes do not contain children'''
         return VfsNode(name='raw_data')
     
-    def get_raw_node(self, node: 'VfsNode') -> bytes:
+    def get_raw_node(self, node: VfsNode) -> bytes:
         self.handle.seek(0)
         return self.handle.read()
     
-    def rebuild_node(self, node: 'VfsNode', staged_nodes: list['VfsNode'], log_callback: Callable) -> bytes:
-        if node in staged_nodes and node.pending_data:
-            log_callback(f'Node has been modified. Original size:{node.size} New size:{len(node.pending_data)}')
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
+        if node in staged_nodes and node.pending_data and self.task_handle:
+            self.task_handle.log_message.emit(f'Node has been modified. Original size:{node.size} New size:{len(node.pending_data)}')
             return node.pending_data
         self.handle.seek(0)
         return self.handle.read()
@@ -291,7 +304,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     def reject_changes_applied(self, reason: str) -> None:
         '''Called by dispatcher when handler failed to decode editor data'''
         self._pending_data = None
-        logger.error(f'{self.__class__.__name__} failed to apply changes: {reason}')
+        self.show_error(reason)
 
     def mark_clean(self) -> None:
         '''Called by session when state is saved successfully'''
@@ -314,9 +327,9 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         '''Get node status'''
         return self._is_dirty
     
-    def show_load_error(self, message: str) -> None:
-        '''Called when prepare_editor fails. Ovverride for custom output.'''
-        logger.error(f'{self.__class__.__name__}: load error... {message}')
+    def show_error(self, message: str) -> None:
+        '''Called when prepare_editor fails. Override for custom UI output.'''
+        logger.error(f'{self.__class__.__name__}: {message}')
 
 ###----------------------------------- Read Only Editors ----------------------------------###
 

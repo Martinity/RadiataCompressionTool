@@ -248,7 +248,7 @@ class FisEditorWidget(BaseEditor):
         self._image_label.setText('No texture loaded')
 
         self._image_label.editing_started.connect(self._on_editing_started)
-        self._image_label.painted.connect(lambda: self._on_painted)
+        self._image_label.painted.connect(self._on_painted)
 
         area = QScrollArea()
         area.setWidget(self._image_label)
@@ -338,11 +338,12 @@ class FisEditorWidget(BaseEditor):
     def _on_editing_started(self) -> None:
         if self.img:
             self.history.push_change(self.img)
+            self._update_dirty_state()
 
     def _on_painted(self) -> None:
         if self.img:
             self.history.push_change(self.img)
-        self._update_dirty_state()
+            self._update_dirty_state()
 
     def _on_palette_context(self, pos: QPoint) -> None:
         item = self._palette_list.itemAt(pos)
@@ -416,7 +417,7 @@ class FisEditorWidget(BaseEditor):
             self._image_label.setText(f'Error loading texture: Got {type(result)} expected "FisEditorPayload"')
 
     def _populate_ui(self, data: bytes = b'') -> None:
-        if not self.img or not self.info:
+        if not self.img or not self.info or not self.node:
             return
         self.history.initialize(self.img)
         self._populate_palette()
@@ -432,10 +433,6 @@ class FisEditorWidget(BaseEditor):
         if not self.is_dirty() or not self.img or not self.raw_fis:
             return self._original_data
         return (self.img, self.raw_fis)
-
-    def show_load_error(self, message: str) -> None:
-        self._show_error(message)
-        return 
 
 ###------------------------------------ Display Helpers ---------------------------------------------###
 

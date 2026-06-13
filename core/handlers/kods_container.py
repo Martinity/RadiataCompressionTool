@@ -3,7 +3,7 @@ from __future__ import annotations
 import struct
 from io import BytesIO
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from core.contracts import ContainerHandler, RebuildResult
 from core.extension_overrides import generate_ext_overrides
@@ -13,7 +13,6 @@ from core.workers import ActionDef, ActionType
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
-
 
 ###-------------------------------------------- KodsHandler -------------------------------------------###
 
@@ -90,8 +89,10 @@ class KodsHandler(ContainerHandler):
 
     ###------------------------------------- Rebuild ---------------------------------------------------###
 
-    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode], log_callback: Callable) -> RebuildResult:
-        '''Routes to the correct rebuild strategy based on node state'''        
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> RebuildResult:
+        '''Routes to the correct rebuild strategy based on node state'''
+        if not self.task_handle:
+            raise RuntimeError(f'No active Task Handle for {self.__class__.__name__}')     
         is_internal = not bool(self.datacenter_header)
         # Check original structure
         self.header_view  = (
@@ -108,7 +109,7 @@ class KodsHandler(ContainerHandler):
         # Sector align payload
         padding = (-len(payload)) & (0x800 - 1)
         payload += b'\x00' * padding
-        log_callback(f'{node.hierarchical_id} Rebuilt Kods Archive. Original size:{node.size} New size:{len(payload)}')
+        self.task_handle.log_message.emit(f'{node.hierarchical_id} Rebuilt Kods Archive. Original size:{node.size} New size:{len(payload)}')
         return RebuildResult(payload, header)
 
     def build_payload(self, children: list[VfsNode]) -> tuple[bytes, bytes]:
@@ -184,9 +185,8 @@ class KodsHandler(ContainerHandler):
         lines.append("")
         return "\n".join(lines)
             
-    def execute_action(self, node: VfsNode, action_name: str, progress_callback, log_callback, **kwargs) -> Any:
+    def execute_action(self, node: VfsNode, action_name: str, **kwargs) -> Any:
         if action_name == 'Unpack':
-            log_callback(f'Unpacking {node.name}...') if log_callback else None
             return self.get_file_tree()
         elif action_name == 'Properties':
             return self.get_properties()
@@ -231,17 +231,14 @@ class KodsArchiver:
         offsets = self._get_offsets(header, header_obj)
         kods_map: list[self.FileNodeMeta] = []
         for i, offset in enumerate(offsets): # Get Basic Segment metadata (missing size)
-            is_valid = (offset != -1)
+            is_valid = offset != -1
             if is_valid and is_internal: 
                 is_valid = offset < self.payload_length
             node_metadata = self.FileNodeMeta(i, offset, 0, is_valid)
             kods_map.append(node_metadata)
 
         valid_nodes = [node for node in kods_map if node.is_valid]
-        if is_internal:
-            valid_nodes.append(self.FileNodeMeta(-1, -1, self.payload_length, False)) # EOF sentinel
-        else: # Boundary not yet known for datacenter headers 1-9
-            valid_nodes.append(self.FileNodeMeta(-1, -1, -1, True))
+        valid_nodes.append(self.FileNodeMeta(-1, self.payload_length, -1, False)) # EOF sentinel
 
         for current_node, next_node in zip(valid_nodes, valid_nodes[1:]): # Calculate valid node sizes
             if current_node.offset == next_node.offset:
@@ -307,4 +304,5 @@ class KodsArchiver:
             else:
                 offset = header_obj.payload_offset + (raw_offset << header_obj.shift)
             offsets.append(offset)
+        # offsets.append(header_obj.payload_offset + (len(self.payload_view) << header_obj.shift))
         return offsets

@@ -5,7 +5,7 @@ from core.contracts import ContainerHandler
 from core.workers import ActionDef, ActionType
 from core.node import VfsNode
 
-from typing import Any, Callable
+from typing import Any
 
 from core.extension_overrides import generate_ext_overrides
 from core.registry import Registry
@@ -62,27 +62,25 @@ class ChainHandler(ContainerHandler):
         logger.info(f'Successfully extracted FIS from {fis_offset}, size: {len(fis_payload)}')
         return root
 
-    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode], log_callback: Callable) -> bytes:
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
+        if not self.task_handle:
+            raise RuntimeError(f'No Task Handle for {self.__class__.__name__}')
         fis_offset = int.from_bytes(self.data[0x18:0x1B], 'little') + 0x40
         new_node = bytearray(self.data[:fis_offset])
         for child in node.children:
-            log_callback(f'Rebuilding FPS with {len(node.children)} children. Old texture size:{len(self.data[fis_offset:])}')
+            self.task_handle.log_message.emit(f'Rebuilding FPS with {len(node.children)} children. Old texture size:{len(self.data[fis_offset:])}')
             if child.pending_data:
                 new_node.extend(child.pending_data)
-                log_callback(f'{node.hierarchical_id} New FPS container built with new texture size:{len(child.pending_data)}. Original size:{node.size} New size:{len(new_node)}')
+                self.task_handle.log_message.emit(f'{node.hierarchical_id} New FPS container built with new texture size:{len(child.pending_data)}. Original size:{node.size} New size:{len(new_node)}')
                 return bytes(new_node)
             else:
-                log_callback(f'No FPS changes size stays the same: {node.size}={len(self.data)}')
+                self.task_handle.log_message.emit(f'No FPS changes size stays the same: {node.size}={len(self.data)}')
                 return bytes(self.data)
 
-
-
-
-    
     def get_properties(self, node: VfsNode):
         return 'Not yet Implemented'
 
-    def execute_action(self, node: VfsNode, action_name: str, progress_callback: Callable[[int, str], None], log_callback: Callable[[str], None], **kwargs) -> Any:
+    def execute_action(self, node: VfsNode, action_name: str, **kwargs) -> Any:
         if action_name == 'Extract FIS':
             return self.get_file_tree()
         elif action_name == 'Properties':

@@ -5,7 +5,7 @@ from core.contracts import ContainerHandler
 from core.extension_overrides import generate_ext_overrides
 from core.node import VfsNode
 from core.workers import ActionDef, ActionType
-from typing import Optional, Any, Callable
+from typing import Optional, Any
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -97,11 +97,13 @@ class CompressorHandler(ContainerHandler):
         compressor = RadiCompressor(compressed_view)
         return compressor.decompress()
 
-    def rebuild_node(self, root: VfsNode, staged_nodes: list[VfsNode], log_callback: Callable) -> bytes:
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
         '''Compress the bytes back to SLZ/SLE'''
+        if not self.task_handle:
+            raise RuntimeError(f'No active task manager for {self.__class__.__name__}.')
         new_compressed_file = b''
-        for i, child in enumerate(root.children):
-            is_final_payload = i == len(root.children) - 1
+        for i, child in enumerate(node.children):
+            is_final_payload = i == len(node.children) - 1
             if child in staged_nodes and child.compressed_header: # Modified child
                 if not child.pending_data:
                     continue
@@ -127,7 +129,7 @@ class CompressorHandler(ContainerHandler):
                     original_chunk[12:16] = (0).to_bytes(4, 'little')
                 new_compressed_file += original_chunk
 
-        log_callback(f'{root.hierarchical_id} Rebuilt SLZ container. Original size:{len(self.raw_source)} New size:{len(new_compressed_file)}')
+        self.task_handle.log_message.emit(f'{node.hierarchical_id} Rebuilt SLZ container. Original size:{len(self.raw_source)} New size:{len(new_compressed_file)}')
         return new_compressed_file
 
     def get_properties(self, node: VfsNode) -> str:
@@ -159,10 +161,8 @@ class CompressorHandler(ContainerHandler):
                 lines.append(f"Offset to next chained file: {next_file_str}")
         return "\n".join(lines)
 
-    def execute_action(self, node: VfsNode, action_name: str, progress_callback, log_callback, **kwargs) -> Optional[Any]:
+    def execute_action(self, node: VfsNode, action_name: str, **kwargs) -> Optional[Any]:
         if action_name == 'Decompress':
-            if log_callback:
-                log_callback(f'Decompressed {node.name}...')
             return self.get_file_tree()
         elif action_name == 'Properties':
             return self.get_properties(node)

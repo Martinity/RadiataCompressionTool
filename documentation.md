@@ -517,10 +517,7 @@ StagingPage → tracker.confirm_and_rebuild()
 
 ## Current TODO list:
 
-- Standardize saving mechanics for BaseEditors -> `/ui/ui_core.py` & `/ui/editors/...`
-- Fix clearing all caches when changing ISOs. I think the editor state needs to be cleared opennig the same ID in another ISO causes crash.
-- Fix editor dirty state marking. Still results in save in flight unintentionally when saving.
-
+- mmap over bytes default? stops the copy to memory on handler load, keeps the data on disk
 - Streamline ease of use for editor contract
 - write a user guide for plugins
 - Fully deprecate the get_handler_profile in place of get_handler_profiles? If needed -> `/core/...` & `/ui/ui_core.py`
@@ -529,7 +526,6 @@ StagingPage → tracker.confirm_and_rebuild()
 
 ## Future TODO list:
 
-- Fix background task bailout/timeout, if spammed infinite loops -> `/core/workers.py`
 - FPS chain unpacking needs to be reevaluated since fps heads may contain other fps chains within -> `/core/handlers/chain_handler.py`
 - FIS editor decoding CLUT shifts 7F to 80, does it matter? -> `/core/handlers/fis_leaf.py`
 - Hex editor toggle for bottom values to display in hex or dec -> `/ui/editors/hex_editor.py`
@@ -539,3 +535,9 @@ StagingPage → tracker.confirm_and_rebuild()
 - Icons? -> `/ui/...`
 - seqw handler -> `/core/handler/seqw_handler.py`
 - Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
+
+
+- Editor state/saving management.
+- Handler/Editor handshaking simplification.
+- User facing polish (logging, UI, legend...)
+- Bug fixes

@@ -1,9 +1,10 @@
-from ui.ui_core import MainWindow
-from core.dispatcher import Dispatcher
 import sys
 from PyQt6.QtWidgets import QApplication
+from core.dispatcher import Dispatcher
 from core.registry import discover_all, Registry
 from ui.theme_manager import ThemeManager
+from ui.ui_core import MainWindow
+
 from ui.logger import setup_logging
 import logging
 logger = logging.getLogger('radiata')

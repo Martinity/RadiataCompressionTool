@@ -5,13 +5,16 @@ import struct
 import xxhash
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
+
 from core.name_overrides import generate_name_overrides
 from core.extension_overrides import generate_ext_overrides
 from core.node import VfsNode
 from core.contracts import PhysicalHandler 
 from core.registry import Registry
+from core.workers import TaskHandle
 import logging
+
 logger = logging.getLogger(f'radiata.{__name__}')
 
 _VD_SECTOR        = 16  # Primary Volume Descriptor sector
@@ -190,7 +193,7 @@ class IsoHandler(PhysicalHandler):
         node:              VfsNode, 
         staged_nodes:      list[VfsNode], 
         output_path:       Path, 
-        progress_callback: Callable[[int, str], None] | None = None
+        task_handle:       TaskHandle,
     ) -> bool:
         '''Rebuilds the ISO, preserving physical ordering, aliasing, and system file integrity.'''
         if output_path.resolve() == self.source.resolve():
@@ -199,8 +202,7 @@ class IsoHandler(PhysicalHandler):
         staged_set = set(staged_nodes)
         try:
             with open(self.path, 'rb') as src, open(output_path, 'wb') as dst: # open private handle
-                if progress_callback:
-                    progress_callback(0, 'Initialized ISO rebuild...')
+                task_handle.progress.emit(0, 'Initialized ISO rebuild...')
                 toc_lba = self.params.toc_offset // self.params.sector_size
                 toc_size = self.params.total_entries * 3 * 4
                 # Copy pre-TOC
@@ -212,6 +214,7 @@ class IsoHandler(PhysicalHandler):
                 new_lba_map: dict[VfsNode, int] = {}
                 current_offset = self.params.toc_offset + toc_size
                 for idx, child in enumerate(node.children):
+                    task_handle.checkpoint()
                     orig_lba = self.toc[idx]['lba'] if idx < len(self.toc) else 0
                     # TOC self-reference, built in _build_toc
                     if idx == 0:
@@ -241,9 +244,9 @@ class IsoHandler(PhysicalHandler):
                         dst.write(b'\x00' * padding)
                     current_offset += len(data) + padding
 
-                    if progress_callback and idx % 50 == 0:
+                    if idx % 50 == 0:
                         pct = int((idx / self.params.total_entries) * 90)
-                        progress_callback(pct, f'Writing file {idx}/{self.params.total_entries}')
+                        task_handle.progress.emit(pct, f'Writing file {idx}/{self.params.total_entries}')
                 # Verify the TOC
                 new_toc = self._build_toc(node.children, staged_set, new_lba_map)
                 new_sig = struct.unpack_from('<I', new_toc, 0)[0]
@@ -257,9 +260,7 @@ class IsoHandler(PhysicalHandler):
                 dst.seek(_VD_SECTOR * self.params.sector_size + _VD_VOL_SPACE_OFF)
                 dst.write(total_sectors.to_bytes(4, 'little') + total_sectors.to_bytes(4, 'big'))
             
-            if progress_callback:
-                progress_callback(100, 'Rebuild complete!')
-            
+            task_handle.progress.emit(100, 'Rebuild complete!')   
             return True
 
         except Exception as e:
@@ -314,13 +315,14 @@ class IsoHandler(PhysicalHandler):
 
 ###---------------------------------- Utility -------------------------------------------###
  
-    def verify_iso_integrity(self) -> str:
+    def verify_iso_integrity(self, task_handle: TaskHandle) -> str:
         '''Verify radiata iso. Check what version of the disk is running.'''
         logger.debug('Verifying ISO integrity')
         # Check hash against known hashes
         with open(self.path, 'rb') as fh:
             hasher = xxhash.xxh128()
             while chunk := fh.read(16 * 1024 * 1024): # read in 16MB chunks
+                task_handle.checkpoint()
                 hasher.update(chunk)
         digest = hasher.hexdigest()
         build = _KNOWN_BUILDS.get(digest, f'Modified/Unknown: {digest}')

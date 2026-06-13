@@ -283,7 +283,7 @@ class WorkspaceWidget(QWidget):
         self.status_label.setText(f'{count} file(s) modified and ready for review')
 
     def append_log(self, message: str) -> None:
-        self.log_console.append_log(f'{message} -log_callback', 1)
+        self.log_console.append_log(f'{message}', 1)
 
 ###-------------------------------------------- Workspace Signals -------------------------###
 
@@ -1027,6 +1027,9 @@ class EditorPage(QWidget):
         self._set_toolbar_enabled(False)
 
     def _deconstruct_old_session(self) -> None:
+        if self._current_session:
+            self._current_session.state_changed_callback = None
+            self._current_session.cancel()
         old_editor = self._current_session.editor if self._current_session else None
         if not old_editor:
             return
@@ -1097,7 +1100,7 @@ class EditorPage(QWidget):
                 session.editor.cleanup()
                 self.back_requested.emit()
             return
-        if session.state == ('ready', 'error'):
+        if session.state in ('ready', 'error'):
             editor = session.editor
             if editor.is_mutable and editor.is_dirty():
                 reply = QMessageBox.question(

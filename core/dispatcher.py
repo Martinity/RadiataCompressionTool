@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
-from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskSignals
+from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle
 from core.navigator import VfsNavigator
 from core.descriptor_manager import NodeDescriptorStore
 from PyQt6.QtCore import pyqtSignal, QObject, Qt
@@ -102,14 +102,14 @@ class Dispatcher(QObject):
             return []
         
         source.expansion_pending = True
-        signals = self.task_coordinator.start_task(
+        task_handle = self.task_coordinator.start_task(
             Actions.dispatch,
             action_def,
             source,
             self.nav,
         )
-        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        signals.finished.connect(self._on_action_complete)
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.finished.connect(self._on_action_complete)
         return [] # signal populates the tree ^^^
     
     def get_node_data(self, node: VfsNode) -> bytes:
@@ -131,7 +131,7 @@ class Dispatcher(QObject):
         '''Pushes changes to the tracker.
         If data is not bytes, dispatches to a background worker to decode the payload
         Notifies the editor when finished'''
-        if isinstance(data, bytes):
+        if isinstance(data, bytes): # Bytes type payload passthrough
             original = self.get_node_data(node) if node not in self.tracker._originals else b''
             self.tracker.mark_modified(node, data, original)
             logger.info(f'Edit applied directly: {node.name}')
@@ -148,17 +148,23 @@ class Dispatcher(QObject):
             if editor:
                 editor.reject_changes_applied(error_msg)
             return
-        signals = self.task_coordinator.start_task(
+        # Start task
+        task_handle = self.task_coordinator.start_task(
             Actions.decode_editor_data,
             handler_class,
             node,
             data
         )
-        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        signals.finished.connect(
+        # Link task to editor
+        session = getattr(editor, '_session', None)
+        if session and hasattr(session, 'set_active_task'):
+            session.set_active_task(task_handle)
+        # Connect signals
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.finished.connect(
             lambda success, result: self._on_decode_done(success, result, node, editor))
 
-    def open_editor(self, node: VfsNode, editor: BaseEditor) -> TaskSignals | None:
+    def open_editor(self, node: VfsNode, editor: BaseEditor) -> TaskHandle | None:
         '''
         Start background data preparation for an editor
         
@@ -181,15 +187,20 @@ class Dispatcher(QObject):
             f'editor={editor.__class__.__name__}'
             f'handler={handler_class.__name__}'
         )
-
-        signals = self.task_coordinator.start_task(
+        # Start task
+        task_handle = self.task_coordinator.start_task(
             Actions.prepare_editor,
             handler_class,
             node,
             self.nav,
         )
-        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        return signals
+        # Link task to editor
+        session = getattr(editor, '_session', None)
+        if session and hasattr(session, 'set_active_task'):
+            session.set_active_task(task_handle)
+        # Connect signals
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        return task_handle
 
     def execute_node_action(self, node: VfsNode, action_name: str, **kwargs) -> None:
         '''Route action through Actions.dispatch. '''
@@ -213,15 +224,15 @@ class Dispatcher(QObject):
                 message=f'{node.name} has already been expanded previously. Duplicate expansion cancelled.'
             ))
             return
-        signals = self.task_coordinator.start_task(
+        task_handle = self.task_coordinator.start_task(
             Actions.dispatch,
             action_def,
             node, 
             self.nav,
             **kwargs
             )
-        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        signals.finished.connect(self._on_action_complete)
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.finished.connect(self._on_action_complete)
 
     def start_iso_rebuild(self, output_path: Path) -> None:
         if not self.active_handler or not self.vfs or not self.nav:
@@ -232,7 +243,7 @@ class Dispatcher(QObject):
         staged_nodes = list(self.tracker.rebuild_queue)
         self.rebuild_log.emit(f'Preparing to build {len(staged_nodes)} staged file(s)...')
 
-        signals = self.task_coordinator.start_task(
+        task_handle = self.task_coordinator.start_task(
             Actions.rebuild_iso,
             self.active_handler,
             self.vfs.root,
@@ -240,9 +251,9 @@ class Dispatcher(QObject):
             staged_nodes,
             output_path,
         )
-        signals.progress.connect(lambda pct, _msg: self.rebuild_progress.emit(pct))
-        signals.log_message.connect(self.rebuild_log.emit)
-        signals.finished.connect(self._on_rebuild_finished)
+        task_handle.progress.connect(lambda pct, _msg: self.rebuild_progress.emit(pct))
+        task_handle.log_message.connect(self.rebuild_log.emit)
+        task_handle.finished.connect(self._on_rebuild_finished)
 
     def close(self) -> None:
         '''For exiting the dispatch'''
@@ -280,9 +291,9 @@ class Dispatcher(QObject):
                 self._descriptor_store.enrich(child)
         logger.info(f'Workspace initialized with Root: {handler_class.__name__}')
 
-        signals = self.task_coordinator.start_task(Actions.verify_iso, handler)
-        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        signals.finished.connect(self._on_iso_verified)
+        task_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.finished.connect(self._on_iso_verified)
 
         return [root]
 
@@ -328,14 +339,14 @@ class Dispatcher(QObject):
             wait_event.set()
         
         logger.debug('Starting expansion background task')
-        signals = self.task_coordinator.start_task(
+        task_handle = self.task_coordinator.start_task(
             Actions.dispatch,
             action_def,
             node,
             self.nav,
         )
-        signals.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        signals.finished.connect(_on_expand_done)
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.finished.connect(_on_expand_done)
         
     def _on_rebuild_finished(self, success: bool, result: Any) -> None:
         '''Verify type of result and pack signal'''

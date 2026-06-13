@@ -3,12 +3,10 @@ I did not need to analyse any MIPS to reverse this format at this surface level'
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from core.contracts import ContainerHandler
 from core.workers import ActionDef, ActionType
 from core.node import VfsNode
-
-from typing import Any, Callable
-
 from core.extension_overrides import generate_ext_overrides
 from core.registry import Registry
 
@@ -76,11 +74,14 @@ class ChainHandler(ContainerHandler):
         logger.info(f'Successfully unpacked {len(root.children)} nodes from chain')
         return root
 
-    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode], log_callback: Callable) -> bytes:
+    def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
+        if not self.task_handle:
+            raise RuntimeError(f'No background task manager active for {self}')
         staged_set = set(staged_nodes)
         previous_size = 0
         new_node = bytearray()
         for i, child in enumerate(node.children): # Calculate new header and copy payload
+            self.task_handle.checkpoint()
             is_last = (i == len(node.children) - 1)
             payload = (
                 child.pending_data[16:]
@@ -91,13 +92,13 @@ class ChainHandler(ContainerHandler):
             new_node += payload
 
             previous_size = len(payload)
-        log_callback(f'{node.hierarchical_id} New spf chain built . Original size:{node.size} New size:{len(new_node)}')
-        return new_node
+        self.task_handle.log_message.emit(f'{node.hierarchical_id} New spf chain built . Original size:{node.size} New size:{len(new_node)}')
+        return bytes(new_node)
     
     def get_properties(self, node: VfsNode):
         return 'Not yet Implemented'
 
-    def execute_action(self, node: VfsNode, action_name: str, progress_callback: Callable[[int, str], None], log_callback: Callable[[str], None], **kwargs) -> Any:
+    def execute_action(self, node: VfsNode, action_name: str, **kwargs) -> Any:
         if action_name == 'Deconstruct Chain':
             return self.get_file_tree()
         elif action_name == 'Properties':

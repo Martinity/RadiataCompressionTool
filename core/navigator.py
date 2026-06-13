@@ -45,12 +45,15 @@ class VfsNavigator:
 
         while current_depth < 20:
             snapshot = self.vfs.snapshot_hids([target]) # Get VFS snapshot
-            if not snapshot.unresolved: # expand first if needed
+            if not snapshot.unresolved: # target is already expanded
                 break
             nearest = self.vfs.find_nearest_ancestor(target)
-            current_depth = len(nearest.hierarchical_id) if nearest else 0
+            if not nearest:
+                break
+            current_depth = len(nearest.hierarchical_id)
             if current_depth <= previous_depth and nearest:
                 logger.error(f'Expansion stalled at {nearest.hierarchical_id_str}. Failed to reach target: {target}')
+                break
             previous_depth = current_depth
             self._expand_pending(snapshot.unresolved)
 
@@ -154,7 +157,6 @@ class VfsNavigator:
         Lock never needs to be held here.
         '''
         ancestors_needed: dict[tuple[int,...], VfsNode] = {}
-        safety_count = 20
         for hid in unresolved: # Deduplicate
             ancestor = self.vfs.find_nearest_ancestor(hid)
             if not ancestor:
@@ -164,6 +166,7 @@ class VfsNavigator:
             if key not in ancestors_needed:
                 ancestors_needed[key] = ancestor
 
+        safety_count = 0
         for ancestor in ancestors_needed.values():
             if ancestor.expansion_pending and ancestor._expansion_event: # Expansion in progress
                 logger.debug(f'Waiting for in-progress expansion of ID: {ancestor.hierarchical_id_str}')

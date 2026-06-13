@@ -9,7 +9,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, NamedTuple
 
 from PyQt6.QtGui import QImage, qRgba, qRed, qBlue, qGreen, qAlpha
 
@@ -365,7 +365,7 @@ class FisHandler(LeafHandler):
                 pixel_data = _swizzle_psmt8(pixel_data, w, h)
                 
         elif info.bpp == 4:
-            pixel_data = _pack_4bpp(indices, w, h)
+            pixel_data = _pack_4bpp(bytes(indices), w, h)
             if info.swizzled:
                 # 4bpp swizzling maps over packed memory, so width is halved
                 pixel_data = _swizzle_psmt8(pixel_data, w // 2, h) 
@@ -411,10 +411,10 @@ class FisHandler(LeafHandler):
         self,
         node:        VfsNode,
         action_name: str,
-        progress_callback: Callable,
-        log_callback:      Callable,
         **kwargs,
     ) -> Any:
+        if not self.task_handle:
+            raise RuntimeError(f'No active task handle for {self.__class__.__name__}')
         if action_name == 'Properties':
             try:
                 return parse_fis(self._raw).summary()
@@ -425,14 +425,11 @@ class FisHandler(LeafHandler):
             if not file_path:
                 return 'No output path provided'
             try:
-                log_callback(f'Decoding {node.name} for PNG export...')
-                progress_callback(30, 'Decoding texture...')
+                logger.info(f'Decoding {node.name} for PNG export...')
                 img, info = decode_fis(self._raw)
-                progress_callback(70, 'Writing PNG...')
                 if not img.save(str(file_path), 'PNG'):
                     raise RuntimeError('QImage.save() returned False')
-                log_callback(f'Exported {info.width}×{info.height} {info.psm_name} to {file_path.name}')
-                progress_callback(100, 'Export complete')
+                logger.info(f'Exported {info.width}×{info.height} {info.psm_name} to {file_path.name}')
                 return f'Saved to {file_path.name}'
             except Exception as e:
                 logger.error(f'FIS PNG export failed: {e}', exc_info=True)
