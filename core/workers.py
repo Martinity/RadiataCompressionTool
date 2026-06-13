@@ -337,14 +337,14 @@ class Actions:
             task_handle.progress.emit(5, 'Starting Pass 1...')
             task_handle.log_message.emit('Precomputing Datacenter...')
 
-            extra_targets: list[VfsNode] = navigator.precompute_datacenter(staged_nodes, task_handle.log_message.emit)
+            extra_targets: list[VfsNode] = navigator.precompute_datacenter(staged_nodes, task_handle)
             all_staged:    list[VfsNode] = list(staged_nodes) + extra_targets
             task_handle.log_message.emit(f'Pass 1 complete - {len(extra_targets)} datacenter target(s) cached and queued')
 
             task_handle.progress.emit(15, 'Starting Pass2...')
             task_handle.log_message.emit('Performing VFS rollup...')
 
-            physical_staged_nodes = navigator.rollup_nodes(all_staged, task_handle.log_message.emit)
+            physical_staged_nodes = navigator.rollup_nodes(all_staged, task_handle)
             task_handle.progress.emit(40, 'Writing sectors to disk...')
             success = handler.rebuild_node(root_node, physical_staged_nodes, output_path, task_handle)
 

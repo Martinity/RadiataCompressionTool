@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import threading
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 from core.node import VfsNode, VfsManager
 from core.registry import Registry
 from core.contracts import ContainerHandler, RebuildResult
+if TYPE_CHECKING:
+    from core.workers import TaskHandle
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -63,29 +65,30 @@ class VfsNavigator:
             return None
         return self.read(node)
 
-    def rollup_nodes(self, staged_nodes: list[VfsNode], log_callback: Callable) -> list[VfsNode]:
+    def rollup_nodes(self, staged_nodes: list[VfsNode], task_handle: 'TaskHandle') -> list[VfsNode]:
         '''For Rebuilding the VFS from deepest layer to physical (children -> parent)'''
-        log_callback('Initiating virtual node roll-up...')
+        task_handle.log_message.emit('Initiating virtual node roll-up...')
         current_queue: set[VfsNode] = set(staged_nodes)
         while not all(node.is_physical for node in current_queue): # deepest -> physical layer
+            task_handle.checkpoint()
             max_depth:     int = max(len(node.hierarchical_id) for node in current_queue)
             deepest_nodes: list[VfsNode] = [n for n in current_queue if len(n.hierarchical_id) == max_depth]
             parent_map:    dict[VfsNode, list[VfsNode]] = {}
 
             for node in deepest_nodes: # build the parent-child map
                 if node.parent is None:
-                    log_callback(f'Cannot roll up {node.name}; No parent node.')
+                    task_handle.log_message.emit(f'Cannot roll up {node.name}; No parent node.')
                     continue
                 parent_map.setdefault(node.parent, []).append(node)
 
             for parent, modified_children in parent_map.items(): # build the parents
                 if parent.pending_data and parent not in modified_children:
                     current_queue.add(parent)
-                    log_callback(f'{parent.name} has pre-computed payload - skipping rebuild')
+                    task_handle.log_message.emit(f'{parent.name} has pre-computed payload - skipping rebuild')
                     continue
                 handler_class = Registry.get_handler(parent)
                 if not handler_class:
-                    log_callback(f'No handler found for {parent.name}')
+                    task_handle.log_message.emit(f'No handler found for {parent.name}')
                     continue
                 if not issubclass(handler_class, ContainerHandler):
                     logger.error(f'Subcontract {handler_class.__name__} must be ContainerHandler for virtual tree navigation.')
@@ -99,54 +102,51 @@ class VfsNavigator:
                     else:
                         header_bytes = self.resolve_data_from_hid(parent.target)
                 with handler_class(parent_bytes, parent.parent) as handler:
+                    handler.task_handle = task_handle
                     if header_bytes is not None and hasattr(handler, 'datacenter_header'):
                         handler.datacenter_header = header_bytes
-                    result = handler.rebuild_node(parent, modified_children, log_callback)
+                    result = handler.rebuild_node(parent, modified_children)
                     if isinstance(result, RebuildResult): # Check for complexe build results
                         payload, target_data = result
                     else:
                         payload, target_data = result, None
                     parent.pending_data = payload
                     if target_data and parent.target: # Datacenter rebuild
-                        log_callback(
-                            f'WARNING: unexpected target rebuild for {parent.target} - '
-                            'datacenter rebuilds should be cached by precompute_datacenter'
-                        )
                         self.resolve_data_from_hid(parent.target) # Ensure target is in VFS
                         target_node = self.vfs.get_node_by_id(parent.target)
                         if target_node:
                             target_node.pending_data = target_data
                             current_queue.add(target_node)
-                            log_callback(f'Datacenter modification queued: {parent.name} -> {parent.target}')
+                            task_handle.log_message.emit(f'Datacenter modification queued: {parent.name} -> {parent.target}')
                         else:
-                            log_callback(f'CRITICAL: Could not find target node {parent.target} in VFS. Target may not exist')
+                            task_handle.log_message.emit(f'CRITICAL: Could not find target node {parent.target} in VFS. Target may not exist')
                     current_queue.add(parent)
 
             for node in deepest_nodes: # update the queue
                 current_queue.discard(node)
 
-        log_callback('Virtual node roll-up complete')
+        task_handle.log_message.emit('Virtual node roll-up complete')
         return list(current_queue)
 
-    def precompute_datacenter(self, staged_nodes: list[VfsNode], log_callback: Callable) -> list[VfsNode]:
+    def precompute_datacenter(self, staged_nodes: list[VfsNode], task_handle: 'TaskHandle') -> list[VfsNode]:
         '''Cache payload/headers that are not located sequentially on disk'''
         nonseq_nodes: set[VfsNode] = set()
         for node in staged_nodes:
             current_node = node
             while current_node and not current_node.is_physical:
-                log_callback(f'Node {current_node.name} has target:{current_node.target}')
+                task_handle.log_message.emit(f'Node {current_node.name} has target:{current_node.target}')
                 if current_node.target and current_node.parent:
-                    log_callback(f'Sending {node.hierarchical_id} to cached roll-up')
+                    task_handle.log_message.emit(f'Sending {node.hierarchical_id} to cached roll-up')
                     nonseq_nodes.add(node)
                     break
                 current_node = current_node.parent
 
         if not nonseq_nodes:
-            log_callback('No nonsequential files. Nothing to precompute.')
+            task_handle.log_message.emit('No nonsequential files. Nothing to precompute.')
             return []
 
-        log_callback(f'Sending {len(nonseq_nodes)} nodes to cached roll-up')
-        return self.rollup_nodes(list(nonseq_nodes), log_callback)
+        task_handle.log_message.emit(f'Sending {len(nonseq_nodes)} nodes to cached roll-up')
+        return self.rollup_nodes(list(nonseq_nodes), task_handle)
 
     ###---------------------- helpers -------------------------###
 
@@ -220,8 +220,6 @@ class VfsNavigator:
                 continue
             with handler_class(current_bytes, container) as handler:
                 current_bytes = handler.get_raw_node(target)
-
-        logger.debug(f'Found a match {current_bytes[:64]}:64')
         return current_bytes
 
     ###---------------- Expansion Detection ---------------###

@@ -523,6 +523,7 @@ StagingPage → tracker.confirm_and_rebuild()
 - Fully deprecate the get_handler_profile in place of get_handler_profiles? If needed -> `/core/...` & `/ui/ui_core.py`
 - Fix search filtering for 'tag:' and 'desc:' -> `/ui/tree_model.py`
 - Fix HexEditor font not scalling the refresh automatically. To fix '...' need to change zoom currently.
+- Implement ghost nodes so you can search for any node that is registered in descriptor.json
 
 ## Future TODO list:
 
