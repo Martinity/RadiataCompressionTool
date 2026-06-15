@@ -3504,9 +3504,9 @@
   "1207.0.1.1.0.19.0": {
     "description": "",
     "tags": [
-      "Unknown"
+      "Texture"
     ],
-    "title": ""
+    "title": "Default Jack body texture"
   },
   "1207.0.1.1.0.2": {
     "description": "",
@@ -15363,6 +15363,13 @@
     ],
     "title": ""
   },
+  "1238.9": {
+    "description": "",
+    "tags": [
+      "Unknown"
+    ],
+    "title": ""
+  },
   "1239": {
     "description": "",
     "tags": [
@@ -15627,6 +15634,13 @@
       2,
       0,
       349
+    ],
+    "title": ""
+  },
+  "1240.9": {
+    "description": "",
+    "tags": [
+      "Unknown"
     ],
     "title": ""
   },

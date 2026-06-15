@@ -4,9 +4,8 @@ SearchModel - QAbstractListModel, the search list. List due to recursive hierarc
 TreeProxyModel - QSortFilterProxyModel, only gets applied to the tree. Search is hardcoded to avoid hidden nodes'''
 from __future__ import annotations
 
-
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel, QAbstractListModel
 from PyQt6.QtGui import QColor
 from core.node import VfsManager
@@ -181,15 +180,18 @@ _RANK_DESCRIPTION = 10
 
 @dataclass
 class _SearchEntry:
-    '''Stores: node, name, hid, tokens, base_rank, tags. Calculates score.'''
-    node:       VfsNode
-    name_lower: str
+    '''Stores: node*, name, hid, tokens, base_rank, tags. Calculates score.'''
+    node:       VfsNode | None
     hid_str:    str
+    name_lower: str
     desc_lower: str
     tags_lower: tuple[str, ...]
     tokens:     frozenset[str]
     base_rank:  int
-    tags:       tuple[str, ...]
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.node is not None
 
     def score(self, query: str) -> int:
         '''return score for query. Higher is more relevant'''
@@ -214,9 +216,7 @@ class _SearchEntry:
                     return _RANK_NAME + self.base_rank
                 return 0
             if prefix == 'hid': # HID filter
-                if self.hid_str.startswith(val) or val == self.hid_str:
-                    return _RANK_HID
-                return 0
+                return _RANK_HID if self.hid_str.startswith(val) else 0
 
         # Global Search
         if query == self.name_lower: # Name exact
@@ -236,50 +236,75 @@ class _SearchEntry:
 
 @dataclass
 class _QueryResult:
-    '''_SearchEntry, score'''
     entry: _SearchEntry
     score: int
 
 class FlatSearchModel(QAbstractListModel):
-    '''Flat list of search results. Built as nodes are inserted'''
-    TagsRole = Qt.ItemDataRole.UserRole + 1
+    '''Flat list of search results. Built from descriptor store'''
+    TagsRole     = Qt.ItemDataRole.UserRole + 1
+    ResolvedRole = Qt.ItemDataRole.UserRole + 2
 
     def __init__(self,  vfs: VfsManager, descriptor_store: NodeDescriptorStore, parent=None,) -> None:
         super().__init__(parent)
-        self._store    = descriptor_store
-        self._index:   list[_SearchEntry] = []
-        self._results: list[_QueryResult] = []
-        self._query    = ''
+        self._vfs         = vfs
+        self._store       = descriptor_store
+        self._index:      list[_SearchEntry] = []
+        self._results:    list[_QueryResult] = []
+        self._query       = ''
+        self._hid_to_idx: dict[str, int] = {}
 
-        self._index_subtree(vfs.root)
-        vfs.insert_start.connect(self._on_insert_start)
-        vfs.insert_finished.connect(self._on_insert_finished)
+        self._build_from_store()
+        self._upgrade_from_vfs(vfs.root)
 
+        descriptor_store.entry_registered.connect(self._on_entry_registered)
+        descriptor_store.entry_updated.connect(self._on_entry_updated)
+        vfs.insert_start.connect(self._on_vfs_nodes_inserted)
+
+    ### Qt API
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._results)
     
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
         '''Returns different type of data depending on requested Role'''
         if not index.isValid() or index.row() >= len(self._results):
             return None
         result = self._results[index.row()]
-        entry = result.entry
+        entry  = result.entry
 
         if role == Qt.ItemDataRole.DisplayRole: # Name
-            return f'{entry.node.name}  ({entry.hid_str})'
+            if entry.node:
+                return f'{entry.node.name}{entry.node.extension} ({entry.hid_str})'
+            else:
+                meta = self._store.get(entry.hid_str)
+                title = meta.title if (meta and meta.title) else f'Unresolved ({entry.hid_str})'
+                return f'{title}  ({entry.hid_str})'
         if role == Qt.ItemDataRole.UserRole: # Node
-            return entry.node
+            return entry
         if role == self.TagsRole: # Tags
-            return entry.tags
+            return entry.tags_lower
+        if role == self.ResolvedRole:
+            return entry.is_resolved
         if role == Qt.ItemDataRole.ToolTipRole: # ToolTip
             meta = self._store.get(entry.hid_str)
-            desc = meta.description if meta and meta.description else ''
-            return f'{entry.hid_str}\n{desc}' if desc else entry.hid_str
+            parts = [entry.hid_str]
+            if meta and meta.description:
+                parts.append(meta.description)
+            if not entry.is_resolved:
+                parts.append('⚠ Not yet loaded by VFS — double-click to navigate')
+            return '\n'.join(parts)
         if role == Qt.ItemDataRole.ForegroundRole:
-            if result.score < _RANK_TAG:
+            if not entry.is_resolved:
                 return QColor('#888888')
-        return 
-    
+            if result.score < _RANK_TAG:
+                return QColor('#AAAAAA')
+        return None
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    ### Query
     def set_query(self, query: str) -> None:
         q = query.lower().strip()
         if q == self._query:
@@ -287,66 +312,112 @@ class FlatSearchModel(QAbstractListModel):
         self._query = q
         self._recompute_results()
 
+    def result_count(self) -> int:
+        return len(self._results)
+
     def _recompute_results(self) -> None:
         self.beginResetModel()
         if not self._query:
             self._results = []
-            self.endResetModel()
         else:
             scored = [
                 _QueryResult(entry=e, score=e.score(self._query))
                 for e in self._index
-                if not e.node.is_hidden
             ]
             self._results = sorted(
                 (r for r in scored if r.score > 0),
                 key=lambda r: -r.score,
             )
-            self.endResetModel()
-
-    def result_count(self) -> int:
-        return len(self._results)
+        self.endResetModel()
     
-    def _on_insert_start(self, parent: VfsNode, first: int, last: int) -> None:
-        index = self.index_for_node(parent)
-        self.beginInsertRows(index, first, last)
-        self._on_children_inserted(parent, first, last)
+    ### Index Population
+    def _build_from_store(self) -> None:
+        '''Index every descriptor entry'''
+        store_items = self._store._db.items()
+        for hid_str, meta in store_items:
+            entry = self._build_uninstantiated_entry(hid_str, meta)
+            self._hid_to_idx[hid_str] = len(self._index)
+            self._index.append(entry)
+        logger.debug(f'FlatSearchModel: indexed {len(self._index)} descriptor entries')
 
-    def _on_insert_finished(self):
-        self.endInsertRows()
+    def _upgrade_from_vfs(self, node: VfsNode) -> None:
+        '''Match descriptor entries to VFS entries to mark current instantiation'''
+        for child in node.children:
+            if child.is_hidden:
+                continue
+            self._upgrade_or_append(child)
+            if child.children:
+                self._upgrade_from_vfs(child)
 
-    def index_for_node(self, target_node: VfsNode) -> QModelIndex:
-        '''Get the QModelIndex for a node'''
-        if target_node is None:
-            return QModelIndex()
-        return self.createIndex(target_node.row(), 0, target_node)
-
-    
-    def _on_children_inserted(self, parent: VfsNode, first: int, last: int) -> None:
-        '''Index newly inserted children'''
+    def _on_vfs_nodes_inserted(self, parent: VfsNode, first: int, last: int) -> None:
+        '''Called when new nodes are added to the VFS'''
         new_children = parent.children[first : last + 1]
-        new_entries = [self._build_entry(c) for c in new_children if not c.is_hidden]
-        if not new_entries:
+        changed = False
+        for child in new_children:
+            if child.is_hidden:
+                continue
+            self._upgrade_or_append(child)
+            changed = True
+        if changed and self._query:
+            self._recompute_results()
+
+    def _on_entry_registered(self, hid_str: str) -> None:
+        '''Called when new entries are added to the descriptor store'''
+        meta = self._store.get(hid_str)
+        if meta is None:
             return
-        self._index.extend(new_entries)
+        if hid_str in self._hid_to_idx:
+            self._on_entry_updated(hid_str)
+            return
+        node = self._vfs.get_node_by_id(tuple(map(int, hid_str.split('.'))))
+        entry = (
+            self._build_entry(node)
+            if node and not node.is_hidden
+            else self._build_uninstantiated_entry(hid_str, meta)
+        )
+        self.beginResetModel()
+        self._hid_to_idx[hid_str] = len(self._index)
+        self._index.append(entry)
+        self.endResetModel()
         if self._query:
             self._recompute_results()
 
-    def _index_subtree(self, node: VfsNode) -> None:
-        '''Recursively index all non-hidden nodes'''
-        for child in node.children:
-            if not child.is_hidden:
-                self._index.append(self._build_entry(child))
-                if child.children:
-                    self._index_subtree(child)
+    def _on_entry_updated(self, hid_str: str) -> None:
+        '''Called when a descriptor store entry is modified'''
+        idx = self._hid_to_idx.get(hid_str)
+        if idx is None:
+            return
+        existing = self._index[idx]
+        meta = self._store.get(hid_str)
+        if meta is None:
+            return
+        self._index[idx] = (
+            self._build_entry(existing.node)
+            if existing.node
+            else self._build_uninstantiated_entry(hid_str, meta)
+        )
+        if self._query:
+            self._recompute_results()
+
+    ### Entry helpers
+    def _upgrade_or_append(self, node: VfsNode) -> None:
+        '''Upgrade or append an entry'''
+        hid_str = node.hierarchical_id_str
+        if hid_str in self._hid_to_idx: # Upgrade
+            idx = self._hid_to_idx[hid_str]
+            if not self._index[idx].is_resolved:
+                self._index[idx] = self._build_entry(node)
+        else: # New Entry
+            self._hid_to_idx[hid_str] = len(self._index)
+            self._index.append(self._build_entry(node))
 
     def _build_entry(self, node: VfsNode) -> _SearchEntry:
+        '''Build an instantiated entry from live VFS'''
         meta       = self._store.get(node.hierarchical_id_str)
         name_lower: str = node.name.lower()
         hid_str: str    = node.hierarchical_id_str
-        tags:   tuple[str, ...] = ()
-        desc_lower = ''
-        tags_lower = ()
+        desc_lower: str = ''
+        tags_lower: tuple[str, ...] = ()
         base_rank  = 0
 
         tokens: set[str] = set(name_lower.split())
@@ -358,16 +429,12 @@ class FlatSearchModel(QAbstractListModel):
                 tokens.update(meta.title.lower().split())
                 base_rank += 20
             if meta.tags:
-                tags = meta.tags
                 tags_lower = tuple(t.lower() for t in meta.tags)
                 tokens.update(tags_lower)
                 base_rank += 10 * len(meta.tags)
             if meta.description:
                 desc_lower = meta.description.lower()
-                tokens.update(
-                    w for w in desc_lower.split()
-                    if len(w) > 2
-                )
+                tokens.update(w for w in desc_lower.split() if len(w) > 2)
         return _SearchEntry(
             node=node,
             name_lower=name_lower,
@@ -376,5 +443,44 @@ class FlatSearchModel(QAbstractListModel):
             tags_lower=tags_lower,
             tokens=frozenset(tokens),
             base_rank=base_rank,
-            tags=tags
         )
+
+    def _build_uninstantiated_entry(self, hid_str: str, meta: Any) -> _SearchEntry:
+        '''Build an for a descriptor entry, a node not yet in the VFS'''
+        name_lower = (meta.title if meta.title else f'Unresolved ({hid_str})').lower()
+        tags_lower  = tuple(t.lower() for t in meta.tags)
+        desc_lower = ''
+        base_rank  = 0
+
+        tokens: set[str] = set(name_lower.split())
+        tokens.add(hid_str)
+        tokens.update(tags_lower)
+
+        if meta.title:
+            base_rank += 20
+        if meta.tags:
+            base_rank += 10 * len(meta.tags)
+        if meta.description:
+            desc_lower = meta.description.lower()
+            tokens.update(w for w in desc_lower.split() if len(w) > 2)
+        return _SearchEntry(
+            node=None,
+            name_lower=name_lower,
+            hid_str=hid_str,
+            desc_lower=desc_lower,
+            tags_lower=tags_lower,
+            tokens=frozenset(tokens),
+            base_rank=base_rank,
+        )
+
+    def rebuild_index(self) -> None:
+        '''Rebuild the entire index. Used when mass descriptor updates occur'''
+        self.beginResetModel()
+        self._index.clear()
+        self._hid_to_idx.clear()
+        self._results.clear()
+        self._build_from_store()
+        self._upgrade_from_vfs(self._vfs.root)
+        self.endResetModel()
+        if self._query:
+            self._recompute_results()

@@ -123,7 +123,6 @@ class VfsManager(QObject):
     '''Virtual File System Manager. Bridge between the dispatcher and node'''
     insert_start = pyqtSignal(VfsNode, int, int) # (parent, first_row, last_row)
     insert_finished = pyqtSignal()
-    node_updated = pyqtSignal(VfsNode)
 
     def __init__(self, root_node: VfsNode, node_enricher: Callable[[VfsNode], None] | None = None) -> None:
         super().__init__()

@@ -31,7 +31,7 @@ from core.node import VfsNode
 from core.dispatcher import Dispatcher
 from core.registry import Registry, GLOBAL_ACTIONS
 from core.contracts import BaseEditor
-from core.workers import ActionStatus, ActionResult, ActionType, ActionDef, EditorPayload
+from core.workers import ActionStatus, ActionResult, ActionType, ActionDef, EditorPayload, TaskHandle
 from core.descriptor_manager import NodeDescriptorStore, NodeMeta
 from ui.editor_session import EditorSession
 from ui.logger import LoggingWindow
@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
         self.current_theme = self.app_settings.theme_name
         self._zoom_delta = self.app_settings.zoom_delta
         # Setup descriptor database
-        self.descriptor_store = NodeDescriptorStore(get_resource_path('ui/assets/descriptors.json'), auto_save=True, parent=self)
+        self.descriptor_store = NodeDescriptorStore(get_resource_path('ui/assets/radi_metadata.json'), auto_save=True, parent=self)
         self.descriptor_store.load()
         self.dispatcher.set_descriptor_store(self.descriptor_store)
         # Setup View
@@ -176,7 +176,6 @@ class MainWindow(QMainWindow):
             logger.info(f'Successfully loaded: {root_node.name}')
         else:
             QMessageBox.critical(self, 'Load Error', 'Failed to initialize ISO.')
-            self.statusBar().showMessage('Load failed', 5000)
 
     def start_rebuild(self, staged_nodes: list[VfsNode]) -> None:
         '''Transitions UI and asks for save location before kicking off background thread'''
@@ -188,18 +187,17 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.rebuild_page)
         self.rebuild_page.log_output.clear()
         self.rebuild_page.progress_bar.setValue(0)
-        self.statusBar().showMessage('Rebuilding ISO...', 0)
-        self.dispatcher.start_iso_rebuild(Path(file_path))
+        handle = self.dispatcher.start_iso_rebuild(Path(file_path))
+        self.rebuild_page.set_task_handle(handle)
 
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         '''Handles the end of the background thread'''
+        self.rebuild_page.on_rebuild_finished()
         if success:
-            self.statusBar().showMessage('Rebuild Complete!', 5000)
             QMessageBox.information(self, 'Success', message)
-            self.stack.setCurrentWidget(self.workspace_page)
         else:
-            self.statusBar().showMessage('Rebuild Failed', 5000)
             QMessageBox.critical(self, 'Build Failed', message)
+        self.stack.setCurrentWidget(self.workspace_page)
 
     def _handle_io_completion(self, success: bool, msg: str):
         if success:
@@ -207,7 +205,7 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, 'Task Error', msg)
 
-    def closeEvent(self, event: QCloseEvent | None) -> None:
+    def closeEvent(self, a0: QCloseEvent | None) -> None:
         s = self.app_settings
         s.geometry = self.saveGeometry()
         s.h_splitter = self.workspace_page.h_splitter.saveState()
@@ -215,7 +213,7 @@ class MainWindow(QMainWindow):
         s.sync()
         if self.dispatcher:
             self.dispatcher.close()
-        return super().closeEvent(event)
+        return super().closeEvent(a0)
 
 ###------------------------------------------ Workspace UI -------------------------------------###
 
@@ -301,8 +299,9 @@ class WorkspaceController(QObject):
         self.editor_page      = editor_page
         self.dispatcher       = dispatcher
         self.descriptor_store = descriptor_store
-        self.tree_model:  VfsTreeModel | None = None
-        self.proxy_model: TreeProxyModel | None = None
+        self.tree_model:     VfsTreeModel | None = None
+        self.proxy_model:  TreeProxyModel | None = None
+        self._last_selected_node: VfsNode | None = None
 
         # Setup Invisible Search
         self.search_buffer = ''
@@ -365,12 +364,13 @@ class WorkspaceController(QObject):
 
         ### Tree headers
         header = self.view.tree_view.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.view.tree_view.setColumnWidth(0, 150)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        self.view.tree_view.setColumnWidth(1, 400)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        self.view.tree_view.setColumnWidth(2, 85)
+        if header is not None:
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+            self.view.tree_view.setColumnWidth(0, 150)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+            self.view.tree_view.setColumnWidth(1, 400)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+            self.view.tree_view.setColumnWidth(2, 85)
 
         self.view.tree_view.expandToDepth(1)
         self.view.update_review_bar(False, 0)
@@ -401,12 +401,12 @@ class WorkspaceController(QObject):
 
     def handle_tree_select(self, current: QModelIndex, _previous: QModelIndex) -> None:
         '''Clicking mechanics for the tree view'''
-        if not current.isValid() and not self.proxy_model: 
+        if not current.isValid() or self.proxy_model is None: 
             return
         node: VfsNode | None = self.proxy_model.mapToSource(current).data(Qt.ItemDataRole.UserRole)
         if not node:
             return
-        logger.debug(f'Selected: {node.name}')
+        self._last_selected_node = node
         self.view.descriptor_panel.load_node(node)
         props_def = Registry.get_action(node, 'Properties')
         if props_def:
@@ -414,33 +414,37 @@ class WorkspaceController(QObject):
         else:
             self.view.descriptor_panel.set_properties_text('-')
 
-    def _on_search_result_clicked(self, index: QModelIndex) -> None:
-        '''Clicking mechanics for the search results'''
-        node = self.search_model.data(index, Qt.ItemDataRole.UserRole)
-        if not isinstance(node, VfsNode) or not node:
+    def handle_tree_double_click(self, index: QModelIndex) -> None:
+        if not self.proxy_model:
             return
-        self.view.descriptor_panel.load_node(node)
-        prop_def = Registry.get_action(node, 'Properties')
-        if prop_def:
-            self.dispatcher.execute_node_action(node, 'Properties')
-        else:
-            self.view.descriptor_panel.set_properties_text('-')
-
-    def _on_search_double_click(self, index: QModelIndex) -> None:
-        if not self.search_model:
-            return
-        node: VfsNode | None = self.search_model.data(index, Qt.ItemDataRole.UserRole)
+        node: VfsNode | None = self.proxy_model.mapToSource(index).data(Qt.ItemDataRole.UserRole)
         if not node:
             return
         editor_classes = Registry.get_editors(node)
         if editor_classes:
             self.launch_editor(node, editor_classes[0])
 
-    def handle_tree_double_click(self, index: QModelIndex) -> None:
-        if not self.proxy_model:
+    def _on_search_result_clicked(self, index: QModelIndex) -> None:
+        '''Clicking mechanics for the search results'''
+        entry = self.search_model.data(index, Qt.ItemDataRole.UserRole)
+        if entry.node:
+            self._handle_goto(entry.node)
+        else:
+            hid = tuple(map(int, entry.hid_str.split('.')))
+            self.dispatcher.resolve_ghost_node(hid, self._handle_goto)
+
+    def _on_search_double_click(self, index: QModelIndex) -> None:
+        if not self.dispatcher.nav or not self.dispatcher.vfs:
             return
-        node: VfsNode | None = self.proxy_model.mapToSource(index).data(Qt.ItemDataRole.UserRole)
-        if not node:
+        entry = self.search_model.data(index, Qt.ItemDataRole.UserRole)
+        node = entry.node
+        if node is None:
+            hid = tuple(map(int, entry.hid_str.split('.')))
+            ancestor = self.dispatcher.vfs.find_nearest_ancestor(hid)
+            if ancestor is not None:
+                node = self.dispatcher.vfs.get_node_by_id(hid)
+        if node is None:
+            logger.warning(f'No node found for id:({entry.hid_str})')
             return
         editor_classes = Registry.get_editors(node)
         if editor_classes:
@@ -454,6 +458,8 @@ class WorkspaceController(QObject):
     def on_search_updated(self, query: str):
         if not query:
             self.view.sidebar_stack.setCurrentIndex(0)
+            if self._last_selected_node:
+                QTimer.singleShot(1, lambda: self._on_layout_ready(self._last_selected_node))
             return
         self.view.sidebar_stack.setCurrentIndex(1)
         self.search_model.set_query(query)
@@ -462,15 +468,20 @@ class WorkspaceController(QObject):
 
     def on_search_context_menu(self, position) -> None:
         '''get the node for the list model and pass to _build_context_menu'''
-        if not self.search_model:
+        if not self.search_model or not self.dispatcher.nav or not self.dispatcher.vfs:
             return
         index = self.view.search_results_view.indexAt(position)
         if not index.isValid():
             return
-        node: VfsNode | None = self.search_model.data(index, Qt.ItemDataRole.UserRole)
+        entry = self.search_model.data(index, Qt.ItemDataRole.UserRole)
+        node = entry.node
+        hid = tuple(map(int, entry.hid_str.split('.')))
+        if not node and self.dispatcher.vfs:
+            self.dispatcher.resolve_ghost_node(hid, self._handle_goto)
+            node = self.dispatcher.vfs.get_node_by_id(hid)
         if not node:
+            logger.error(f'No node found for ({hid})')
             return
-        
         self._build_context_menu(node, self.view.search_results_view.mapToGlobal(position))
 
     def on_tree_context_menu(self, position) -> None:
@@ -526,6 +537,7 @@ class WorkspaceController(QObject):
 
     def _handle_goto(self, node: VfsNode) -> None:
         '''Go to selected search node in tree view'''
+        self._last_selected_node = node
         self.view.sidebar_stack.setCurrentIndex(0)
         QTimer.singleShot(1, lambda: self._on_layout_ready(node))
 
@@ -903,10 +915,22 @@ class RebuildStatusPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(50, 50, 50, 50)
         
+        header_bar = QHBoxLayout()
+        self._cancel_btn = QPushButton('Cancel ISO Build')
+        self._cancel_btn.setObjectName('FloatClearButton')
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        header_bar.addWidget(self._cancel_btn)
+        header_bar.addStretch()
         self.header = QLabel('Rebuilding ISO...')
         self.header.setObjectName('PageTitle')
         self.header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.header)
+        header_bar.addWidget(self.header)
+        header_bar.addStretch()
+        right_spacer = QWidget()
+        right_spacer.setFixedWidth(self._cancel_btn.sizeHint().width())
+        header_bar.addWidget(right_spacer)
+        layout.addLayout(header_bar)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -917,12 +941,29 @@ class RebuildStatusPage(QWidget):
         self.log_output.setReadOnly(True)
         self.log_output.setObjectName('LogOutput')
         layout.addWidget(self.log_output)
+
+        self._task_handle = None
         
     def append_log(self, message: str) -> None:
         self.log_output.append(message)
         
     def update_progress(self, percentage: int) -> None:
         self.progress_bar.setValue(percentage)
+
+    def set_task_handle(self, handle: TaskHandle) -> None:
+        self._task_handle = handle
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setText('Cancel ISO Build')
+
+    def _on_cancel(self) -> None:
+        if self._task_handle:
+            self._task_handle.cancel()
+            self._cancel_btn.setEnabled(False)
+            self._cancel_btn.setText('Cancelling...')
+
+    def on_rebuild_finished(self) -> None:
+        self._cancel_btn.setEnabled(False)
+        self._task_handle = None
 
 ###---------------------------------- Editor Page -------------------------------------------###
 

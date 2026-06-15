@@ -67,7 +67,6 @@ class VfsNavigator:
 
     def rollup_nodes(self, staged_nodes: list[VfsNode], task_handle: 'TaskHandle') -> list[VfsNode]:
         '''For Rebuilding the VFS from deepest layer to physical (children -> parent)'''
-        task_handle.log_message.emit('Initiating virtual node roll-up...')
         current_queue: set[VfsNode] = set(staged_nodes)
         while not all(node.is_physical for node in current_queue): # deepest -> physical layer
             task_handle.checkpoint()

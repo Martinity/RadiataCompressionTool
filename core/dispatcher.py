@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
+from PyQt6.QtCore import pyqtSignal, QObject, Qt
+
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
 from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle
 from core.navigator import VfsNavigator
 from core.descriptor_manager import NodeDescriptorStore
-from PyQt6.QtCore import pyqtSignal, QObject, Qt
-from typing import TYPE_CHECKING, Any
-
 if TYPE_CHECKING:
     from core.contracts import BaseHandler, BaseEditor
 
@@ -234,7 +234,7 @@ class Dispatcher(QObject):
         task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         task_handle.finished.connect(self._on_action_complete)
 
-    def start_iso_rebuild(self, output_path: Path) -> None:
+    def start_iso_rebuild(self, output_path: Path) -> TaskHandle | None:
         if not self.active_handler or not self.vfs or not self.nav:
             self.rebuild_complete.emit(False, 'No ISO Loaded.')
             return
@@ -254,6 +254,47 @@ class Dispatcher(QObject):
         task_handle.progress.connect(lambda pct, _msg: self.rebuild_progress.emit(pct))
         task_handle.log_message.connect(self.rebuild_log.emit)
         task_handle.finished.connect(self._on_rebuild_finished)
+
+        return task_handle
+
+    def resolve_ghost_node(self, target_hid: tuple[int, ...], on_succes: Callable[[VfsNode], None]) -> None:
+        '''Asynchronously unpack the VFS until the target hid is reached'''
+        if not self.vfs or not self.nav:
+            return
+        
+        def _drill_down() -> None:
+            node = self.vfs.get_node_by_id(target_hid)
+            if node:
+                on_succes(node)
+                return
+            
+            ancestor = self.vfs.find_nearest_ancestor(target_hid)
+            if not ancestor:
+                logger.error(f'Cannot resolve {target_hid}: No ancestor exists.')
+                return
+            profile = Registry.get_handler_profile(ancestor)
+            action_def = profile.primary_expand_action() if profile else None
+            if not action_def:
+                logger.error(f'Cannot expand {ancestor.name}: No TREE_EXPAND action registered')
+                return
+            ancestor.expansion_pending = True
+            logger.debug(f'Drilling down to {ancestor.name} ({ancestor.hierarchical_id_str})')
+            handle = self.task_coordinator.start_task(
+                Actions.dispatch,
+                action_def,
+                ancestor,
+                self.nav
+            )
+            def _on_layer_done(success: bool, result: Any) -> None:
+                self._on_action_complete(success, result)
+                if success:
+                    _drill_down()
+                else:
+                    logger.error('Failed to drill down to target node...')
+            
+            handle.log_message.connect(self.workspace_log.emit)
+            handle.finished.connect(_on_layer_done)
+        _drill_down()
 
     def close(self) -> None:
         '''For exiting the dispatch'''
