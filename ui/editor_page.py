@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget, QMessageBox
+from PyQt6.QtGui import QShortcut, QKeySequence
+
+from ui.editor_session import EditorSession
+
+import logging
+logger = logging.getLogger(f'radiata.{__name__}')
+
+###---------------------------------- Editor Page -------------------------------------------###
+
+class EditorPage(QWidget):
+    '''UX is not final. Especially for this...'''
+    back_requested = pyqtSignal()
+    save_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._current_session: EditorSession | None = None
+        self._waiting_to_close: bool = False
+        self._setup_ui()
+        self._setup_shortcuts()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        toolbar = QWidget()
+        toolbar.setObjectName('EditorToolbar')
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(10, 5, 10, 5)
+
+        self._back_btn = QPushButton('Back')
+        self._back_btn.setObjectName('FloatClearButton')
+        self._back_btn.clicked.connect(self._on_back)
+
+        self._editor_title = QLabel('Editor')
+        self._editor_title.setObjectName('SectionHeader')
+
+        self.btn_undo   = QPushButton('Undo')
+        self.btn_redo   = QPushButton('Redo')
+        self.btn_revert = QPushButton('Revert')
+        self.btn_save   = QPushButton('Save')
+
+        self.btn_undo.setToolTip('Ctrl+Z')
+        self.btn_redo.setToolTip('Ctrl+Y')
+        self.btn_revert.setToolTip('Ctrl+R')
+        self.btn_save.setToolTip('Ctrl+S')
+
+        self.btn_undo.clicked.connect(self._on_undo)
+        self.btn_redo.clicked.connect(self._on_redo)
+        self.btn_save.clicked.connect(self._on_save)
+        self.btn_revert.clicked.connect(self._on_revert)
+
+        bar.addWidget(self._back_btn)
+        bar.addWidget(self._editor_title)
+        bar.addStretch()
+        bar.addWidget(self.btn_undo)
+        bar.addWidget(self.btn_redo)
+        bar.addSpacing(15)
+        bar.addWidget(self.btn_revert)
+        bar.addWidget(self.btn_save)
+
+        layout.addWidget(toolbar)
+        self._editor_area = QStackedWidget()
+        layout.addWidget(self._editor_area)
+
+        self._set_toolbar_enabled(False)
+
+    def _setup_shortcuts(self) -> None:
+        self._back_shortcut = QShortcut(QKeySequence('Esc'), self)
+        self._back_shortcut.activated.connect(self._back_btn.click)
+
+        self.save_shortcut = QShortcut(QKeySequence('Ctrl+S'), self)
+        self.save_shortcut.activated.connect(self._on_save)
+
+        self.revert_shortcut = QShortcut(QKeySequence('Ctrl+R'), self)
+        self.revert_shortcut.activated.connect(self._on_revert)
+
+        self.undo_shortcut = QShortcut(QKeySequence('Ctrl+Z'), self)
+        self.undo_shortcut.activated.connect(self._on_undo)
+        
+        self.redo_shortcut = QShortcut(QKeySequence('Ctrl+Y'), self)
+        self.redo_shortcut.activated.connect(self._on_redo)
+
+    def load_editor(self, session: EditorSession) -> None:
+        if self._current_session:
+            self._deconstruct_old_session()
+
+        self._current_session = session
+        self._editor_area.addWidget(session.editor)
+        self._editor_area.setCurrentWidget(session.editor)
+
+        self._wire_editor(session)
+
+    def _wire_editor(self, session: EditorSession) -> None:
+        editor = session.editor
+        is_mutable = getattr(editor, 'is_mutable', True)
+        self.btn_save.setVisible(is_mutable)
+        self.btn_revert.setVisible(is_mutable)
+        self.btn_undo.setVisible(False)
+        self.btn_redo.setVisible(False)
+        session.editor.undo_state_changed.connect(self._on_undo_state_changed)
+        if is_mutable:
+            session.editor.dataChanged.connect(self._on_editor_state_changed)
+        session.state_changed_callback = self._on_session_state_changed
+        self._update_title(is_dirty=False)
+        self._set_toolbar_enabled(False)
+
+    def _on_undo_state_changed(self, can_undo: bool, can_redo: bool) -> None:
+        self.btn_undo.setVisible(can_undo or can_redo)
+        self.btn_redo.setVisible(can_redo or can_undo)
+        self.btn_undo.setEnabled(can_undo)
+        self.btn_redo.setEnabled(can_redo)
+
+    def _deconstruct_old_session(self) -> None:
+        if self._current_session:
+            self._current_session.state_changed_callback = None
+            self._current_session.cancel()
+        old_editor = self._current_session.editor if self._current_session else None
+        if not old_editor:
+            return
+        self._editor_area.removeWidget(old_editor)
+        old_editor.cleanup()
+        old_editor.deleteLater()
+        self._current_session = None
+
+    def _on_session_state_changed(self, state: str) -> None:
+        if not self._current_session:
+            return
+        if state == 'ready':
+            self._set_toolbar_enabled(True)
+            self._on_editor_state_changed(self._current_session.editor.is_dirty())
+        elif state == 'error':
+            self._set_toolbar_enabled(False)
+        if self._waiting_to_close:
+            if state == 'ready':
+                self._waiting_to_close = False
+                self.back_requested.emit()
+            elif state == 'error':
+                self._waiting_to_close = False
+                QMessageBox.warning(self, 'Save Failed', 'Could not save changes. Error message in console...')
+
+    def _on_editor_state_changed(self, is_dirty: bool) -> None:
+        is_ready = bool(self._current_session and self._current_session.state == 'ready')
+        self.btn_save.setEnabled(is_dirty and is_ready)
+        self.btn_revert.setEnabled(is_dirty and is_ready)
+        self._update_title(is_dirty)
+
+    def _update_title(self, is_dirty: bool) -> None:
+        if not self._current_session:
+            self._editor_title.setText('Editor')
+            return
+        plugin_name = getattr(
+            self._current_session.editor.__class__,
+            '_plugin_name',
+            self._current_session.editor.__class__.__name__
+        )
+        node_name = self._current_session.node.name
+        asterisk = ' *' if is_dirty else ''
+
+        self._editor_title.setText(f'{plugin_name} / {node_name}{asterisk}')
+
+    def _set_toolbar_enabled(self, enabled: bool) -> None:
+        self.btn_save.setEnabled(enabled)
+        self.btn_revert.setEnabled(enabled)
+        self.btn_undo.setEnabled(enabled)
+        self.btn_redo.setEnabled(enabled)
+
+    ###--------------------------------------- Triggers ----------------------------------###
+
+    def _on_back(self) -> None:
+        if not self._current_session:
+            self.back_requested.emit()
+            return
+        session = self._current_session
+
+        if session.state == 'loading':
+            reply = QMessageBox.question(
+                self, 'Loading in Progress', 'Data is still loading. Cancel and go back?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._deconstruct_old_session()
+                self.back_requested.emit()
+            return
+
+        if session.state in ('ready', 'error'):
+            editor = session.editor
+            if editor.is_mutable and editor.is_dirty():
+                reply = QMessageBox.question(
+                    self, 'Unsaved Changes', 'Apply changes before closing?',
+                    QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
+                    QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save,
+                )
+                if reply == QMessageBox.StandardButton.Cancel:
+                    return
+                if reply == QMessageBox.StandardButton.Save:
+                    self._waiting_to_close = True
+                    self.save_requested.emit()
+                    return
+                else:
+                    editor.discard_changes()
+
+        if session.state == 'saving':
+            return
+
+        self.back_requested.emit()
+    
+    def _on_save(self) -> None:
+        if self._current_session:
+            self.save_requested.emit()
+
+    def _on_revert(self) -> None:
+        if self._current_session:
+            self._current_session.editor.discard_changes()
+
+    def _on_undo(self) -> None:
+        if self._current_session:
+            self._current_session.editor.undo()
+
+    def _on_redo(self) -> None:
+        if self._current_session:
+            self._current_session.editor.redo()

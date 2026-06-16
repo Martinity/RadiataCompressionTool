@@ -21,25 +21,26 @@ from typing import Any
 from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer, QEvent
 from PyQt6.QtWidgets import (
     QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, 
-    QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, 
+    QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QSizePolicy,
     QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QTextBrowser,
-    QScrollArea, QFrame, QGraphicsOpacityEffect, QAbstractItemView
+    QScrollArea, QFrame, QGraphicsOpacityEffect, QAbstractItemView, QLineEdit
 )
-from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent, QShortcut, QKeySequence
+from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent
 
 from core.node import VfsNode
 from core.dispatcher import Dispatcher
 from core.registry import Registry, GLOBAL_ACTIONS
 from core.contracts import BaseEditor
 from core.workers import ActionStatus, ActionResult, ActionType, ActionDef, EditorPayload, TaskHandle
-from core.descriptor_manager import NodeDescriptorStore, NodeMeta
+from core.descriptor_manager import NodeDescriptorStore
 from ui.editor_session import EditorSession
 from ui.logger import LoggingWindow
 from ui.tree_model import TreeProxyModel, VfsTreeModel, FlatSearchModel
 from ui.theme_manager import ThemeManager
 from ui.staging_page import StagingPage
+from ui.editor_page import EditorPage
 from ui.settings import AppSettings
-from utilities import human_size, get_resource_path
+from utilities import human_size, get_resource_path, hline
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -188,7 +189,8 @@ class MainWindow(QMainWindow):
         self.rebuild_page.log_output.clear()
         self.rebuild_page.progress_bar.setValue(0)
         handle = self.dispatcher.start_iso_rebuild(Path(file_path))
-        self.rebuild_page.set_task_handle(handle)
+        if handle:
+            self.rebuild_page.set_task_handle(handle)
 
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         '''Handles the end of the background thread'''
@@ -317,6 +319,8 @@ class WorkspaceController(QObject):
         self.editor_page.save_requested.connect(self.request_save)
         self._current_session: EditorSession | None = None
 
+        self.view.descriptor_panel.metadata_changed.connect(self._on_metadata_changed)
+
     def init_workspace(self, root_node: VfsNode) -> None:
         if not self.dispatcher.vfs:
             raise TypeError('No filesystem currenlty loaded - cant initialize workspace')
@@ -397,6 +401,19 @@ class WorkspaceController(QObject):
         self.view.tree_view.scrollTo(proxy_index, QAbstractItemView.ScrollHint.PositionAtTop)
         self.view.tree_view.setCurrentIndex(proxy_index)
 
+    def _on_metadata_changed(self, node: VfsNode, title: str, description: str, tags: tuple[str, ...]) -> None:
+        '''Update the metadata store and refresh the panel'''
+        hids_str = node.hierarchical_id_str
+        node.name = title
+        node.category = tags
+        self.descriptor_store.register(
+            hid=hids_str,
+            title=title,
+            description=description,
+            tags=list(tags)
+        )
+        self.view.descriptor_panel.load_node(node, title, description, tags)
+
     ###----------------- Tree interactions-------------------###
 
     def handle_tree_select(self, current: QModelIndex, _previous: QModelIndex) -> None:
@@ -407,7 +424,12 @@ class WorkspaceController(QObject):
         if not node:
             return
         self._last_selected_node = node
-        self.view.descriptor_panel.load_node(node)
+
+        meta   = self.descriptor_store.get(node.hierarchical_id_str)
+        title = meta.title if meta and meta.title else node.name
+        desc  = meta.description if meta else ''
+        tags  = meta.tags if meta and meta.tags else node.category
+        self.view.descriptor_panel.load_node(node, title, desc, tags)
         props_def = Registry.get_action(node, 'Properties')
         if props_def:
             self.dispatcher.execute_node_action(node, 'Properties')
@@ -540,7 +562,6 @@ class WorkspaceController(QObject):
         self._last_selected_node = node
         self.view.sidebar_stack.setCurrentIndex(0)
         QTimer.singleShot(1, lambda: self._on_layout_ready(node))
-
 
     ###------------------------- Routing ---------------------------###
 
@@ -722,129 +743,171 @@ class WorkspaceController(QObject):
 
 class FileDescriptorPanel(QWidget):
     '''Right panel of the workspace'''
-    tagClicked = pyqtSignal(str)
+    metadata_changed = pyqtSignal(object, str, str, tuple)  # (node, title, description, tags)
+    tagClicked       = pyqtSignal(str)                      # tag str
 
     def __init__(self, descriptor_store: NodeDescriptorStore, parent: QWidget | None = None, controller = None) -> None:
         super().__init__(parent)
         self._store = descriptor_store
         self._current_node: VfsNode | None = None
         self._setup_ui()
-        self.clear()
 
     def _setup_ui(self) -> None:
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        root.addWidget(self._build_header())
+        root.addWidget(hline())
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_view_page())
+        self._stack.addWidget(self._build_edit_page())
+        root.addWidget(self._stack)
+
+    def _build_header(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName('EditorToolbar')
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(10, 6, 8, 6)
+
+        self._name_label = QLabel('No file selected')
+        self._name_label.setObjectName('SectionHeader')
+        self._hid_label  = QLabel('')
+        self._hid_label.setObjectName('SectionHeader')
         
+        name_col = QVBoxLayout()
+        name_col.setSpacing(1)
+        name_col.addWidget(self._name_label)
+        name_col.addWidget(self._hid_label)
+
+        self._edit_btn = QPushButton('✎')
+        self._edit_btn.setObjectName('FloatClearButton')
+        self._edit_btn.setFixedWidth(70)
+        self._edit_btn.setEnabled(False)
+        self._edit_btn.clicked.connect(self._enter_edit_mode)
+
+        layout.addLayout(name_col, stretch=1)
+        layout.addWidget(self._edit_btn)
+        return bar
+
+    def _build_view_page(self) -> QWidget:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-
+        
         content = QWidget()
-        self._content_layout = QVBoxLayout(content)
-        self._content_layout.setContentsMargins(12, 12, 12, 12)
-        self._content_layout.setSpacing(10)
-
-        ### Header ###
-        header_layout = QHBoxLayout()
-        self._name_label = QLabel()
-        self._name_label.setObjectName('SectionHeader')
-        self._hid_label = QLabel()
-        self._hid_label.setObjectName('SectionHeader')
-
-        header_layout.addWidget(self._hid_label)
-        header_layout.addWidget(self._name_label)
-        header_layout.addStretch()
-        self._content_layout.addLayout(header_layout)
-        self._content_layout.addWidget(_divider())
-
-        ### Tags ###
+        layout  = QVBoxLayout(content)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+        ### Tags
         self._tags_row = QHBoxLayout()
-        self._tags_container = QWidget()
-        self._tags_container.setLayout(self._tags_row)
-        self._content_layout.addWidget(self._tags_container)
-
-        ### Description ###
-        desc_header = QLabel('Description')
-        desc_header.setObjectName('SectionHeader')
-        self._description = QLabel()
-        self._description.setWordWrap(True)
-        self._description.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self._content_layout.addWidget(desc_header)
-        self._content_layout.addWidget(self._description)
-        self._content_layout.addWidget(_divider())
-
-        ### Properties (async) ###
-        self._props_header = QLabel('Properties')
-        self._props_header.setObjectName('SectionHeader')
+        self._tags_row.setSpacing(4)
+        self._tags_row.setContentsMargins(0, 0, 0, 0)
+        tags_wrap = QWidget()
+        tags_wrap.setLayout(self._tags_row)
+        layout.addWidget(tags_wrap)
+        ### Description
+        self._desc_label = QLabel()
+        self._desc_label.setWordWrap(True)
+        self._desc_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._desc_label.setObjectName('GenericText')
+        self._desc_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout.addWidget(self._desc_label)
+        layout.addWidget(hline())
+        ### Properties
+        props_header = QLabel('Properties')
+        props_header.setObjectName('SectionHeader')
         self._props_label = QLabel('-')
         self._props_label.setWordWrap(True)
         self._props_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self._props_label.setObjectName('GenericText')
-        self._content_layout.addWidget(self._props_header)
-        self._content_layout.addWidget(self._props_label)
-        self._content_layout.addWidget(_divider())
-
-        ### File info ###
+        layout.addWidget(props_header)
+        layout.addWidget(self._props_label)
+        layout.addWidget(hline())
+        ### File Info
         info_header = QLabel('File Info')
         info_header.setObjectName('SectionHeader')
-        self._info_grid = QWidget()
-        self._info_layout = QVBoxLayout(self._info_grid)
+        self._info_container = QWidget()
+        self._info_layout    = QVBoxLayout(self._info_container)
         self._info_layout.setContentsMargins(0, 0, 0, 0)
         self._info_layout.setSpacing(2)
-        self._content_layout.addWidget(info_header)
-        self._content_layout.addWidget(self._info_grid)
-        self._content_layout.addStretch()
+        layout.addWidget(info_header)
+        layout.addWidget(self._info_container)
+        layout.addStretch()
 
         scroll.setWidget(content)
-        root_layout.addWidget(scroll)
+        return scroll
 
-    ### -------------------- Public ----------------------###
+    def _build_edit_page(self) -> QWidget:
+        page   = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
-    def load_node(self, node: VfsNode) -> None:
-        '''Populate the panel for the selected node.'''
+        layout.addWidget(QLabel('Title'))
+        self._title_edit = QLineEdit()
+        self._title_edit.setPlaceholderText('Display name...')
+        layout.addWidget(self._title_edit)
+
+        layout.addWidget(QLabel('Tags (comma-separated)'))
+        self._tags_edit = QLineEdit()
+        self._tags_edit.setPlaceholderText('ex. Character, Texture, System...')
+        layout.addWidget(self._tags_edit)
+
+        layout.addWidget(QLabel('Description'))
+        self._desc_edit = QTextEdit()
+        self._desc_edit.setPlaceholderText('Notes...')
+        self._desc_edit.setFixedHeight(90)
+        layout.addWidget(self._desc_edit)
+
+        btn_row = QHBoxLayout()
+        self._save_btn   = QPushButton('Save')
+        self._cancel_btn = QPushButton('Cancel')
+        self._save_btn.setObjectName('ConfirmButton')
+        self._cancel_btn.setObjectName('FloatClearButton')
+        self._save_btn.clicked.connect(self._on_save)
+        self._cancel_btn.clicked.connect(self._exit_edit_mode)
+        btn_row.addStretch()
+        btn_row.addWidget(self._cancel_btn)
+        btn_row.addWidget(self._save_btn)
+        layout.addLayout(btn_row)
+        layout.addStretch()
+
+        return page
+
+    def load_node(self, node: VfsNode, title: str, description: str, tags: tuple[str, ...]) -> None:
+        '''Populate the panel'''
         self._current_node = node
         hid = node.hierarchical_id_str
-        meta: NodeMeta | None = self._store.get(hid)
 
-        ### Header
-        self._name_label.setText(node.name)
+        self._name_label.setText(title or node.name)
         self._hid_label.setText(hid)
+        self._edit_btn.setEnabled(True)
 
-        ### Tags
         _clear_layout(self._tags_row)
-        for tag in (node.category if isinstance(node.category, tuple) else [node.category]):
-            tag_clickable = ClickableTag(tag)
-            tag_clickable.tagClicked.connect(self.tagClicked.emit)
-            self._tags_row.addWidget(tag_clickable)
+        pill_source = tags if tags else node.category
+        for tag in pill_source:
+            if not tag:
+                continue
+            pill = _ClickableTag(tag)
+            pill.tagClicked.connect(self.tagClicked.emit)
+            self._tags_row.addWidget(pill)
         self._tags_row.addStretch()
-        self._tags_container.setVisible(bool(node.category))
 
-        ### Description
-        self._description.setText(meta.description if (meta and meta.description) else 'No description for node.')
-
-        ### Properties
-        self._props_label.setText('Loading...')
-        self._props_header.setVisible(True)
-
-        ### File info
+        self._desc_label.setText(description or 'No description')
+        self._props_label.setText('-')
         _clear_layout(self._info_layout)
         for label, value in [
-            ('Name', node.name),
-            ('Size', human_size(node.size)),
-            ('Offset', hex(node.offset) if node.offset else '-'),
-            ('Physical', str(node.is_physical)),
-            ('Datacenter header HID', node.target)
+            ('Size',          human_size(node.size)),
+            ('Offset',        hex(node.offset) if node.offset else '-'),
+            ('Physical',     'Yes' if node.is_physical else 'No'),
+            ('Dependant HID', str(node.target) if node.target else '-')
         ]:
-            row = QHBoxLayout()
-            key_label = QLabel(f'{label}:')
-            val_label = QLabel(str(value))
-            val_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            row.addWidget(key_label)
-            row.addStretch()
-            row.addWidget(val_label)
-            self._info_layout.addLayout(row)
-        
+            self._info_layout.addWidget(_info_row(label, value))
+
+        self._exit_edit_mode()
+
     def set_properties_text(self, text: str) -> None:
         '''Called by WorkspaceController when Properties action completes.'''
         self._props_label.setText(text or '-')
@@ -853,16 +916,52 @@ class FileDescriptorPanel(QWidget):
         self._current_node = None
         self._name_label.setText('No file selected')
         self._hid_label.setText('')
-        self._description.setText('')
+        self._desc_label.setText('')
         self._props_label.setText('-')
+        self._edit_btn.setEnabled(False)
         _clear_layout(self._tags_row)
         _clear_layout(self._info_layout)
+        self._exit_edit_mode()
 
     @property
     def current_node(self) -> VfsNode | None:
         return self._current_node
     
-class ClickableTag(QLabel):
+    def _enter_edit_mode(self) -> None:
+        if not self._current_node:
+            return
+        self._title_edit.setText(self._name_label.text())
+        pills = [
+            self._tags_row.itemAt(i).widget()
+            for i in range(self._tags_row.count())
+            if isinstance(self._tags_row.itemAt(i).widget(), _ClickableTag)
+        ]
+        self._tags_edit.setText(', '.join(p.text() for p in pills))
+        self._desc_edit.setPlainText(
+            self._desc_label.text()
+            if self._desc_label.text() != 'No description.'
+            else ''
+        )
+        self._edit_btn.setEnabled(False)
+        self._stack.setCurrentIndex(1)
+
+    def _exit_edit_mode(self) -> None:
+        self._edit_btn.setEnabled(self._current_node is not None)
+        self._stack.setCurrentIndex(0)
+
+    def _on_save(self) -> None:
+        if not self._current_node:
+            return
+        title = self._title_edit.text().strip()
+        desc  = self._desc_edit.toPlainText().strip()
+        tags  = tuple(
+            t.strip()
+            for t in self._tags_edit.text().split(',')
+            if t.strip()
+        )
+        self.metadata_changed.emit(self._current_node, title, desc, tags)
+
+class _ClickableTag(QLabel):
     tagClicked = pyqtSignal(str)
 
     def __init__(self, text: str, parent=None):
@@ -873,6 +972,19 @@ class ClickableTag(QLabel):
     def mousePressEvent(self, ev: QMouseEvent | None) -> None:
         if ev and ev.button() == Qt.MouseButton.LeftButton:
             self.tagClicked.emit(self.text())
+
+def _info_row(label: str, value: str) -> QWidget:
+    row    = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    key = QLabel(label)
+    key.setObjectName('SectionHeader')
+    val = QLabel(value)
+    val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    layout.addWidget(key)
+    layout.addStretch()
+    layout.addWidget(val)
+    return row
 
 ###-------------------------------------- Welcome Page --------------------------------------###
 
@@ -964,230 +1076,6 @@ class RebuildStatusPage(QWidget):
     def on_rebuild_finished(self) -> None:
         self._cancel_btn.setEnabled(False)
         self._task_handle = None
-
-###---------------------------------- Editor Page -------------------------------------------###
-
-class EditorPage(QWidget):
-    '''UX is not final. Especially for this...'''
-    back_requested = pyqtSignal()
-    save_requested = pyqtSignal()
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._current_session: EditorSession | None = None
-        self._waiting_to_close: bool = False
-        self._setup_ui()
-        self._setup_shortcuts()
-
-    def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        toolbar = QWidget()
-        toolbar.setObjectName('EditorToolbar')
-        bar = QHBoxLayout(toolbar)
-        bar.setContentsMargins(10, 5, 10, 5)
-
-        self._back_btn = QPushButton('Back')
-        self._back_btn.setObjectName('FloatClearButton')
-        self._back_btn.clicked.connect(self._on_back)
-
-        self._editor_title = QLabel('Editor')
-        self._editor_title.setObjectName('SectionHeader')
-
-        self.btn_undo   = QPushButton('Undo')
-        self.btn_redo   = QPushButton('Redo')
-        self.btn_revert = QPushButton('Revert')
-        self.btn_save   = QPushButton('Save')
-
-        self.btn_undo.setToolTip('Ctrl+Z')
-        self.btn_redo.setToolTip('Ctrl+Y')
-        self.btn_revert.setToolTip('Ctrl+R')
-        self.btn_save.setToolTip('Ctrl+S')
-
-        self.btn_undo.clicked.connect(self._on_undo)
-        self.btn_redo.clicked.connect(self._on_redo)
-        self.btn_save.clicked.connect(self._on_save)
-        self.btn_revert.clicked.connect(self._on_revert)
-
-        bar.addWidget(self._back_btn)
-        bar.addWidget(self._editor_title)
-        bar.addStretch()
-        bar.addWidget(self.btn_undo)
-        bar.addWidget(self.btn_redo)
-        bar.addSpacing(15)
-        bar.addWidget(self.btn_revert)
-        bar.addWidget(self.btn_save)
-
-        layout.addWidget(toolbar)
-        self._editor_area = QStackedWidget()
-        layout.addWidget(self._editor_area)
-
-        self._set_toolbar_enabled(False)
-
-    def _setup_shortcuts(self) -> None:
-        self._back_shortcut = QShortcut(QKeySequence('Esc'), self)
-        self._back_shortcut.activated.connect(self._back_btn.click)
-
-        self.save_shortcut = QShortcut(QKeySequence('Ctrl+S'), self)
-        self.save_shortcut.activated.connect(self._on_save)
-
-        self.revert_shortcut = QShortcut(QKeySequence('Ctrl+R'), self)
-        self.revert_shortcut.activated.connect(self._on_revert)
-
-        self.undo_shortcut = QShortcut(QKeySequence('Ctrl+Z'), self)
-        self.undo_shortcut.activated.connect(self._on_undo)
-        
-        self.redo_shortcut = QShortcut(QKeySequence('Ctrl+Y'), self)
-        self.redo_shortcut.activated.connect(self._on_redo)
-
-    def load_editor(self, session: EditorSession) -> None:
-        if self._current_session:
-            self._deconstruct_old_session()
-
-        self._current_session = session
-        self._editor_area.addWidget(session.editor)
-        self._editor_area.setCurrentWidget(session.editor)
-
-        is_mutable = getattr(session.editor, 'is_mutable', True)
-        self.btn_save.setVisible(is_mutable)
-        self.btn_revert.setVisible(is_mutable)
-        has_history = hasattr(session.editor, 'undo') and hasattr(session.editor, 'redo')
-        self.btn_undo.setVisible(has_history)
-        self.btn_redo.setVisible(has_history)
-
-        if is_mutable:
-            session.editor.dataChanged.connect(self._on_editor_state_changed)
-            session.state_changed_callback = self._on_session_state_changed
-            if hasattr(session.editor, 'history'):
-                session.editor.history. can_undo_changed.connect(self.btn_undo.setEnabled)
-                session.editor.history.can_redo_changed.connect(self.btn_redo.setEnabled)
-        
-        self._update_title(is_dirty=False)
-        self._set_toolbar_enabled(False)
-
-    def _deconstruct_old_session(self) -> None:
-        if self._current_session:
-            self._current_session.state_changed_callback = None
-            self._current_session.cancel()
-        old_editor = self._current_session.editor if self._current_session else None
-        if not old_editor:
-            return
-        self._editor_area.removeWidget(old_editor)
-        old_editor.cleanup()
-        old_editor.deleteLater()
-        self._current_session = None
-
-    def finalize_load(self) -> None:
-        self._set_toolbar_enabled(True)
-        if self._current_session:
-            self._on_editor_state_changed(self._current_session.editor.is_dirty())
-
-    def _on_session_state_changed(self, state: str) -> None:
-        ''''''
-        if not self._current_session:
-            return
-        self._on_editor_state_changed(self._current_session.editor.is_dirty())
-        if self._waiting_to_close:
-            if state == 'ready':
-                self._waiting_to_close = False
-                self.back_requested.emit()
-            elif state == 'error':
-                self._waiting_to_close = False
-                QMessageBox.warning(self, 'Save Failed', 'Could not save changes. Error message in console...')
-
-    def _on_editor_state_changed(self, is_dirty: bool) -> None:
-        is_ready = bool(self._current_session and self._current_session.state == 'ready')
-        self.btn_save.setEnabled(is_dirty and is_ready)
-        self.btn_revert.setEnabled(is_dirty and is_ready)
-        self._update_title(is_dirty)
-
-    def _update_title(self, is_dirty: bool) -> None:
-        if not self._current_session:
-            self._editor_title.setText('Editor')
-            return
-        plugin_name = getattr(
-            self._current_session.editor.__class__,
-            '_plugin_name',
-            self._current_session.editor.__class__.__name__
-        )
-        node_name = self._current_session.node.name
-        asterisk = ' *' if is_dirty else ''
-
-        self._editor_title.setText(f'{plugin_name} / {node_name}{asterisk}')
-
-    def _set_toolbar_enabled(self, enabled: bool) -> None:
-        self.btn_save.setEnabled(enabled)
-        self.btn_revert.setEnabled(enabled)
-        self.btn_undo.setEnabled(enabled)
-        self.btn_redo.setEnabled(enabled)
-
-    ###--------------------------------------- Triggers ----------------------------------###
-
-    def _on_back(self) -> None:
-        if not self._current_session:
-            self.back_requested.emit()
-            return
-        session = self._current_session
-        if session.state == 'loading':
-            reply = QMessageBox.question(
-                self, 'Loading in Progress', 'Data is still loading. Cancel and go back?',
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                session.cancel()
-                session.editor.cleanup()
-                self.back_requested.emit()
-            return
-        if session.state in ('ready', 'error'):
-            editor = session.editor
-            if editor.is_mutable and editor.is_dirty():
-                reply = QMessageBox.question(
-                    self, 'Unsaved Changes', 'Apply changes before closing?',
-                    QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
-                    QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save,
-                )
-                if reply == QMessageBox.StandardButton.Cancel:
-                    return
-                if reply == QMessageBox.StandardButton.Save:
-                    self._waiting_to_close = True
-                    self.save_requested.emit()
-                    return
-                else:
-                    editor.discard_changes()
-        self.back_requested.emit()
-
-    # def _on_apply_confirmed(self, dirty: bool) -> None:
-    #     '''Insure that the editor instance gets the data during the closing state'''
-    #     if not dirty:
-    #         if self._current_session:
-    #             try:
-    #                 self._current_session.editor.dataChanged.disconnect(self._on_apply_confirmed)
-    #             except TypeError:
-    #                 pass
-    #         self.back_requested.emit()
-    
-    def _on_save(self) -> None:
-        if not self._current_session:
-            return
-        editor = self._current_session.editor if self._current_session else None
-        if editor and editor.is_mutable and editor.is_dirty():
-            logger.info(f'Staging modifications for {self._current_session.node.name}...')
-            self.save_requested.emit()
-
-    def _on_revert(self) -> None:
-        if self._current_session and self._current_session.editor.is_mutable:
-            self._current_session.editor.discard_changes()
-
-    def _on_undo(self) -> None:
-        if self._current_session and hasattr(self._current_session.editor, 'undo'):
-            self._current_session.editor.undo()
-
-    def _on_redo(self) -> None:
-        if self._current_session and hasattr(self._current_session.editor, 'redo'):
-            self._current_session.editor.redo()
 
 ###------------------------------------- Menu Bar ------------------------------------------###
 

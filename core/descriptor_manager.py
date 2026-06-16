@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from PyQt6.QtCore import QTimer, QObject
+from PyQt6.QtCore import QTimer, QObject, pyqtSignal
 
 if TYPE_CHECKING:
     from core.node import VfsNode, VfsManager
@@ -65,6 +65,8 @@ class NodeMeta:
 class NodeDescriptorStore(QObject):
     '''Owns the descriptor database.'''
     SAVE_DEBOUNCE_MS = 2000
+    entry_registered = pyqtSignal(str)  # hid str
+    entry_updated    = pyqtSignal(str)  # hid str
 
     def __init__(
         self, 
@@ -147,19 +149,27 @@ class NodeDescriptorStore(QObject):
             tags:   list[str]| None = None,
             target: tuple[int, ...]| None = None,
         ) -> None:
-        '''Create a new descriptor.json entry for any undiscovered files'''
+        '''Create or update store entries'''
         with self._lock:
+            is_new   = hid not in self._db
             existing = self._db.get(hid)
             self._db[hid] = NodeMeta(
-                title=       title       if title       else (existing.title       if existing else ''),
-                description= description if description else (existing.description if existing else ''),
-                tags=        tuple(tags) if tags        else (existing.tags        if existing else ('Unknown',)),
-                target_hid=  target      if target      else (existing.target_hid  if existing else None)
+                title       = title       if title       else (existing.title       if existing else ''),
+                description = description if description else (existing.description if existing else ''),
+                tags        = tuple(tags) if tags        else (existing.tags        if existing else ('Unknown',)),
+                target_hid  = target      if target      else (existing.target_hid  if existing else None)
             )
             self._dirty = True
+        # Update search model
+        if is_new:
             logger.debug(f'Descriptor registered: {hid}')
-            if self._auto_save:
-                self._save_timer.start(self.SAVE_DEBOUNCE_MS)
+            self.entry_registered.emit(hid)
+        else:
+            logger.debug(f'Descriptor updated: {hid}')
+            self.entry_updated.emit(hid)
+        # Trigger save debounce
+        if self._auto_save:
+            self._save_timer.start(self.SAVE_DEBOUNCE_MS)
 
     ### Persistence for expansion
     def save(self) -> None:
@@ -168,7 +178,7 @@ class NodeDescriptorStore(QObject):
         self._save_to_disk()
 
     def _sort_key(self, kv: tuple[str, Any]) -> tuple:
-        parts = kv[0].split('.')
+        parts  = kv[0].split('.')
         sorted = []
         for p in parts:
             try:
@@ -188,7 +198,7 @@ class NodeDescriptorStore(QObject):
         try:
             sorted_ss = dict(sorted(snapshot.items(), key=self._sort_key))
             self._path.write_text(
-                json.dumps(sorted_ss, indent=2, ensure_ascii=False, sort_keys=True),
+                json.dumps(sorted_ss, indent=2, ensure_ascii=False),
                 encoding='utf-8'
             )
             logger.info(f'Descriptor updated - {len(snapshot)} total entries -> {self._path.name}')

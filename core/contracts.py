@@ -218,8 +218,8 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     BaseViewer, is_mutable = False
         Provides no-op for dirty/apply/discard. Editors function as Viewers.
     '''
-    # apply_requested = pyqtSignal(object, object) # (VfsNode, Editor Payload for Handler)
-    dataChanged = pyqtSignal(bool)
+    undo_state_changed = pyqtSignal(bool, bool) # (can_undo, can_redo)
+    dataChanged = pyqtSignal(bool)              # Data changed bool
     is_mutable = True
 
     def __init__(self, parent: QWidget | None = None):
@@ -261,6 +261,12 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     @abc.abstractmethod
     def _populate_ui(self, data: bytes) -> None:
         '''Populate the editor with data from the BG thread'''
+
+    def undo(self) -> None:
+        pass
+
+    def redo(self) -> None:
+        pass
 
     ### Lifecycle
     def cleanup(self) -> None:

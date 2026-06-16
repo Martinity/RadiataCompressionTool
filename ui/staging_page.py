@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal, QAbstractTableModel, QModelIndex
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget, QListWidgetItem, 
-                            QSplitter, QTableView, QHeaderView, QFrame)
+                            QSplitter, QTableView, QHeaderView)
 from PyQt6.QtGui import QFont, QBrush, QColor, QShortcut, QKeySequence
 from core.node import VfsNode, ModTracker
-from utilities import human_size
+from utilities import human_size, hline, vline
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -171,12 +171,12 @@ class HexDiffPanel(QWidget):
         self._new_header.setObjectName('SectionHeader')
         self._orig_header.setObjectName('SectionHeader')
         header_layout.addWidget(self._new_header, stretch=1)
-        header_layout.addWidget(_vline())
+        header_layout.addWidget(vline())
         header_layout.addWidget(self._orig_header, stretch=1)
         header_layout.setContentsMargins(0, 0, 6, 6)
         header_layout.setVerticalSizeConstraint(QHBoxLayout.SizeConstraint.SetFixedSize)
         root.addWidget(headers)
-        root.addWidget(_hline())
+        root.addWidget(hline())
 
         ### Hex diff view
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -425,16 +425,3 @@ def _make_item(node: VfsNode) -> QListWidgetItem:
     item.setData(Qt.ItemDataRole.UserRole, node)
     item.setToolTip(f'{node.hierarchical_id_str}\n{human_size(node.size)}')
     return item
-
-def _hline() -> QFrame:
-    f = QFrame()
-    f.setFrameShape(QFrame.Shape.HLine)
-    f.setFrameShadow(QFrame.Shadow.Sunken)
-    return f
-
-def _vline() -> QFrame:
-    f = QFrame()
-    f.setFrameShape(QFrame.Shape.HLine)
-    f.setFrameShadow(QFrame.Shadow.Sunken)
-    f.setFixedWidth(2)
-    return f

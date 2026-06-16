@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import wave
-from typing import Any, Callable, NamedTuple
+from typing import Any, NamedTuple
 
 from core.node import VfsNode
 from core.registry import Registry
@@ -339,8 +339,6 @@ class TacHandler(LeafHandler):
         self,
         node:              VfsNode,
         action_name:       str,
-        progress_callback: Callable,
-        log_callback:      Callable,
         **kwargs,
     ) -> Any:
         if action_name == 'Properties':
@@ -367,16 +365,8 @@ class TacHandler(LeafHandler):
             if not file_path:
                 return 'No output path provided'
             try:
-                log_callback(f'Decoding {node.name} for WAV export...')
-                progress_callback(20, 'Decoding TAC stream...')
                 wav_bytes, info = decode_tac_to_wav(self._raw)
-                progress_callback(80, 'Writing WAV...')
                 file_path.write_bytes(wav_bytes)
-                log_callback(
-                    f'Exported {info.duration_seconds:.2f}s '
-                    f'({info.total_samples} samples) to {file_path.name}'
-                )
-                progress_callback(100, 'Export complete')
                 return f'Saved to {file_path.name}'
             except Exception as e:
                 logger.error(f'TAC WAV export failed: {e}', exc_info=True)

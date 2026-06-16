@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from PyQt6.QtWidgets import QFrame
 
 def get_resource_path(relative_path: str | Path) -> Path:
     '''
@@ -29,3 +30,16 @@ def human_size(n: int) -> str:
             return f'{value:.1f} {unit}' if unit != 'B' else f'{value} B'
         value /= 1024
     return f'{value:.1f} TB'
+
+def hline() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.HLine)
+    f.setFrameShadow(QFrame.Shadow.Sunken)
+    return f
+
+def vline() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.HLine)
+    f.setFrameShadow(QFrame.Shadow.Sunken)
+    f.setFixedWidth(2)
+    return f

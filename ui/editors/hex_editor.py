@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox,
     QTableView, QHeaderView, QWidget, QMenu, QApplication, QLineEdit, QFrame,
 )
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelection
-from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelection, pyqtSignal
+from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction, QUndoCommand, QUndoStack
 
 from core.contracts import BaseEditor
 from core.handlers.generic_binary_leaf import GenericBinaryHandler
@@ -19,15 +19,39 @@ import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
 
+class HistoryManager(QUndoCommand):
+    '''Stores and handles undo/redo for the hex editor'''
+    def __init__(self, model: HexTableModel, changes: dict[int, int], desciption: str) -> None:
+        super().__init__(desciption)
+        self.model = model
+        self.new_bytes = changes
+        self.old_bytes = {pos: model._data[pos] for pos in changes}
+
+    def redo(self):
+        self.model.apply_changes_dict(self.new_bytes)
+    
+    def undo(self):
+        self.model.apply_changes_dict(self.old_bytes)
+
 @Registry.register_editor(name='Hex Editor', extensions=(), handler=GenericBinaryHandler, is_fallback=True)
 class HexEditorWidget(BaseEditor):
     '''Mutable global fallback editor'''
+    undo_state_changed = pyqtSignal(bool, bool)  # (can_undo, can_redo)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.model: HexTableModel | None = None
+
+        self.undo_stack = QUndoStack(self)
+        self.undo_stack.canUndoChanged.connect(self._on_history_changed)
+        self.undo_stack.canRedoChanged.connect(self._on_history_changed)
+        self.undo_stack.cleanChanged.connect(lambda clean: self.set_dirty(not clean))
+
         self._setup_ui()
         self._setup_shortcuts()
+
+    def _on_history_changed(self) -> None:
+        self.undo_state_changed.emit(self.undo_stack.canUndo(), self.undo_stack.canRedo())
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -84,44 +108,6 @@ class HexEditorWidget(BaseEditor):
         lay.addWidget(btn_next)
         lay.addWidget(self.search_status)
         return bar
-
-    def _build_toolbar(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName('EditorToolbar')
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(10, 5, 10, 5)
-
-        self.info_label = QLabel('Hex View')
-        lay.addWidget(self.info_label)
-        return bar
-
-    def _build_search_bar(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName('EditorToolbar')
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(10, 3, 10, 3)
-
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText('Search hex bytes (e.g.  4A 2F  or  4a2f)...')
-        self.search_input.setFixedHeight(24)
-        self.search_input.returnPressed.connect(self._search_next)
-
-        self.search_status = QLabel('')
-        self.search_status.setFixedWidth(140)
-
-        btn_prev = QPushButton('◀')
-        btn_next = QPushButton('▶')
-        btn_prev.setFixedSize(24, 24)
-        btn_next.setFixedSize(24, 24)
-        btn_prev.clicked.connect(self._search_prev)
-        btn_next.clicked.connect(self._search_next)
-
-        lay.addWidget(QLabel('Find:'))
-        lay.addWidget(self.search_input)
-        lay.addWidget(btn_prev)
-        lay.addWidget(btn_next)
-        lay.addWidget(self.search_status)
-        return bar
     
     def _build_inspector(self) -> QWidget:
         '''Status bar showing byte interpretations at the current cursor position.'''
@@ -147,7 +133,6 @@ class HexEditorWidget(BaseEditor):
         return frame
 
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._on_apply_clicked)
         QShortcut(QKeySequence('Ctrl+C'), self).activated.connect(lambda: self._copy('hex'))
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self.search_input.setFocus)
 
@@ -169,11 +154,12 @@ class HexEditorWidget(BaseEditor):
     def _populate_ui(self, data: bytes) -> None:
         '''Build the hex model from raw bytes
         Called by receive_data() contract implementation (default - bytes)'''
-        self.model = HexTableModel(data)
+        self.undo_stack.clear()
+        self.model = HexTableModel(data, self.undo_stack)
         self.table_view.setModel(self.model)
 
         # Signals
-        self.model.dataChanged.connect(lambda *_: self.set_dirty(True))
+        # self.model.dataChanged.connect(lambda *_: self.set_dirty(True))
         selection_model = self.table_view.selectionModel()
         if selection_model:
             selection_model.currentChanged.connect(self._on_cursor_changed)
@@ -198,15 +184,26 @@ class HexEditorWidget(BaseEditor):
     def get_modified_data(self) -> bytes:
         '''Return the current bytes (Includes modifications)'''
         return self.model.get_bytes() if self.model else self._original_data
+
+    def confirm_changes_applied(self) -> None:
+        self.undo_stack.setClean()
+        super().confirm_changes_applied()
+
+    def undo(self) -> None:
+        self.undo_stack.undo()
+    
+    def redo(self) -> None:
+        self.undo_stack.redo()
+
+    @property
+    def can_undo(self) -> bool:
+        return self.undo_stack.canUndo()
+
+    @property
+    def can_redo(self) -> bool:
+        return self.undo_stack.canRedo()
     
     ###-------------------------- Interactibles --------------------------###
-
-    def _on_apply_clicked(self) -> None:
-        '''Connection from button or Ctrl+S'''
-        if not self.current_node or not self.model:
-            return
-        self.apply_changes()
-        QMessageBox.information(self, 'Applied', f'Changes applied to {self.current_node.name}')
 
     def _selected_bytes(self) -> bytes:
         '''Return the bytes corresponding to the current hex-column selection.'''
@@ -257,28 +254,31 @@ class HexEditorWidget(BaseEditor):
             (idx for idx in selection_model.selectedIndexes() if 1 <= idx.column() <= 16),
             key=lambda i: (i.row(), i.column()),
         )
-        data = self.model.get_bytes_mutable()
+        changes = {}
         for i, idx in enumerate(cells):
             if i >= len(raw):
                 break
             pos = idx.row() * 16 + (idx.column() - 1)
-            if pos < len(data):
-                 data[pos] = raw[i]
-        self.model.notify_all_changed()
-        self.set_dirty(True)
+            if pos < len(self.model._data) and self.model._data[pos] != raw[i]:
+                 changes[pos] = raw[i]
+
+        if changes:
+            stack = HistoryManager(self.model, changes, 'Paste hex bytes')
+            self.undo_stack.push(stack)
 
     def _fill_zero(self) -> None:
         if not self.model:
             return
         selection_model = self.table_view.selectionModel()
-        data = self.model.get_bytes_mutable()
+        changes = {}
         for idx in selection_model.selectedIndexes():
             if 1 <= idx.column() <= 16:
                 pos = idx.row() * 16 + (idx.column() - 1)
-                if pos < len(data):
-                    data[pos] = 0
-        self.model.notify_all_changed()
-        self.set_dirty(True)
+                if pos < len(self.model._data) and self.model._data[pos] != 0:
+                    changes[pos] = 0
+        if changes:
+            stack = HistoryManager(self.model, changes, 'Fill zeros')
+            self.undo_stack.push(stack)
 
     def _show_context_menu(self, pos) -> None:
         if not self.model:
@@ -404,11 +404,12 @@ class HexTableModel(QAbstractTableModel):
     _MODIFIED_FG = QColor('#E2A96B')
     _MODIFIED_BG = QColor('#2A2218')
 
-    def __init__(self, data: bytes, parent=None) -> None:
+    def __init__(self, data: bytes, undo_stack: QUndoStack, parent=None) -> None:
         super().__init__(parent)
-        self._data:     bytearray       = bytearray(data)
-        self._original: bytes           = bytes(data)
-        self._modified: set[int]        = set()
+        self._data:     bytearray  = bytearray(data)
+        self._original: bytes      = data
+        self._modified: set[int]   = set()
+        self.undo_stack            = undo_stack
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return (len(self._data) + 15) // 16
@@ -474,17 +475,27 @@ class HexTableModel(QAbstractTableModel):
         except ValueError:
             return False
 
-        self._data[pos] = new_byte
+        if self._data[pos] == new_byte:
+            return False
 
-        if new_byte != self._original[pos]:
-            self._modified.add(pos)
-        else:
-            self._modified.discard(pos)
-
-        self.dataChanged.emit(index, index)
-        ascii_idx = self.index(index.row(), 17)
-        self.dataChanged.emit(ascii_idx, ascii_idx)
+        cache = HistoryManager(self, {pos: new_byte}, f'Edit byte at {hex(pos)}')
+        self.undo_stack.push(cache)
         return True
+
+    def apply_changes_dict(self, changes: dict[int, int]) -> None:
+        '''Called by undo/redo to mutate the model'''
+        for pos, val in changes.items():
+            self._data[pos] = val
+            if val != self._original[pos]:
+                self._modified.add(pos)
+            else:
+                self._modified.discard(pos)
+            
+            row, col = pos // 16, (pos % 16) + 1
+            idx = self.index(row, col)
+            self.dataChanged.emit(idx, idx)
+            ascii_idx = self.index(row, 17)
+            self.dataChanged.emit(ascii_idx, ascii_idx)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         return None
@@ -497,14 +508,3 @@ class HexTableModel(QAbstractTableModel):
     def get_bytes_mutable(self) -> bytearray:
         '''Return the internal bytearray directly — callers must call notify_all_changed after.'''
         return self._data
-
-    def notify_all_changed(self) -> None:
-        '''Emit dataChanged for the entire model after bulk mutations.'''
-        top_left     = self.index(0, 0)
-        bottom_right = self.index(self.rowCount() - 1, self._COLUMNS - 1)
-        self.dataChanged.emit(top_left, bottom_right)
-        # Recompute modified set
-        self._modified = {
-            i for i, (a, b) in enumerate(zip(self._data, self._original)) if a != b
-        }
-

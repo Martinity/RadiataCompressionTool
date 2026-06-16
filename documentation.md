@@ -522,11 +522,10 @@ StagingPage → tracker.confirm_and_rebuild()
 - write a user guide for plugins
 - Fully deprecate the get_handler_profile in place of get_handler_profiles? If needed -> `/core/...` & `/ui/ui_core.py`
 - Fix HexEditor font not scalling the refresh automatically. To fix '...' need to change zoom currently.
-- Allow adding tags/desc/names in the descriptorpanel for easier metadata collection
 - Figure out a new fps naming/unpacking strategy
-- HistoryManager becomes editor page class with api for redo undo for editors
 - Log level toggling
-- Fully fix the save mechanic from the editor page and how it is handled by the editors
+- Finish polishing the search model and tree model user interactions.
+- Fix TACViewer audio scrubbing. Start() state is never relinquiched
 
 ## Future TODO list:
 
