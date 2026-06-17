@@ -26,7 +26,7 @@ fps payload [28:32] offset to FIS payload + header size (0x40)
         ActionDef('Deconstruct Chain', ActionType.TREE_EXPAND),
         ActionDef('Properties', ActionType.DIALOG)
 ))
-class ChainHandler(ContainerHandler):
+class FpsChainHandler(ContainerHandler):
     @dataclass(frozen=True, slots=True)
     class ChainHeader:
         magic: bytes
@@ -48,16 +48,17 @@ class ChainHandler(ContainerHandler):
             parent=self.handler_parent,
         )
         extensions = generate_ext_overrides()
-        max_size = len(self.data) - 16
+        max_size = len(self.data)
         pos = 0
+        idx = 0
         while pos < max_size:
             raw_header = bytes(self.data[pos:pos+16])
             header_obj = self.parse_header(raw_header)
             ext: str = next((match for sig, match in extensions.items() if header_obj.magic.startswith(sig)), '.bin')
-            ext = f'{ext[0]}Un {ext[1:]}'
+            ext = f'{ext}-Segment'
             
             node = VfsNode(
-                name=f'{hex(pos)} {ext}',
+                name=str(idx),
                 category=self.handler_parent.category,
                 offset=pos,
                 size=header_obj.payload_size + 16,
@@ -70,6 +71,7 @@ class ChainHandler(ContainerHandler):
             if not header_obj.next_file_offset: 
                 break
             pos += header_obj.payload_size + 16
+            idx += 1
 
         logger.info(f'Successfully unpacked {len(root.children)} nodes from chain')
         return root

@@ -517,30 +517,28 @@ StagingPage → tracker.confirm_and_rebuild()
 
 ## Current TODO list:
 
-- mmap over bytes default? stops the copy to memory on handler load, keeps the data on disk
 - Streamline ease of use for editor contract
 - write a user guide for plugins
 - Fully deprecate the get_handler_profile in place of get_handler_profiles? If needed -> `/core/...` & `/ui/ui_core.py`
 - Fix HexEditor font not scalling the refresh automatically. To fix '...' need to change zoom currently.
-- Figure out a new fps naming/unpacking strategy
 - Log level toggling
 - Finish polishing the search model and tree model user interactions.
 - Fix TACViewer audio scrubbing. Start() state is never relinquiched
+- Fix unresolved status updating for registered nodes in search list.
+- Open ISO disabled when ISO currently open, close ISO disabled when no ISO open.
+- Fix FPS payload container extraction to only extract on valid FIS payloads.
+- Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
 
 ## Future TODO list:
 
-- FPS chain unpacking needs to be reevaluated since fps heads may contain other fps chains within -> `/core/handlers/chain_handler.py`
 - FIS editor decoding CLUT shifts 7F to 80, does it matter? -> `/core/handlers/fis_leaf.py`
 - Hex editor toggle for bottom values to display in hex or dec -> `/ui/editors/hex_editor.py`
 - Staging page diff... This could be greatly improved but I don't want to spend a ton of time on anything beyond the basics to allow better analysis of custom format building -> `/ui/ui_core.py`
 - 0FDC unpacking, seems to be an archive of slz format -> `/core/handlers/fdc_handler.py`
-- FIS textures, Bank 6, ~Bank 0, Bank 1. Investigation needed. -> `/core/handlers/fis_handler.py`
 - Icons? -> `/ui/...`
 - seqw handler -> `/core/handler/seqw_handler.py`
-- Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
 
 
-- Editor state/saving management.
 - Handler/Editor handshaking simplification.
 - User facing polish (logging, UI, legend...)
 - Bug fixes

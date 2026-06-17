@@ -14,12 +14,12 @@ import threading
 from pathlib import Path
 from enum import auto, Enum
 from dataclasses import dataclass
-from typing import Callable, Any, TYPE_CHECKING
+from typing import Callable, Any, TYPE_CHECKING, NamedTuple
 from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool
 from core.contracts import LeafHandler, ContainerHandler
 if TYPE_CHECKING:
     from core.node import VfsNode
-    from core.contracts import BaseHandler
+    from core.contracts import BaseHandler, PhysicalHandler
     from core.handlers.iso_container import IsoHandler
     from core.navigator import VfsNavigator
 
@@ -70,6 +70,11 @@ class EditorPayload:
     '''Result structured for editors. Carries node, data'''
     node: 'VfsNode'
     data: Any
+
+class LoadIsoResult(NamedTuple):
+    '''Payload for _on_iso_loaded'''
+    handler: PhysicalHandler
+    root:    VfsNode
 
 ###---------------------------------------- Tasks ------------------------------------------###
 
@@ -226,8 +231,7 @@ class Actions:
             )
         with handler_class(raw_bytes, node.parent) as handler:
             handler.task_handle = task_handle
-            if header_bytes and hasattr(handler, 'datacenter_header'):
-                handler.datacenter_header = header_bytes
+            setattr(handler, 'datacenter_header', header_bytes)
             result = handler.prepare_editor_data(node, raw_bytes)
         logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__} from {handler_class.__name__}')
         return EditorPayload(node=node, data=result)
@@ -323,6 +327,20 @@ class Actions:
                 )
             
     ### ISO Specific actions
+    @staticmethod
+    def load_iso(
+        handler_class: type,
+        path:          Path,
+        task_handle:   TaskHandle,
+    ) -> tuple:
+        '''Read the TOC and split the disk into it's physical files'''
+        task_handle.checkpoint()
+        handler = handler_class(path, None)
+        task_handle.checkpoint()
+        root = handler.get_file_tree()
+        handler.release_handle()
+        return LoadIsoResult(handler, root)
+
     @staticmethod
     def rebuild_iso(
         handler:      'IsoHandler',
@@ -459,8 +477,7 @@ class Actions:
                 raise TypeError(f'{handler_class.__name__} must be ContainerHandler or LeafHandler.')
             with handler_class(node_bytes, node.parent) as handler:
                 handler.task_handle = task_handle
-                if header_bytes and hasattr(handler, 'datacenter_header'):
-                    handler.datacenter_header = header_bytes
+                setattr(handler, 'datacenter_header', header_bytes)
                 payload = handler.execute_action(node, action_name, **kwargs)
             if action_name != 'Properties':
                 task_handle.log_message.emit(f'Action "{action_name}" succeeded for {node.name}')

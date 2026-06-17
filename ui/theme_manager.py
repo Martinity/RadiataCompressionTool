@@ -42,7 +42,7 @@ class RadiataTheme:
 
 class ThemeManager:
     current_font_size = 14
-    active_theme = DarkTheme
+    active_theme: type[DarkTheme] | type[RadiataTheme] = DarkTheme
     _raw_template = None
     _app = None
 

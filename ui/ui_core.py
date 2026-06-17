@@ -22,8 +22,8 @@ from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, 
     QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QSizePolicy,
-    QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QTextBrowser,
-    QScrollArea, QFrame, QGraphicsOpacityEffect, QAbstractItemView, QLineEdit
+    QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QTextBrowser, QStatusBar,
+    QScrollArea, QFrame, QGraphicsOpacityEffect, QAbstractItemView, QLineEdit, QMenuBar
 )
 from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent
 
@@ -97,6 +97,8 @@ class MainWindow(QMainWindow):
         self._setup_statusbar()
         self._connect_signals()
         self._restore_layout()
+        # Start Thread Pool
+        self.dispatcher.task_coordinator.start_task(lambda: None)
 
     def _setup_ui(self) -> None:
         self.setCentralWidget(self.stack)
@@ -108,9 +110,15 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle('Radiata Modding Tool 2.0 Alpha')
         self.resize(1400, 900)
+
+    @property
+    def status_bar(self) -> QStatusBar:
+        bar = self.statusBar()
+        assert bar is not None
+        return bar
     
     def _setup_statusbar(self) -> None:
-        self.statusBar().showMessage('Ready', 3000)
+        self.status_bar.showMessage('Ready', 3000)
 
     def _connect_signals(self) -> None:
         '''Only for main window state signals'''
@@ -119,12 +127,13 @@ class MainWindow(QMainWindow):
         self.staging_page.request_workspace.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
         self.editor_page.back_requested.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
         
+        self.dispatcher.iso_loaded.connect(self._on_iso_loaded)
         self.dispatcher.rebuild_requested.connect(self.start_rebuild)
         self.dispatcher.rebuild_progress.connect(self.rebuild_page.update_progress)
         self.dispatcher.rebuild_log.connect(self.rebuild_page.append_log)
         self.dispatcher.rebuild_complete.connect(self.on_rebuild_complete)
-        self.dispatcher.iso_verified.connect(lambda build: self.statusBar().showMessage(f'Build: {build}', 0))
-        self.dispatcher.io_progress.connect(lambda val, msg: self.statusBar().showMessage(msg))
+        self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(f'Build: {build}', 0))
+        self.dispatcher.io_progress.connect(lambda val, msg: self.status_bar.showMessage(msg))
         self.dispatcher.io_complete.connect(self._handle_io_completion)
 
         self.dispatcher.workspace_log.connect(self.workspace_page.append_log)
@@ -167,16 +176,14 @@ class MainWindow(QMainWindow):
     ###----------------------------------- ISO ----------------------------------###
 
     def attempt_load_iso(self, path: Path) -> None:
-        self.statusBar().showMessage(f'Loading {path.name}')
-        result = self.dispatcher.load_source(path)
-        if result:
-            root_node = result[0] if isinstance(result, (list, tuple)) else result
-            self.controller.init_workspace(root_node)
-            self.stack.setCurrentIndex(1)
-            self.statusBar().showMessage('ISO loaded successfully', 5000)
-            logger.info(f'Successfully loaded: {root_node.name}')
-        else:
-            QMessageBox.critical(self, 'Load Error', 'Failed to initialize ISO.')
+        self.app_settings.last_iso_dir = str(path.parent)
+        self.status_bar.showMessage(f'Loading {path.name}...')
+        self.welcome_page.set_loading(True)
+        task_handle = self.dispatcher.load_source(path)
+        if not isinstance(task_handle, TaskHandle):
+            QMessageBox.critical(self, 'Load Error', f'No handler for {path.name}')
+            return
+        task_handle.log_message.connect(lambda msg: self.status_bar.showMessage(msg, 0))
 
     def start_rebuild(self, staged_nodes: list[VfsNode]) -> None:
         '''Transitions UI and asks for save location before kicking off background thread'''
@@ -192,6 +199,16 @@ class MainWindow(QMainWindow):
         if handle:
             self.rebuild_page.set_task_handle(handle)
 
+    def _on_iso_loaded(self, nodes: list) -> None:
+        if not nodes:
+            QMessageBox.critical(self, 'Load Error', 'Failed to initialise ISO.')
+            self.status_bar.showMessage('Load failed', 5000)
+            return
+        root_node = nodes[0]
+        self.controller.init_workspace(root_node)
+        self.stack.setCurrentIndex(AppPage.WORKSPACE)
+        self.status_bar.showMessage('ISO loaded - verifying build...')
+
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         '''Handles the end of the background thread'''
         self.rebuild_page.on_rebuild_finished()
@@ -203,7 +220,7 @@ class MainWindow(QMainWindow):
 
     def _handle_io_completion(self, success: bool, msg: str):
         if success:
-            self.statusBar().showMessage(msg, 5000)
+            self.status_bar.showMessage(msg, 5000)
         else:
             QMessageBox.warning(self, 'Task Error', msg)
 
@@ -516,8 +533,9 @@ class WorkspaceController(QObject):
         node: VfsNode | None = self.proxy_model.mapToSource(proxy_index).data(Qt.ItemDataRole.UserRole)
         if not node: 
             return
-        
-        self._build_context_menu(node, self.view.tree_view.viewport().mapToGlobal(position))
+        viewport = self.view.tree_view.viewport()
+        if viewport:
+            self._build_context_menu(node, viewport.mapToGlobal(position))
 
     def _build_context_menu(self, node: VfsNode, position) -> None:
         menu = QMenu(self.view)
@@ -527,6 +545,8 @@ class WorkspaceController(QObject):
         for editor_class in editor_classes:
             plugin_name = getattr(editor_class, '_plugin_name', editor_class.__name__)
             open_action = menu.addAction(f'Open in {plugin_name}')
+            if open_action is None:
+                continue
             if editor_class is editor_classes[0]:
                 font = open_action.font()
                 font.setBold(True)
@@ -546,14 +566,15 @@ class WorkspaceController(QObject):
         action_defs.sort(key=lambda a: _ACTION_TYPE_PRIORETY.get(a.action_type, 99))
 
         for action_def in action_defs:
-            if action_def.name == 'Properties': # Filter out properties from user
-                continue
             qt_action = menu.addAction(action_def.name)
+            if action_def.name == 'Properties' or qt_action is None: # Filter out properties from user
+                continue
             qt_action.triggered.connect(lambda checked=False, d=action_def, n=node: self.route_action(n, d))
         
         if self.view.sidebar_stack.currentIndex() == 1: # Add go to in tree view in search view
             search_action = menu.addAction('Go to in Tree View')
-            search_action.triggered.connect(lambda checked=False, n=node: self._handle_goto(n))
+            if search_action is not None:
+                search_action.triggered.connect(lambda checked=False, n=node: self._handle_goto(n))
 
         menu.exec(position)
 
@@ -647,7 +668,7 @@ class WorkspaceController(QObject):
             self._current_session.cancel()
         new_editor = editor_class()
         session = EditorSession(node=node, editor=new_editor)
-        new_editor._session = session
+        # new_editor._session = session
         new_editor.begin_loading(node)
         self.editor_page.load_editor(session)
         self._current_session = session
@@ -931,10 +952,11 @@ class FileDescriptorPanel(QWidget):
         if not self._current_node:
             return
         self._title_edit.setText(self._name_label.text())
-        pills = [
-            self._tags_row.itemAt(i).widget()
+        pills: list[_ClickableTag] = [
+            widget
             for i in range(self._tags_row.count())
-            if isinstance(self._tags_row.itemAt(i).widget(), _ClickableTag)
+            if (item := self._tags_row.itemAt(i)) is not None
+            and isinstance(widget := item.widget(), _ClickableTag)
         ]
         self._tags_edit.setText(', '.join(p.text() for p in pills))
         self._desc_edit.setPlainText(
@@ -1001,8 +1023,9 @@ class WelcomePage(QWidget):
         subtitle = QLabel('Select a Radiata Stories ISO...')
         subtitle.setObjectName('WelcomeSubtitle')
 
-        self.button = QPushButton('Open ISO', self)
+        self.button = QPushButton()
         self.button.setObjectName('WelcomeButton')
+        self.set_loading(False)
         self.button.clicked.connect(self.open_file_dialog)
 
         layout.addWidget(subtitle)
@@ -1014,7 +1037,16 @@ class WelcomePage(QWidget):
         if path:
             self.settings.last_iso_dir = str(Path(path).parent)
             self.request_open.emit(Path(path))
-            
+            # self.button.setText('Loading...')
+
+    def set_loading(self, is_loading: bool) -> None:
+        if is_loading:
+            self.button.setText('Loading...')
+            self.button.setEnabled(False)
+        else:
+            self.button.setText('Open ISO...')
+            self.button.setEnabled(True)
+
 ###------------------------------------- Rebuilding Page -----------------------------------###
 
 class RebuildStatusPage(QWidget):
@@ -1082,7 +1114,7 @@ class RebuildStatusPage(QWidget):
 class MainMenuBar:
     def __init__(
             self, 
-            main_window:      QMainWindow, 
+            main_window:      MainWindow, 
             workspace_page:   WorkspaceWidget, 
             dispatcher:       Dispatcher,
             descriptor_store: NodeDescriptorStore,
@@ -1094,14 +1126,20 @@ class MainMenuBar:
         self._store     = descriptor_store
         self.settings   = app_settings
 
-        self.menu_bar = self.window.menuBar()
         self._build_file_menu()
         self._build_view_menu()
         self._build_descriptor_menu()
         self._build_info_menu()
 
+    @property
+    def menu_bar(self) -> QMenuBar:
+        menu_bar = self.window.menuBar()
+        assert menu_bar is not None
+        return menu_bar
+
     def _build_file_menu(self) -> None:
         file_menu = self.menu_bar.addMenu('&File')
+        assert file_menu is not None
 
         open_action = QAction('Open ISO', self.window)
         open_action.setShortcut('Ctrl+O')
@@ -1123,8 +1161,10 @@ class MainMenuBar:
 
     def _build_view_menu(self) -> None:
         view_menu = self.menu_bar.addMenu('&View')
+        assert view_menu is not None
         # Theme
         theme_menu = view_menu.addMenu('Theme')
+        assert theme_menu is not None
         self._theme_actions: dict[str, QAction] = {}
         for name in ThemeManager.THEMES.keys():
             action = QAction(name, self.window)
@@ -1162,6 +1202,7 @@ class MainMenuBar:
 
     def _build_descriptor_menu(self) -> None:
         descriptor_menu = self.menu_bar.addMenu('Descriptors')
+        assert descriptor_menu is not None
 
         build_action = QAction('Export new JSON', self.window)
         build_action.triggered.connect(self._handle_export_template)
@@ -1173,6 +1214,7 @@ class MainMenuBar:
 
     def _build_info_menu(self) -> None:
         info_menu = self.menu_bar.addMenu('Info')
+        assert info_menu is not None
 
         legend_action = QAction('File Legend', self.window)
         legend_action.triggered.connect(self._handle_legend)
@@ -1188,6 +1230,7 @@ class MainMenuBar:
 
     def _handle_close(self) -> None:
         self.dispatcher.close()
+        self.window.welcome_page.set_loading(False)
         self.window.stack.setCurrentIndex(AppPage.WELCOME)
 
     def _handle_exit(self) -> None:
@@ -1225,7 +1268,7 @@ class MainMenuBar:
 
 class SearchOverlay(QLabel):
     '''Floating centered text overlay that fades when idle for searching'''
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, parent: QWidget | None) -> None:
         super().__init__(parent)
         self.setObjectName('SearchOverlay')
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -1258,11 +1301,13 @@ class SearchOverlay(QLabel):
         self.adjustSize()
 
         if self.parentWidget():
-            geo = self.parentWidget().geometry()
-            self.move(
-                (geo.width() - self.width()) // 2,
-                (geo.height() - self.height()) //2
-            )
+            parent = self.parentWidget()
+            if parent:
+                geo = parent.geometry()
+                self.move(
+                    (geo.width() - self.width()) // 2,
+                    (geo.height() - self.height()) //2
+                )
         self.show()
         self.fade_timer.stop()
         self.idle_timer.start()

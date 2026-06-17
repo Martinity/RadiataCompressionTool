@@ -29,6 +29,7 @@ class Dispatcher(QObject):
     Dispatcher does not need to now what an action needs to execute.
     '''
     # Tree / Tracker
+    iso_loaded        = pyqtSignal(list)     # [root]
     expand_requested  = pyqtSignal(object, object)   # (VfsNode, wait_event)
     node_changed      = pyqtSignal(VfsNode)  # Update for TreeView
     tracking_update   = pyqtSignal(int, int) # (modified_count, staged_count)
@@ -66,7 +67,7 @@ class Dispatcher(QObject):
         self.tracker.rebuild_initiated.connect(self.rebuild_requested.emit)
         self.tracker.state_changed.connect(self._relay_tracking_state)
 
-        self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection)
+        self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection) # pyrefly: ignore this is valid despite stub
 
     def set_descriptor_store(self, store: NodeDescriptorStore) -> None:
         self._descriptor_store = store
@@ -80,7 +81,7 @@ class Dispatcher(QObject):
 
     ###----------------------------------- Public ----------------------------------------###
 
-    def load_source(self, source: Path | VfsNode) -> list[VfsNode]:
+    def load_source(self, source: Path | VfsNode) -> TaskHandle | list[VfsNode]:
         if isinstance(source, Path):
             handler_class = Registry.get_handler(source)
             if not handler_class:
@@ -310,33 +311,42 @@ class Dispatcher(QObject):
 
     ###------------------------------ Helpers --------------------------------###
 
-    def _load_physical(self, handler_class: type, path: Path) -> list[VfsNode]:
-        '''helper for loading physical files'''
+    def _load_physical(self, handler_class: type, path: Path) -> TaskHandle:
+        '''Send ISO loading to a worker thread'''
         if self.active_handler:
             self.active_handler.close()
         if not self._descriptor_store:
             logger.debug(f'No file metadata loaded... {self._descriptor_store}')
 
-        handler = handler_class(path, None)
-        root    = handler.get_file_tree()
-        handler.release_handle()
-        self.active_handler = handler
+        task_handle = self.task_coordinator.start_task(
+            Actions.load_iso,
+            handler_class,
+            path
+        )
+        task_handle.log_message.connect(self.workspace_log.emit)
+        task_handle.finished.connect(lambda ok, result: self._on_iso_loaded(ok, result))
+        return task_handle
+
+        # handler = handler_class(path, None)
+        # root    = handler.get_file_tree()
+        # handler.release_handle()
+        # self.active_handler = handler
         
-        self.vfs = VfsManager(root, node_enricher=self._descriptor_store.enrich if self._descriptor_store else None)
-        self.vfs.enrich_initial_tree()
-        logger.info(f'Workspace initialised: {handler_class.__name__} ({len(self.vfs.nodes_by_id)} nodes)')
-        self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
-        self._migrate_targets_if_needed()
-        for child in root.children:
-            if self._descriptor_store:
-                self._descriptor_store.enrich(child)
-        logger.info(f'Workspace initialized with Root: {handler_class.__name__}')
+        # self.vfs = VfsManager(root, node_enricher=self._descriptor_store.enrich if self._descriptor_store else None)
+        # self.vfs.enrich_initial_tree()
+        # logger.info(f'Workspace initialised: {handler_class.__name__} ({len(self.vfs.nodes_by_id)} nodes)')
+        # self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
+        # self._migrate_targets_if_needed()
+        # for child in root.children:
+        #     if self._descriptor_store:
+        #         self._descriptor_store.enrich(child)
+        # logger.info(f'Workspace initialized with Root: {handler_class.__name__}')
 
-        task_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        task_handle.finished.connect(self._on_iso_verified)
+        # task_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
+        # task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        # task_handle.finished.connect(self._on_iso_verified)
 
-        return [root]
+        # return [root]
 
     def _migrate_targets_if_needed(self) -> None:
         store = self._descriptor_store
@@ -349,8 +359,6 @@ class Dispatcher(QObject):
         count = store.migrate_datacenter_targets()
         store.save()
         logger.info(f'Migration complete: {count} target entries written to {store._path.name}')
-        if self.vfs:
-            self.vfs.enrich_initial_tree()
         logger.info('Re-enrichment pass complete - datacenter nodes have .kods extension.')
 
     ###------------------------ Callback -----------------------###
@@ -388,6 +396,39 @@ class Dispatcher(QObject):
         )
         task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         task_handle.finished.connect(_on_expand_done)
+
+    def _on_iso_loaded(self, success: bool, result: object) -> None:
+        '''Takes the ISO's root+children nodes and intializes:
+        VfsManager -> VfsNavigator -> metadata -> and signals'''
+        from core.workers import LoadIsoResult
+        if not success:
+            msg = str(result) if not isinstance(result, LoadIsoResult) else 'Unknown error'
+            logger.error(f'ISO failed: {msg}')
+            return
+        if not isinstance(result, LoadIsoResult):
+            logger.error(f'_on_iso_loaded: unexpected result type {type(result)}')
+            return
+        handler, root = result.handler, result.root
+        self.active_handler = handler
+        self.vfs = VfsManager(
+            root,
+            node_enricher=(
+                self._descriptor_store.enrich
+                if self._descriptor_store else None
+            )
+        )
+        self.vfs.enrich_initial_tree()
+        logger.info(
+            f'Workspace initialised: {handler.__class__.__name__}'
+            f'({len(self.vfs.nodes_by_id)} nodes)'
+        )
+        self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
+        # self._migrate_targets_if_needed()   #Uncomment for building metadata from scratch
+
+        verify_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
+        verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        verify_handle.finished.connect(self._on_iso_verified)
+        self.iso_loaded.emit([root])
         
     def _on_rebuild_finished(self, success: bool, result: Any) -> None:
         '''Verify type of result and pack signal'''

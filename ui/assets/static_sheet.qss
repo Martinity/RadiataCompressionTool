@@ -4,6 +4,7 @@ QMainWindow, QWidget {
     color: {TEXT};
     font-family: {FONT_SANS};
     font-weight: {BASE_FONT_WEIGHT};
+    border: none;
 }
 
 QTreeView, QListView, QTableView, QListWidget, QTreeWidget {

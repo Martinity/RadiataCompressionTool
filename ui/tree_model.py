@@ -143,8 +143,8 @@ class TreeProxyModel(QSortFilterProxyModel):
 
     def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
         '''Custom sorting logic for columns'''
-        left_node: VfsNode = self.sourceModel().data(left, Qt.ItemDataRole.UserRole)
-        right_node: VfsNode = self.sourceModel().data(right, Qt.ItemDataRole.UserRole)
+        left_node: VfsNode = self.source_model.data(left, Qt.ItemDataRole.UserRole)
+        right_node: VfsNode = self.source_model.data(right, Qt.ItemDataRole.UserRole)
         if not left_node or not right_node:
             return super().lessThan(left, right)
         col = left.column()
@@ -161,13 +161,19 @@ class TreeProxyModel(QSortFilterProxyModel):
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
-        index = self.sourceModel().index(source_row, 0 , source_parent)
+        index = self.source_model.index(source_row, 0 , source_parent)
         node = index.data(Qt.ItemDataRole.UserRole)
         if not node:
             return False
         if not self.show_hidden and node.is_hidden:
             return False
         return True
+
+    @property
+    def source_model(self) -> QAbstractItemModel:
+        source_model = self.sourceModel()
+        assert source_model is not None
+        return source_model
 
 ### -------------------------------------- Flat Search Model -------------------------------------------###
     
