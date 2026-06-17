@@ -5,7 +5,7 @@ QMainWindow, QWidget {
     font-family: {FONT_SANS};
     font-weight: {BASE_FONT_WEIGHT};
     border: none;
-}
+}  
 
 QTreeView, QListView, QTableView, QListWidget, QTreeWidget {
     background-color: {BG_SECONDARY};
@@ -38,22 +38,39 @@ QHeaderView::section:hover {
 }
 
 /* Scrollbars */
-QScrollBar:vertical, QScrollBar:horizontal {
+QScrollBar:vertical {
     background: {BG_SECONDARY};
     width: 12px;
     margin: 0px;
 }
-QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+QScrollBar::handle:vertical {
     background: {INTERACTIVE};
     min-height: 20px;
     border-radius: 5px;
 }
-QScrollBar::handle:hover {
+QScrollBar:horizontal {
+    background: {BG_SECONDARY};
+    height: 12px;
+    margin: 0px;
+}
+QScrollBar::handle:horizontal {
+    background: {INTERACTIVE};
+    min-width: 20px;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
     background: {SCROLL_HOVER};
 }
-QScrollBar::add-line, QScrollBar::sub-line {
-    height: 0;
-    width: 0;
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    height: 0px;
+    width: 0px;
+    background: none;
+    border: none;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+QScrollBar::add-page:horizontal, QScrollBar::add-page:horizontal {
+    background: none;
 }
 
 /* Buttons */
