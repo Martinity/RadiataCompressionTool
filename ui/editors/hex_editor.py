@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import struct
+from typing import Any
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox,
     QTableView, QHeaderView, QWidget, QMenu, QApplication, QLineEdit, QFrame,
@@ -21,15 +22,15 @@ logger = logging.getLogger(f'radiata.{__name__}')
 
 class HistoryManager(QUndoCommand):
     '''Stores and handles undo/redo for the hex editor'''
-    def __init__(self, model: HexTableModel, changes: dict[int, int], desciption: str) -> None:
-        super().__init__(desciption)
-        self.model = model
+    def __init__(self, model: HexTableModel, changes: dict[int, int], description: str) -> None:
+        super().__init__(description)
+        self.model     = model
         self.new_bytes = changes
         self.old_bytes = {pos: model._data[pos] for pos in changes}
 
     def redo(self):
         self.model.apply_changes_dict(self.new_bytes)
-    
+
     def undo(self):
         self.model.apply_changes_dict(self.old_bytes)
 
@@ -85,7 +86,7 @@ class HexEditorWidget(BaseEditor):
         # Restrict search bar width so it doesn't stretch awkwardly across the screen
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText('Search bytes (e.g. 4A 2F)...')
-        self.search_input.setFixedWidth(250) 
+        self.search_input.setFixedWidth(250)
         self.search_input.setFixedHeight(24)
         self.search_input.returnPressed.connect(self._search_next)
 
@@ -108,7 +109,7 @@ class HexEditorWidget(BaseEditor):
         lay.addWidget(btn_next)
         lay.addWidget(self.search_status)
         return bar
-    
+
     def _build_inspector(self) -> QWidget:
         '''Status bar showing byte interpretations at the current cursor position.'''
         frame = QFrame()
@@ -151,15 +152,20 @@ class HexEditorWidget(BaseEditor):
             self.model = None
         self._reset_inspector()
 
-    def _populate_ui(self, data: bytes) -> None:
-        '''Build the hex model from raw bytes
-        Called by receive_data() contract implementation (default - bytes)'''
+    def _populate_ui(self, data: Any) -> None:
+        '''
+        Build the hex model from raw bytes.
+        Called by BaseEditor.receive_data (bytes path) and by discard_changes.
+        Clearing the undo stack here marks it clean
+        '''
+        if not isinstance(data, bytes):
+            self.info_label.setText('Cannot display: expected bytes')
+            return
+
         self.undo_stack.clear()
         self.model = HexTableModel(data, self.undo_stack)
         self.table_view.setModel(self.model)
 
-        # Signals
-        # self.model.dataChanged.connect(lambda *_: self.set_dirty(True))
         selection_model = self.table_view.selectionModel()
         if selection_model:
             selection_model.currentChanged.connect(self._on_cursor_changed)
@@ -181,29 +187,41 @@ class HexEditorWidget(BaseEditor):
         )
         logger.debug(f'HexEditor: populated {len(data)} bytes.')
 
-    def get_modified_data(self) -> bytes:
-        '''Return the current bytes (Includes modifications)'''
-        return self.model.get_bytes() if self.model else self._original_data
+    def show_error(self, message: str) -> None:
+        '''Show error inline in the header bar.'''
+        self.info_label.setText(f'Load failed: {message}')
+        super().show_error(message)   # also logs
+
+    def current_data(self) -> Any:
+        '''Return current bytes including any in-progress edits.'''
+        return self.model.get_bytes() if self.model else self._original_payload
 
     def confirm_changes_applied(self) -> None:
         self.undo_stack.setClean()
         super().confirm_changes_applied()
 
+    def discard_changes(self) -> None:
+        '''Revert the editor to the last saved state.'''
+        if not self.is_dirty() or not self.current_node:
+            return
+        self._pending_data = None
+        # _populate_ui clears the undo stack → cleanChanged(True) → set_dirty(False)
+        self._populate_ui(self._original_payload)
+
     def undo(self) -> None:
         self.undo_stack.undo()
-    
+
     def redo(self) -> None:
         self.undo_stack.redo()
 
-    @property
-    def can_undo(self) -> bool:
-        return self.undo_stack.canUndo()
+    def cleanup(self) -> None:
+        self.table_view.setModel(None)
+        self.model = None
+        super().cleanup()
 
-    @property
-    def can_redo(self) -> bool:
-        return self.undo_stack.canRedo()
-    
-    ###-------------------------- Interactibles --------------------------###
+    # ------------------------------------------------------------------
+    # Selection helpers
+    # ------------------------------------------------------------------
 
     def _selected_bytes(self) -> bytes:
         '''Return the bytes corresponding to the current hex-column selection.'''
@@ -226,7 +244,6 @@ class HexEditorWidget(BaseEditor):
         raw = self._selected_bytes()
         if not raw:
             return
-
         if fmt == 'hex':
             text = ' '.join(f'{b:02X}' for b in raw)
         elif fmt == 'python':
@@ -237,7 +254,6 @@ class HexEditorWidget(BaseEditor):
             text = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in raw)
         else:
             return
-
         QApplication.clipboard().setText(text)
 
     def _paste_hex(self) -> None:
@@ -263,8 +279,7 @@ class HexEditorWidget(BaseEditor):
                  changes[pos] = raw[i]
 
         if changes:
-            stack = HistoryManager(self.model, changes, 'Paste hex bytes')
-            self.undo_stack.push(stack)
+            self.undo_stack.push(HistoryManager(self.model, changes, 'Paste hex bytes'))
 
     def _fill_zero(self) -> None:
         if not self.model:
@@ -277,8 +292,7 @@ class HexEditorWidget(BaseEditor):
                 if pos < len(self.model._data) and self.model._data[pos] != 0:
                     changes[pos] = 0
         if changes:
-            stack = HistoryManager(self.model, changes, 'Fill zeros')
-            self.undo_stack.push(stack)
+            self.undo_stack.push(HistoryManager(self.model, changes, 'Fill zeros'))
 
     def _show_context_menu(self, pos) -> None:
         if not self.model:
@@ -372,23 +386,20 @@ class HexEditorWidget(BaseEditor):
         )
         def safe_unpack(fmt: str, size: int) -> str:
             return str(struct.unpack_from(fmt, data, pos)[0]) if pos + size <= len(data) else '-'
-        
+
         self._insp_u16_le.setText(f'u16 LE: {safe_unpack("<H", 2)}')
         self._insp_u32_le.setText(f'u32 LE: {safe_unpack("<I", 4)}')
 
     def _on_selection_changed(self, *_) -> None:
         raw = self._selected_bytes()
-        self._insp_sel.setText(f'Sel: {len(raw)} bytes{"s" if len(raw) != 1 else ""}' if raw else 'Sel: -')
+        n   = len(raw)
+        self._insp_sel.setText(f'Sel: {n} byte{"s" if n != 1 else ""}' if raw else 'Sel: -')
 
     def _reset_inspector(self) -> None:
         for lbl in (self._insp_offset, self._insp_u8, self._insp_i8, self._insp_sel):
             text = lbl.text().split(':')[0]
             lbl.setText(f'{text}: —')
 
-    def cleanup(self) -> None:
-        self.table_view.setModel(None)
-        self.model = None
-        super().cleanup()
 
 ###---------------------------------------- Model -------------------------------------###
 
@@ -477,9 +488,7 @@ class HexTableModel(QAbstractTableModel):
 
         if self._data[pos] == new_byte:
             return False
-
-        cache = HistoryManager(self, {pos: new_byte}, f'Edit byte at {hex(pos)}')
-        self.undo_stack.push(cache)
+        self.undo_stack.push(HistoryManager(self, {pos: new_byte}, f'Edit byte at {hex(pos)}'))
         return True
 
     def apply_changes_dict(self, changes: dict[int, int]) -> None:
@@ -494,8 +503,7 @@ class HexTableModel(QAbstractTableModel):
             row, col = pos // 16, (pos % 16) + 1
             idx = self.index(row, col)
             self.dataChanged.emit(idx, idx)
-            ascii_idx = self.index(row, 17)
-            self.dataChanged.emit(ascii_idx, ascii_idx)
+            self.dataChanged.emit(self.index(row, 17), self.index(row, 17))
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         return None
@@ -508,3 +516,4 @@ class HexTableModel(QAbstractTableModel):
     def get_bytes_mutable(self) -> bytearray:
         '''Return the internal bytearray directly — callers must call notify_all_changed after.'''
         return self._data
+

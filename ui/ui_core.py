@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from enum import IntEnum
-from typing import Any
+from typing import Any, Callable
 
 from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer, QEvent
 from PyQt6.QtWidgets import (
@@ -33,12 +33,11 @@ from core.registry import Registry, GLOBAL_ACTIONS
 from core.contracts import BaseEditor
 from core.workers import ActionStatus, ActionResult, ActionType, ActionDef, EditorPayload, TaskHandle
 from core.descriptor_manager import NodeDescriptorStore
-from ui.editor_session import EditorSession
 from ui.logger import LoggingWindow
 from ui.tree_model import TreeProxyModel, VfsTreeModel, FlatSearchModel
 from ui.theme_manager import ThemeManager
 from ui.staging_page import StagingPage
-from ui.editor_page import EditorPage
+from ui.editor_page import EditorPage, EditorSession
 from ui.settings import AppSettings
 from utilities import human_size, get_resource_path, hline
 
@@ -230,8 +229,7 @@ class MainWindow(QMainWindow):
         s.h_splitter = self.workspace_page.h_splitter.saveState()
         s.v_splitter = self.workspace_page.v_splitter.saveState()
         s.sync()
-        if self.dispatcher:
-            self.dispatcher.close()
+        self.dispatcher.close()
         return super().closeEvent(a0)
 
 ###------------------------------------------ Workspace UI -------------------------------------###
@@ -333,7 +331,6 @@ class WorkspaceController(QObject):
         self.dispatcher.tracking_update.connect(self.on_tracking_update)
         self.dispatcher.action_complete.connect(self.handle_action_result)
 
-        self.editor_page.save_requested.connect(self.request_save)
         self._current_session: EditorSession | None = None
 
         self.view.descriptor_panel.metadata_changed.connect(self._on_metadata_changed)
@@ -667,29 +664,37 @@ class WorkspaceController(QObject):
         if self._current_session and not self._current_session.is_done():
             self._current_session.cancel()
         new_editor = editor_class()
-        session = EditorSession(node=node, editor=new_editor)
-        # new_editor._session = session
+        # Build the dispatch funtion that will close confirm/reject callbacks
+        def dispatch_fn(node: VfsNode, data: Any) -> None:
+            self.dispatcher.apply_edit(
+                node, data,
+                on_success=session.confirm_save,
+                on_failure=session.reject_save,
+            )
+        session = EditorSession(node=node, editor=new_editor, dispatch_callback=dispatch_fn)
+        self._current_session = session
         new_editor.begin_loading(node)
         self.editor_page.load_editor(session)
-        self._current_session = session
 
         window = self.view.window()
         if isinstance(window, QMainWindow) and hasattr(window, 'stack'):
             window.stack.setCurrentIndex(AppPage.EDITOR)
-        signals = self.dispatcher.open_editor(node, new_editor)
-        if not signals:
-            session.fail('Navigator not initialised.')
-            raise ValueError('Navigator not initialized')
-        signals.finished.connect(
-            lambda succes, payload, s=session: self._on_editor_data_ready(s, succes, payload)
+        task_handle = self.dispatcher.open_editor(node, new_editor)
+        if not task_handle:
+            session.fail('Navigato not initialised.')
+            return
+        session.set_active_task(task_handle)
+        task_handle.finished.connect(
+            lambda success, payload, s=session: self._on_editor_data_ready(s, success, payload)
         )
+
         plugin_name = getattr(editor_class, '_plugin_name', editor_class.__name__)
         logger.info(f'Opening "{node.name}" in {plugin_name} [{session!r}]')
 
     def request_save(self) -> None:
         '''Called to save editor data'''
         if self._current_session:
-            self._current_session.apply_changes(self.dispatcher.apply_edit)
+            self._current_session.apply_changes()
 
     def _on_editor_data_ready(self, session: EditorSession, success: bool, payload: Any) -> None:
         '''Pass processed handler data to editor. Passes through 5 guards first.'''

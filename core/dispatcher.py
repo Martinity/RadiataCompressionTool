@@ -128,7 +128,13 @@ class Dispatcher(QObject):
             return b''
         return self.nav.unwrap_chain(node)
 
-    def apply_edit(self, node: VfsNode, data: Any, editor: BaseEditor | None = None) -> None:
+    def apply_edit(
+        self, 
+        node: VfsNode, 
+        data: Any, 
+        on_success: Callable[[], None]    | None = None,
+        on_failure: Callable[[str], None] | None = None,
+    ) -> None | TaskHandle:
         '''Pushes changes to the tracker.
         If data is not bytes, dispatches to a background worker to decode the payload
         Notifies the editor when finished'''
@@ -136,18 +142,16 @@ class Dispatcher(QObject):
             original = self.get_node_data(node) if node not in self.tracker._originals else b''
             self.tracker.mark_modified(node, data, original)
             logger.info(f'Edit applied directly: {node.name}')
-            if editor:
-                editor.confirm_changes_applied()
+            if on_success:
+                on_success()
             return
 
-        if not editor:
-            return
         handler_class = Registry.get_handler(node)
         if not handler_class:
             error_msg = f'No handler registered for {node.name} to compile payload.'
             logger.error(error_msg)
-            if editor:
-                editor.reject_changes_applied(error_msg)
+            if on_failure:
+                on_failure(error_msg)
             return
         # Start task
         task_handle = self.task_coordinator.start_task(
@@ -156,14 +160,15 @@ class Dispatcher(QObject):
             node,
             data
         )
-        # Link task to editor
-        session = getattr(editor, '_session', None)
-        if session and hasattr(session, 'set_active_task'):
-            session.set_active_task(task_handle)
-        # Connect signals
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.log_message.connect(
+            self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit
+        )
         task_handle.finished.connect(
-            lambda success, result: self._on_decode_done(success, result, node, editor))
+            lambda success, result: self._on_decode_done(
+                success, result, node, on_success, on_failure
+            )
+        )
+        return task_handle
 
     def open_editor(self, node: VfsNode, editor: BaseEditor) -> TaskHandle | None:
         '''
@@ -195,10 +200,6 @@ class Dispatcher(QObject):
             node,
             self.nav,
         )
-        # Link task to editor
-        session = getattr(editor, '_session', None)
-        if session and hasattr(session, 'set_active_task'):
-            session.set_active_task(task_handle)
         # Connect signals
         task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         return task_handle
@@ -299,8 +300,7 @@ class Dispatcher(QObject):
 
     def close(self) -> None:
         '''For exiting the dispatch'''
-        if self.task_coordinator:
-            self.task_coordinator.shutdown()
+        self.task_coordinator.shutdown()
         if self.active_handler:
             self.active_handler.close()
         self.vfs            = None
@@ -326,27 +326,6 @@ class Dispatcher(QObject):
         task_handle.log_message.connect(self.workspace_log.emit)
         task_handle.finished.connect(lambda ok, result: self._on_iso_loaded(ok, result))
         return task_handle
-
-        # handler = handler_class(path, None)
-        # root    = handler.get_file_tree()
-        # handler.release_handle()
-        # self.active_handler = handler
-        
-        # self.vfs = VfsManager(root, node_enricher=self._descriptor_store.enrich if self._descriptor_store else None)
-        # self.vfs.enrich_initial_tree()
-        # logger.info(f'Workspace initialised: {handler_class.__name__} ({len(self.vfs.nodes_by_id)} nodes)')
-        # self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
-        # self._migrate_targets_if_needed()
-        # for child in root.children:
-        #     if self._descriptor_store:
-        #         self._descriptor_store.enrich(child)
-        # logger.info(f'Workspace initialized with Root: {handler_class.__name__}')
-
-        # task_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
-        # task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        # task_handle.finished.connect(self._on_iso_verified)
-
-        # return [root]
 
     def _migrate_targets_if_needed(self) -> None:
         store = self._descriptor_store
@@ -484,24 +463,23 @@ class Dispatcher(QObject):
 
         self.action_complete.emit(result)
 
-    def _on_decode_done(self, success: bool, result: Any, node: VfsNode, editor: BaseEditor) -> None:
+    def _on_decode_done(
+        self, 
+        success: bool, 
+        result: Any, 
+        node: VfsNode, 
+        on_success: Callable[[], None]    | None,
+        on_failure: Callable[[str], None] | None
+    ) -> None:
         '''Callback for when handler finishes decoding'''
-        logger.info('In _on_decode_done')
-        session = getattr(editor, '_session', None)
-
         if success and isinstance(result, bytes):
             original = self.get_node_data(node) if node not in self.tracker._originals else b''
             self.tracker.mark_modified(node, result, original)
-            logger.info(f'Edit applied after background compilation: {node.name}')
-            if session and hasattr(session, 'confirm_save'):
-                session.confirm_save()
-            else:
-                editor.confirm_changes_applied()
-            self.node_changed.emit(node)
+            logger.info(f'Edit applied after decode: {node.name}')
+            if on_success:
+                on_success()
         else:
-            error_msg = str(result) if not success else f'Compilation returned {type(result).__name__}, expected bytes'
-            logger.error(f'Payload compilation failed: {error_msg}')
-            if session and hasattr(session, 'reject_save'):
-                session.reject_save(error_msg)
-            else:
-                editor.reject_changes_applied(error_msg)
+            error_msg = str(result) if not success else f'decode returned {type(result).__name__}'
+            logger.error(f'Decode failed: {error_msg}')
+            if on_failure:
+                on_failure()

@@ -199,24 +199,22 @@ class _ABCMetaQtMeta(type(QWidget), abc.ABCMeta): # type: ignore
 
 class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     '''
-    Base class for all editor widgets.
+    Minimum required implementation for a mutable editor:
 
-    WorkspaceController calls editor.begin_loading(node) on the man thread
-        the editor shows a placeholder until data is ready
-    Actions.prepare_editor runs on a worker thread
-        raw_bytes = navigator.unwrap_chain(node)
-        result = handler.prepare_editor_data(node, raw_bytes)
-    WorspaceController calls editor.receive_data(result) on the main thread.
-        eidtor populates itself with the processed result.
+        _populate_ui(data)            render the payload in your widget
+        current_data() -> Any         return the current widget state for saving
+                                        (needed for non-bytes types data)
 
-    For simple editors (ex. HexEditorWidget) the handler returns raw bytes
-    For complexe editors (ex. FisEditorWidget) the handler returns a processed result (QImage, FISInfo)
+    Minimum required implementation for a read-only editor:
 
-    Mutability
-    BaseEditor, is_mutable = True (default) 
-        Editors function as Editors
-    BaseViewer, is_mutable = False
-        Provides no-op for dirty/apply/discard. Editors function as Viewers.
+        Inherit from BaseViewer instead
+        _populate_ui(data)            render the payload in your widget
+
+    Optional:
+        undo() / redo()               implement and emit undo_state_changed
+        confirm_changes_applied()     called on save success
+        show_error(message)           override the error display for custom UIs
+        cleanup()                     release resources (timers, sinks, handles)
     '''
     undo_state_changed = pyqtSignal(bool, bool) # (can_undo, can_redo)
     dataChanged = pyqtSignal(bool)              # Data changed bool
@@ -224,11 +222,11 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.current_node:   VfsNode | None = None
-        self._is_dirty:      bool           = False
-        self._original_data: bytes          = b''
-        self._pending_data:  bytes | None   = None
-        self._data_resolver: Callable[['VfsNode'], bytes] | None = None
+        self.current_node:      VfsNode | None = None
+        self._is_dirty:         bool           = False
+        self._original_payload: Any            = None
+        self._pending_data:     bytes   | None = None
+        self._data_resolver:    Callable[['VfsNode'], bytes] | None = None
 
     def __repr__(self) -> str:
         node_name = self.current_node.name if self.current_node else "None"
@@ -249,18 +247,19 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         Override for handlers that return non-bytes results.
         '''
         self._data_resolver = data_resolver
+        self._original_payload = result
         if isinstance(result, bytes):
-            self._original_data = result
             self.set_dirty(False)
             self._populate_ui(result)
         else:
-            logger.error(
-                f'{self.__class__.__name__} returned {type(result).__name__}. Override receive_data for non-bytes results '
+            self.show_error(
+                f'Receive data got {type(result).__name__}, expected bytes.'
+                f'Override receive_data or ensure handler.prepare_editor_data returns bytes.'
             )
             
     @abc.abstractmethod
-    def _populate_ui(self, data: bytes) -> None:
-        '''Populate the editor with data from the BG thread'''
+    def _populate_ui(self, data: Any) -> None:
+        '''Populate the editor with return from associated handler.prepare_editor_data'''
 
     def undo(self) -> None:
         pass
@@ -271,9 +270,9 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     ### Lifecycle
     def cleanup(self) -> None:
         '''Editor Destructor'''
-        self.current_node   = None
-        self._original_data = b''
-        self._data_resolver = None
+        self.current_node      = None
+        self._original_payload = None
+        self._data_resolver    = None
         self.set_dirty(False)
 
     ### Data access
@@ -283,45 +282,32 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         logger.warning(f'Data resolver not initialized. Cannot fetch data for {target_node.name}')
         return b''
     
-    def get_modified_data(self) -> bytes:
-        '''Return the current state of loaded node'''
-        return self._original_data
+    def current_data(self) -> Any:
+        '''Return the live state'''
+        return self._original_payload
 
-    def stage_pending_data(self) -> None:
-        '''Returns the frozen state for diff'''
-        self._pending_data = self.get_modified_data()
+    def snapshot(self) -> None:
+        '''Freeze the state'''
+        self._pending_data = self.current_data()
     
     ### Mutability management
-    def apply_changes(self) -> None:
-        '''Pushes changed snapshot to the Dispatcher/ModTracker'''
-        if  not self.is_dirty() or not self.current_node:
-            logger.warning(f'Bailed out of apply_changes is_dirty={self._is_dirty} current_node={type(self.current_node)}')
-            return
-        # self._apply_in_flight = True
-        self._pending_data = self.get_modified_data()
-
     def confirm_changes_applied(self) -> None:
         '''Called by dispatcher after handler successfully applied decoded editor data to node'''
         if self._pending_data is not None:
-            self._original_data = self._pending_data
+            self._original_payload = self._pending_data
             self._pending_data  = None
         self.set_dirty(False)
 
     def reject_changes_applied(self, reason: str) -> None:
         '''Called by dispatcher when handler failed to decode editor data'''
         self._pending_data = None
-        self.show_error(reason)
-
-    def mark_clean(self) -> None:
-        '''Called by session when state is saved successfully'''
-        self._pending_data = self.get_modified_data()
-        self.set_dirty(False)
+        logger.error(f'{self.__class__.__name__} save rejected: {reason}')
 
     def discard_changes(self) -> None:
-        '''Reverts the UI back to the original state'''
+        '''Reverts the node data back to original state'''
         if self.is_dirty() and self.current_node:
             self._pending_data = None
-            self._populate_ui(self._original_data)
+            self._populate_ui(self._original_payload)
             self.set_dirty(False)
 
     def set_dirty(self, state: bool):
@@ -340,24 +326,9 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
 ###----------------------------------- Read Only Editors ----------------------------------###
 
 class BaseViewer(BaseEditor):
-    '''Convenience base for used for Read Only Editors.
-    provides no-ops for all mutabiility functions'''
+    '''Convenience base for Read Only Editors.
+    provides no-ops for all mutable logic'''
     is_mutable = False
 
     def set_dirty(self, state: bool):
-        pass
-
-    def apply_changes(self) -> None:
-        pass
-
-    def discard_changes(self) -> None:
-        pass
-
-    def get_modified_data(self) -> bytes:
-        return self._original_data
-    
-    def confirm_changes_applied(self) -> None:
-        pass
-
-    def reject_changes_applied(self, reason: str) -> None:
         pass

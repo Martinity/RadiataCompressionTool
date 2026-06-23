@@ -8,7 +8,7 @@ from typing import Any
 from PyQt6.QtCore import QTimer, Qt, QIODevice
 from PyQt6.QtWidgets import QWidget, QFrame, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QCheckBox, QSlider, QMessageBox, QFileDialog, QStyle, QStyleOptionSlider
 from PyQt6.QtGui import QPainter, QPen
-from PyQt6.QtMultimedia import QAudioSink, QAudioFormat, QAudio
+from PyQt6.QtMultimedia import QAudioSink, QAudioFormat
 from core.contracts import BaseViewer
 from core.node import VfsNode
 from core.registry import Registry
@@ -291,7 +291,7 @@ class TacAudioEditor(BaseViewer):
         if self._audio_device and self._audio_device.at_end():
             self._audio_device.set_position_ms(0)
         self._start_playback()
- 
+
     def _on_loop_toggled(self, checked: bool) -> None:
         if self._audio_device:
             self._audio_device.set_loop_enabled(checked)
@@ -316,7 +316,6 @@ class TacAudioEditor(BaseViewer):
         if not self._audio_sink:
             self._audio_sink = QAudioSink(self._audio_format(), self)
             self._audio_sink.setVolume(self._volume_slider.value() / 100)
-            self._audio_sink.stateChanged.connect(self._on_audio_state_changed)
         self._audio_sink.start(self._audio_device)
         self._is_playing = True
         self._btn_play_pause.setText("⏸")
@@ -324,9 +323,11 @@ class TacAudioEditor(BaseViewer):
  
     def _pause_playback(self) -> None:
         if self._audio_sink:
-            self._audio_sink.suspend()
+            self._audio_sink.stop()
+            self._audio_sink.deleteLater()
+            self._audio_sink = None
         self._is_playing = False
-        self._btn_play_pause.setText("▶")
+        self._btn_play_pause.setText('▶')
         self._playback_timer.stop()
  
     def _stop_playback(self) -> None:
@@ -337,9 +338,9 @@ class TacAudioEditor(BaseViewer):
             self._audio_sink = None
         if self._audio_device and self._audio_device.isOpen():
             self._audio_device.close()
+            self._audio_device.set_position_ms(0)
         self._is_playing = False
-        if hasattr(self, "_btn_play_pause"):
-            self._btn_play_pause.setText("▶")
+        self._btn_play_pause.setText("▶")
  
     def _sync_playback_ui(self) -> None:
         if not self._audio_device:
@@ -354,15 +355,6 @@ class TacAudioEditor(BaseViewer):
     def _set_volume(self, value: int) -> None:
         if self._audio_sink:
             self._audio_sink.setVolume(value / 100)
- 
-    def _on_audio_state_changed(self, state: QAudio.State) -> None:
-        if state != QAudio.State.IdleState or not self._is_playing or not self._audio_device:
-            return
-        if self._loop_checkbox.isChecked():
-            self._audio_device.set_loop_enabled(True)
-            self._audio_sink.start(self._audio_device)
-        else:
-            self._pause_playback()
  
     def _audio_format(self) -> QAudioFormat:
         fmt = QAudioFormat()
@@ -390,9 +382,9 @@ class TacAudioEditor(BaseViewer):
         self._stop_playback()
         super().cleanup()
  
-    def closeEvent(self, event) -> None:
+    def closeEvent(self, a0) -> None:
         self._stop_playback()
-        super().closeEvent(event)
+        super().closeEvent(a0)
 
 ###------------------------------------------ Playback Widgets --------------------------------------------###
 
@@ -405,8 +397,8 @@ class LoopSeekSlider(QSlider):
         self._loop_position = -1 if position is None else position
         self.update()
 
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
+    def paintEvent(self, ev) -> None:
+        super().paintEvent(ev)
         if self._loop_position < self.minimum() or self._loop_position > self.maximum():
             return
 
@@ -490,7 +482,7 @@ class PcmLoopDevice(QIODevice):
 
         return bytes(out)
 
-    def writeData(self, data: bytes) -> int:
+    def writeData(self, a0) -> int:
         return -1
 
     def bytesAvailable(self) -> int:
