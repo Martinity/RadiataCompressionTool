@@ -45,22 +45,39 @@ class FpsPayloadHandler(ContainerHandler):
         fis_offset = int.from_bytes(self.data[0x18:0x1B], 'little') + 0x40
         fis_payload = self.data[fis_offset:]
 
-        raw_header = bytes(fis_payload[:16])
-        ext: str = next((match for sig, match in extensions.items() if raw_header.startswith(sig)), '.bin')
+        pos = 0
+        while pos < len(fis_payload):
+            raw_header = bytes(fis_payload[pos:pos+16])
+            if len(fis_payload[pos:]) < 0x30 or fis_payload[pos:pos+4] != b'FIS\00':
+                break
+            ext: str = next((match for sig, match in extensions.items() if raw_header.startswith(sig)), '.bin')
+            size = self.parse_fis(bytes(fis_payload[pos:]))
+            node = VfsNode(
+                name=f'FIS texture ({self.handler_parent.hierarchical_id_str}.*)',
+                category=self.handler_parent.category,
+                offset=fis_offset + pos,
+                size=size,
+                header=raw_header,
+                extension=ext,
+                parent=root
+            )
+            root.append_child(node)
+            pos += size
 
-        node = VfsNode(
-            name=f'FIS texture ({self.handler_parent.hierarchical_id_str}.*)',
-            category=self.handler_parent.category,
-            offset=fis_offset,
-            size=len(fis_payload),
-            header=raw_header,
-            extension=ext,
-            parent=root
-        )
-        root.append_child(node)
-
-        logger.debug(f'Successfully extracted FIS from {fis_offset}, size: {len(fis_payload)}')
+            logger.debug(f'Successfully extracted FIS from offset {fis_offset}, size: {size}bytes')
         return root
+
+    def parse_fis(self, data: bytes) -> int:
+        '''Parse FIS header and determine size'''
+        pre_image_size      = int.from_bytes(data[0x1C:0x1C+4], 'little')
+        pal_storage_size    = int.from_bytes(data[0x20:0x20+4], 'little')
+        img_hdr_off         = pre_image_size + 0x10
+        if img_hdr_off + 0x10 > len(data):
+            logger.warning('Invalid FIS payload')
+        image_size = int.from_bytes(data[img_hdr_off + 4:img_hdr_off+8], 'little')
+        image_offset = int.from_bytes(data[img_hdr_off+0x08:img_hdr_off+0x08+4], 'little')
+        pal_off = img_hdr_off - pal_storage_size
+        return pal_off + image_offset + image_size + 0x10
 
     def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
         if not self.task_handle:

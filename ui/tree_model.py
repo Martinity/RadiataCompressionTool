@@ -264,7 +264,9 @@ class FlatSearchModel(QAbstractListModel):
 
         descriptor_store.entry_registered.connect(self._on_entry_registered)
         descriptor_store.entry_updated.connect(self._on_entry_updated)
-        vfs.insert_start.connect(self._on_vfs_nodes_inserted)
+        self._pending_insert: tuple[VfsNode, int, int] | None = None
+        vfs.insert_start.connect(self._on_insert_start)
+        vfs.insert_finished.connect(self._on_insert_finished)
 
     ### Qt API
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -354,6 +356,16 @@ class FlatSearchModel(QAbstractListModel):
             self._upgrade_or_append(child)
             if child.children:
                 self._upgrade_from_vfs(child)
+
+    def _on_insert_start(self, parent: VfsNode, first: int, last: int) -> None:
+        self._pending_insert = (parent, first, last)
+
+    def _on_insert_finished(self) -> None:
+        if not self._pending_insert:
+            return
+        parent, first, last = self._pending_insert
+        self._pending_insert = None
+        self._on_vfs_nodes_inserted(parent, first, last)
 
     def _on_vfs_nodes_inserted(self, parent: VfsNode, first: int, last: int) -> None:
         '''Called when new nodes are added to the VFS'''

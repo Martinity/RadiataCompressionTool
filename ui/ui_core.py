@@ -567,8 +567,10 @@ class WorkspaceController(QObject):
         action_defs.sort(key=lambda a: _ACTION_TYPE_PRIORETY.get(a.action_type, 99))
 
         for action_def in action_defs:
+            if action_def.name == 'Properties': # Filter out properties from user
+                continue
             qt_action = menu.addAction(action_def.name)
-            if action_def.name == 'Properties' or qt_action is None: # Filter out properties from user
+            if qt_action is None:
                 continue
             qt_action.triggered.connect(lambda checked=False, d=action_def, n=node: self.route_action(n, d))
         
@@ -652,7 +654,8 @@ class WorkspaceController(QObject):
             proxy_parent_idx = self.proxy_model.mapFromSource(source_parent_idx)
             if proxy_parent_idx.isValid():
                 self.view.tree_view.setExpanded(proxy_parent_idx, True)
-                QTimer.singleShot(0, lambda: self._scroll_to(proxy_parent_idx))
+                if self.view.sidebar_stack.currentIndex() == 1: # For search model actions scroll to
+                    QTimer.singleShot(0, lambda: self._scroll_to(proxy_parent_idx))
 
     def _scroll_to(self, proxy_index: QModelIndex) -> None:
         '''Scroll to the selected proxy index'''
