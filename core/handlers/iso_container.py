@@ -198,7 +198,6 @@ class IsoHandler(PhysicalHandler):
         '''Rebuilds the ISO, preserving physical ordering, aliasing, and system file integrity.'''
         if output_path.resolve() == self.source.resolve():
             raise ValueError('Cannot overwrite source ISO')
-        logger.info(f'Rebuilding ISO to {output_path}')
         staged_set = set(staged_nodes)
         try:
             with open(self.path, 'rb') as src, open(output_path, 'wb') as dst: # open private handle
@@ -317,7 +316,6 @@ class IsoHandler(PhysicalHandler):
  
     def verify_iso_integrity(self, task_handle: TaskHandle) -> str:
         '''Verify radiata iso. Check what version of the disk is running.'''
-        logger.debug('Verifying ISO integrity')
         # Check hash against known hashes
         with open(self.path, 'rb') as fh:
             hasher = xxhash.xxh128()

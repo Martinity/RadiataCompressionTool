@@ -46,11 +46,9 @@ class KodsHandler(ContainerHandler):
         if self.datacenter_header:
             header_view = memoryview(self.datacenter_header)
             header_obj = self.archiver.parse_header(header_view, False)
-            logger.warning(f'Datacenter Header: Header view size = {len(header_view)}. Number of entries = {header_obj.num_entries}')
         else:
             header_obj = self.archiver.parse_header(self.payload_view, True)
             header_view = self.payload_view[:header_obj.payload_offset]
-            logger.warning(f'Internal Header: Header view size = {len(header_view)}. Number of entries = {header_obj.num_entries}')
         master_map = self.archiver.get_kods_map(header_view, is_internal)
         extensions = generate_ext_overrides()
 
@@ -80,11 +78,11 @@ class KodsHandler(ContainerHandler):
             )
             root.append_child(node)
 
-        logger.info(f'Unpacked {len(root.children)} sections from {root.name}')
+        logger.debug(f'Unpacked {len(root.children)} sections from {root.name}')
         return root
 
     def get_raw_node(self, node: VfsNode) -> bytes:
-        logger.debug(f'Read {node.size} from {node.offset}')
+        logger.debug(f'Read {node.size} bytes from offset {node.offset}')
         return self.payload_view[node.offset : node.offset + node.size].tobytes()
 
     ###------------------------------------- Rebuild ---------------------------------------------------###

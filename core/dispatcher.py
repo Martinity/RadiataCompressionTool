@@ -141,14 +141,14 @@ class Dispatcher(QObject):
         if isinstance(data, bytes): # Bytes type payload passthrough
             original = self.get_node_data(node) if node not in self.tracker._originals else b''
             self.tracker.mark_modified(node, data, original)
-            logger.info(f'Edit applied directly: {node.name}')
+            logger.info(f'Modified: "{node.name}" added to rebuild queue.')
             if on_success:
                 on_success()
             return
 
         handler_class = Registry.get_handler(node)
         if not handler_class:
-            error_msg = f'No handler registered for {node.name} to compile payload.'
+            error_msg = f'No handler registered for "{node.name}" to compile payload.'
             logger.error(error_msg)
             if on_failure:
                 on_failure(error_msg)
@@ -397,10 +397,6 @@ class Dispatcher(QObject):
             )
         )
         self.vfs.enrich_initial_tree()
-        logger.info(
-            f'Workspace initialised: {handler.__class__.__name__}'
-            f'({len(self.vfs.nodes_by_id)} nodes)'
-        )
         self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
         # self._migrate_targets_if_needed()   #Uncomment for building metadata from scratch
 
@@ -457,7 +453,7 @@ class Dispatcher(QObject):
                     if new_nodes:
                         self.vfs.insert_children(result.node, new_nodes)
                         result.node.expansion_pending = False
-                        logger.info(f'Inserted {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
+                        logger.debug(f'Inserted {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
             case _:
                 pass # PROCESS / DIALOG / EXPORT -- UI handled via action_complete
 
@@ -475,11 +471,11 @@ class Dispatcher(QObject):
         if success and isinstance(result, bytes):
             original = self.get_node_data(node) if node not in self.tracker._originals else b''
             self.tracker.mark_modified(node, result, original)
-            logger.info(f'Edit applied after decode: {node.name}')
+            logger.info(f'Modified: "{node.name}" added to rebuild queue.')
             if on_success:
                 on_success()
         else:
             error_msg = str(result) if not success else f'decode returned {type(result).__name__}'
             logger.error(f'Decode failed: {error_msg}')
             if on_failure:
-                on_failure()
+                on_failure(error_msg)

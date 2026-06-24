@@ -69,7 +69,7 @@ class EditorSession:
         if self._state == 'cancelled':
             return
         if sip.isdeleted(self.editor):
-            logger.debug(f'Session {self.session_id} commit aborted: C++ Editor is dead.')
+            logger.debug(f'Session {self.session_id} commit aborted: C++ Editor object is dead.')
             return
         self.editor.confirm_changes_applied()
         self._transition('ready')
@@ -82,7 +82,7 @@ class EditorSession:
         if self._state == 'cancelled':
             return
         if sip.isdeleted(self.editor):
-            logger.debug(f'Session {self.session_id} reject aborted: C++ Editor is dead.')
+            logger.debug(f'Session {self.session_id} reject aborted: C++ Editor object is dead.')
             return
         self.editor.reject_changes_applied(reason)
         self._transition('ready')

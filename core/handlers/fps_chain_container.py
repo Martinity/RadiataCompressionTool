@@ -73,7 +73,7 @@ class FpsChainHandler(ContainerHandler):
             pos += header_obj.payload_size + 16
             idx += 1
 
-        logger.info(f'Successfully unpacked {len(root.children)} nodes from chain')
+        logger.debug(f'Successfully unpacked {len(root.children)} nodes from chain')
         return root
 
     def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:

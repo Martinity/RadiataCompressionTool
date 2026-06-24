@@ -59,7 +59,7 @@ class FpsPayloadHandler(ContainerHandler):
         )
         root.append_child(node)
 
-        logger.info(f'Successfully extracted FIS from {fis_offset}, size: {len(fis_payload)}')
+        logger.debug(f'Successfully extracted FIS from {fis_offset}, size: {len(fis_payload)}')
         return root
 
     def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
@@ -76,6 +76,7 @@ class FpsPayloadHandler(ContainerHandler):
             else:
                 self.task_handle.log_message.emit(f'No FPS changes size stays the same: {node.size}={len(self.data)}')
                 return bytes(self.data)
+        return b''
 
     def get_properties(self, node: VfsNode):
         return 'Not yet Implemented'

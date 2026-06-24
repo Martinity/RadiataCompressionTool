@@ -127,7 +127,7 @@ class TacAudioEditor(BaseViewer):
         self._info_rows: dict[str, QLabel] = {}
         for key in (
             "Sample rate", "Channels", "Frames", "Samples",
-            "Duration", "Loop", "File size", "Huffman offset", "Joint stereo",
+            "Duration", "Loop", "Huffman offset", "Joint stereo",
         ):
             row = QHBoxLayout()
             row.addWidget(QLabel(f"{key}:"))
@@ -219,7 +219,6 @@ class TacAudioEditor(BaseViewer):
         self._info_rows["Samples"].setText(str(info.total_samples))
         self._info_rows["Duration"].setText(f"{info.duration_seconds:.2f}s")
         self._info_rows["Loop"].setText(loop)
-        self._info_rows["File size"].setText(hex(info.file_size))
         self._info_rows["Huffman offset"].setText(hex(info.huffman_offset))
         self._info_rows["Joint stereo"].setText(str(info.joint_stereo))
 

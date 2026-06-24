@@ -75,6 +75,14 @@ class AppSettings:
         self._q.setValue('show_log_console', value)
 
     @property
+    def verbose_logging(self) -> bool:
+        return self._q.value('verbose_logging', False, type=bool)
+
+    @verbose_logging.setter
+    def verbose_logging(self, value: bool) -> None:
+        self._q.setValue('verbose_logging', value)
+
+    @property
     def show_hidden_files(self) -> bool:
         return self._q.value('show_hidden_files', False, type=bool)
     

@@ -287,7 +287,6 @@ class ModTracker(QObject):
         if not self.rebuild_queue:
             return
         staged_nodes = list(self.rebuild_queue)
-        logger.info(f'Initiating rebuild with {len(staged_nodes)} staged files.')
         self.rebuild_initiated.emit(staged_nodes)
 
     def clear(self) -> None:

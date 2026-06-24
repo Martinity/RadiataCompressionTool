@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from enum import IntEnum
-from typing import Any, Callable
+from typing import Any
 
 from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer, QEvent
 from PyQt6.QtWidgets import (
@@ -97,7 +97,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._restore_layout()
         # Start Thread Pool
-        self.dispatcher.task_coordinator.start_task(lambda: None)
+        self.dispatcher.task_coordinator.start_task(lambda **kwargs: None)
 
     def _setup_ui(self) -> None:
         self.setCentralWidget(self.stack)
@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
         bar = self.statusBar()
         assert bar is not None
         return bar
-    
+
     def _setup_statusbar(self) -> None:
         self.status_bar.showMessage('Ready', 3000)
 
@@ -125,7 +125,7 @@ class MainWindow(QMainWindow):
         self.workspace_page.btn_review.clicked.connect(lambda: self.stack.setCurrentIndex(AppPage.STAGING))
         self.staging_page.request_workspace.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
         self.editor_page.back_requested.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
-        
+
         self.dispatcher.iso_loaded.connect(self._on_iso_loaded)
         self.dispatcher.rebuild_requested.connect(self.start_rebuild)
         self.dispatcher.rebuild_progress.connect(self.rebuild_page.update_progress)
@@ -149,6 +149,7 @@ class MainWindow(QMainWindow):
             self.workspace_page.v_splitter.restoreState(s.v_splitter)
         self._apply_theme()
         self.workspace_page.log_console.setVisible(s.show_log_console)
+        logging.getLogger('radiata').setLevel(logging.DEBUG if self.app_settings.verbose_logging else logging.INFO)
 
     def _apply_theme(self) -> None:
         '''Apply the current_theme at current _zoom_delta'''
@@ -171,7 +172,7 @@ class MainWindow(QMainWindow):
         self.current_theme = theme_name
         self._apply_theme()
         self.app_settings.theme_name = theme_name
-    
+
     ###----------------------------------- ISO ----------------------------------###
 
     def attempt_load_iso(self, path: Path) -> None:
@@ -207,6 +208,9 @@ class MainWindow(QMainWindow):
         self.controller.init_workspace(root_node)
         self.stack.setCurrentIndex(AppPage.WORKSPACE)
         self.status_bar.showMessage('ISO loaded - verifying build...')
+        has_iso = bool(nodes)
+        self.menu_manager.open_action.setEnabled(not has_iso)
+        self.menu_manager.close_action.setEnabled(has_iso)
 
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         '''Handles the end of the background thread'''
@@ -285,7 +289,7 @@ class WorkspaceWidget(QWidget):
         bar_layout.setContentsMargins(12,8,12,8)
 
         self.status_label = QLabel('No pending ISO modifications')
-        self.btn_review = QPushButton('Review & Rebuild ISO')
+        self.btn_review = QPushButton('Review Rebuild Queue')
         bar_layout.addWidget(self.status_label)
         bar_layout.addStretch()
         bar_layout.addWidget(self.btn_review)
@@ -660,7 +664,8 @@ class WorkspaceController(QObject):
     ###------------------- Editor --------------------###
 
     def launch_editor(self, node: VfsNode, editor_class: type[BaseEditor]) -> None:
-        '''Instantiate new editor and create view for it'''
+        '''Instantiate new editor and create view for it.
+        Create the close session callback and task handle.'''
         if self._current_session and not self._current_session.is_done():
             self._current_session.cancel()
         new_editor = editor_class()
@@ -689,12 +694,7 @@ class WorkspaceController(QObject):
         )
 
         plugin_name = getattr(editor_class, '_plugin_name', editor_class.__name__)
-        logger.info(f'Opening "{node.name}" in {plugin_name} [{session!r}]')
-
-    def request_save(self) -> None:
-        '''Called to save editor data'''
-        if self._current_session:
-            self._current_session.apply_changes()
+        logger.info(f'Opening "{node.name}" in {plugin_name}')
 
     def _on_editor_data_ready(self, session: EditorSession, success: bool, payload: Any) -> None:
         '''Pass processed handler data to editor. Passes through 5 guards first.'''
@@ -1042,7 +1042,6 @@ class WelcomePage(QWidget):
         if path:
             self.settings.last_iso_dir = str(Path(path).parent)
             self.request_open.emit(Path(path))
-            # self.button.setText('Loading...')
 
     def set_loading(self, is_loading: bool) -> None:
         if is_loading:
@@ -1146,16 +1145,16 @@ class MainMenuBar:
         file_menu = self.menu_bar.addMenu('&File')
         assert file_menu is not None
 
-        open_action = QAction('Open ISO', self.window)
-        open_action.setShortcut('Ctrl+O')
-        open_action.triggered.connect(self._handle_open)
-        file_menu.addAction(open_action)
+        self.open_action = QAction('Open ISO', self.window)
+        self.open_action.setShortcut('Ctrl+O')
+        self.open_action.triggered.connect(self._handle_open)
+        file_menu.addAction(self.open_action)
 
-
-        close_action = QAction('Close ISO', self.window)
-        close_action.setShortcut('Ctrl+W')
-        close_action.triggered.connect(self._handle_close)
-        file_menu.addAction(close_action)
+        self.close_action = QAction('Close ISO', self.window)
+        self.close_action.setShortcut('Ctrl+W')
+        self.close_action.setEnabled(False)
+        self.close_action.triggered.connect(self._handle_close)
+        file_menu.addAction(self.close_action)
 
         file_menu.addSeparator()
 
@@ -1199,6 +1198,12 @@ class MainMenuBar:
         toggle_log.triggered.connect(self._handle_toggle_log)
         view_menu.addAction(toggle_log)
 
+        toggle_verbose_logging = QAction('Verbose Logging', self.window)
+        toggle_verbose_logging.setCheckable(True)
+        toggle_verbose_logging.setChecked(self.settings.verbose_logging)
+        toggle_verbose_logging.triggered.connect(self._handle_toggle_verbose)
+        view_menu.addAction(toggle_verbose_logging)
+
         toggle_hidden = QAction('Show Hidden Files', self.window)
         toggle_hidden.setCheckable(True)
         toggle_hidden.setChecked(self.settings.show_hidden_files)
@@ -1235,6 +1240,8 @@ class MainMenuBar:
 
     def _handle_close(self) -> None:
         self.dispatcher.close()
+        self.open_action.setEnabled(True)
+        self.close_action.setEnabled(False)
         self.window.welcome_page.set_loading(False)
         self.window.stack.setCurrentIndex(AppPage.WELCOME)
 
@@ -1249,6 +1256,10 @@ class MainMenuBar:
     def _handle_toggle_log(self, checked: bool) -> None:
         self.workspace.log_console.setVisible(checked)
         self.settings.show_log_console = checked
+
+    def _handle_toggle_verbose(self, checked: bool) -> None:
+        logging.getLogger('radiata').setLevel(logging.DEBUG if checked else logging.INFO)
+        self.settings.verbose_logging = checked
 
     def _handle_toggle_hidden(self, checked: bool) -> None:
         '''Pass the toggle signal to the proxy model'''

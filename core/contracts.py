@@ -225,7 +225,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         self.current_node:      VfsNode | None = None
         self._is_dirty:         bool           = False
         self._original_payload: Any            = None
-        self._pending_data:     bytes   | None = None
+        self._pending_data:     Any            = None
         self._data_resolver:    Callable[['VfsNode'], bytes] | None = None
 
     def __repr__(self) -> str:

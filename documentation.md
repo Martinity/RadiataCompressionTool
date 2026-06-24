@@ -517,16 +517,11 @@ StagingPage → tracker.confirm_and_rebuild()
 
 ## Current TODO list:
 
-- Streamline ease of use for editor contract
 - write a user guide for plugins
-- Fully deprecate the get_handler_profile in place of get_handler_profiles? If needed -> `/core/...` & `/ui/ui_core.py`
-- Fix HexEditor font not scalling the refresh automatically. To fix '...' need to change zoom currently.
-- Log level toggling
 - Finish polishing the search model and tree model user interactions.
-- Fix TACViewer audio scrubbing. Start() state is never relinquiched
 - Fix unresolved status updating for registered nodes in search list.
 - Open ISO disabled when ISO currently open, close ISO disabled when no ISO open.
-- Fix FPS payload container extraction to only extract on valid FIS payloads.
+- Fix FPS payload container extraction to only extract on valid FIS payloads. And extract multiple payloads if applicable
 - Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
 
 ## Future TODO list:

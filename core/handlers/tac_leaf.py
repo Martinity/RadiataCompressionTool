@@ -355,7 +355,6 @@ class TacHandler(LeafHandler):
                     f'Total samples:  {info.total_samples}\n'
                     f'Duration:       {info.duration_seconds:.2f}s\n'
                     f'Loop:           {loop}\n'
-                    f'File size:      {hex(info.file_size)}\n'
                     f'Joint stereo:   {info.joint_stereo}'
                 )
             except Exception as e:

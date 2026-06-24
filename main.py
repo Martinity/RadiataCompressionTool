@@ -20,7 +20,7 @@ if __name__ == '__main__':
     # Initialize ThemeManager
     ThemeManager.initialize(app)
     # Initialize logger
-    qt_log_handler = setup_logging(level=logging.DEBUG)
+    qt_log_handler = setup_logging()
     # Initialize logic
     dispatcher = Dispatcher()
     # Initialize window

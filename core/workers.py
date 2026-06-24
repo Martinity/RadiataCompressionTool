@@ -220,10 +220,10 @@ class Actions:
 
         Returns EditorPayload(node, data) 
         '''
-        task_handle.log_message.emit(f'Preparing editor data for {node.name}...')
+        task_handle.log_message.emit(f'Preparing editor data for "{node.name}"...')
         raw_bytes = node.pending_data or navigator.unwrap_chain(node)
         if not raw_bytes:
-            raise ValueError(f'unwrap_chain returned empty bytes for {node.name}')
+            raise ValueError(f'unwrap_chain returned empty bytes for "{node.name}"')
         header_bytes = navigator.resolve_data_from_hid(node.target)
         if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
             raise TypeError(
@@ -469,7 +469,7 @@ class Actions:
         execute action with handle
         '''
         if action_name != 'Properties':
-            task_handle.log_message.emit(f'Starting {action_name} on node: {node.name}...')
+            task_handle.log_message.emit(f'Starting "{action_name}" on node: {node.name}...')
         try:
             node_bytes   = navigator.unwrap_chain(node)
             header_bytes = navigator.resolve_data_from_hid(node.target)
@@ -480,7 +480,7 @@ class Actions:
                 setattr(handler, 'datacenter_header', header_bytes)
                 payload = handler.execute_action(node, action_name, **kwargs)
             if action_name != 'Properties':
-                task_handle.log_message.emit(f'Action "{action_name}" succeeded for {node.name}')
+                task_handle.log_message.emit(f'Finished "{action_name}" on node: {node.name}.')
             return ActionResult(
                 action_name=action_name, 
                 node=node, 
