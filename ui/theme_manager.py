@@ -14,7 +14,7 @@ class DarkTheme:
     TEXT              = '#dcddde'
     ACCENT            = '#7f6df2'
     ACCENT_HOVER      = '#8875ff'
-    SUCCESS           = '#197300'
+    SUCCESS           = '#a8a9ad'
     INTERACTIVE       = '#2a2a2a'
     INTERACTIVE_HOVER = '#303030'
     SCROLL_BG         = 'rgba(255, 255, 255, 0.05)'

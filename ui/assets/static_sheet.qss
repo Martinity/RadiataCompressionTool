@@ -97,11 +97,16 @@ QMenuBar::item:selected {
 
 QMenu {
     background-color {BG_SECONDARY};
-    color: {TEXT};
     border: 1px solid {BORDER};
 }
 QMenu::item:selected {
     background-color: {ACCENT};
+}
+QMenu:enabled {
+    color: {TEXT};
+}
+QMenu:disabled {
+    color: {SUCCESS};
 }
 
 /* Inputs */
@@ -203,6 +208,12 @@ QToolTip {
 }
 #FloatClearButton:pressed {
     background-color: {ACCENT};
+}
+#FloatClearButton:enabled {
+    color: {TEXT};
+}
+#FloatClearButton:disabled {
+    color: {BG_SECONDARY};
 }
 
 #DescriptorTag {

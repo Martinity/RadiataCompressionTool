@@ -68,19 +68,6 @@ class BaseHandler(abc.ABC):
                 self.owns_handle = False
                 self.handle = None
 
-    def is_cancelling(self) -> bool:
-        return self.task_handle.is_cancelling() if self.task_handle else False
-
-    def report_progress(self, percentage:int, message: str = '') -> None:
-        if self.task_handle:
-            self.task_handle.progress.emit(percentage, message)
-
-    def log(self, message: str) -> None:
-        if self.task_handle:
-            self.task_handle.log_message.emit(message)
-        else:
-            logger.info(message)
-
     def execute_action(
         self, 
         node:             VfsNode, 
@@ -136,7 +123,10 @@ class PhysicalHandler(BaseHandler):
         self.owns_handle = True
 
     def release_handle(self) -> None:
-        '''Close the init handle after all files have been added to VFS'''
+        '''
+        Release the init handle after get_file_tree().
+        Subsequent physical node access must open private handles with source_path
+        '''
         if self.handle and not self.handle.closed:
             self.handle.close()
         self.handle = None

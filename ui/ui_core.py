@@ -752,7 +752,7 @@ class WorkspaceController(QObject):
                 return True
 
             text = key_event.text()
-            if text and text.isprintable(): # Printable
+            if text and text.isprintable(): # Ensure Printable
                 self.search_buffer += text
                 self.on_search_updated(self.search_buffer)
                 self.search_overlay.show_text(self.search_buffer)
@@ -1178,6 +1178,8 @@ class MainMenuBar:
             action.setCheckable(True)
             action.setChecked(name == self.settings.theme_name)
             action.triggered.connect(lambda checked, n=name: self._handle_theme_change(n))
+            if action.isChecked():
+                action.setEnabled(False)
             theme_menu.addAction(action)
             self._theme_actions[name] = action
         # Zoom
@@ -1198,18 +1200,21 @@ class MainMenuBar:
         toggle_log = QAction('Show Log Console', self.window)
         toggle_log.setCheckable(True)
         toggle_log.setChecked(self.settings.show_log_console)
+        toggle_log.setToolTip('Hides the bottom log window in file browser.')
         toggle_log.triggered.connect(self._handle_toggle_log)
         view_menu.addAction(toggle_log)
 
         toggle_verbose_logging = QAction('Verbose Logging', self.window)
         toggle_verbose_logging.setCheckable(True)
         toggle_verbose_logging.setChecked(self.settings.verbose_logging)
+        toggle_verbose_logging.setToolTip('Set logger to "debug" mode')
         toggle_verbose_logging.triggered.connect(self._handle_toggle_verbose)
         view_menu.addAction(toggle_verbose_logging)
 
         toggle_hidden = QAction('Show Hidden Files', self.window)
         toggle_hidden.setCheckable(True)
         toggle_hidden.setChecked(self.settings.show_hidden_files)
+        toggle_hidden.setToolTip('Hides core File System nodes and Sentinels')
         toggle_hidden.triggered.connect(self._handle_toggle_hidden)
         view_menu.addAction(toggle_hidden)
 

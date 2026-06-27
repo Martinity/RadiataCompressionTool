@@ -155,7 +155,7 @@ class HexEditorWidget(BaseEditor):
     def _populate_ui(self, data: Any) -> None:
         '''
         Build the hex model from raw bytes.
-        Called by BaseEditor.receive_data (bytes path) and by discard_changes.
+        Called by BaseEditor.receive_data (bytes path) and by discard_changes to refresh the view.
         Clearing the undo stack here marks it clean
         '''
         if not isinstance(data, bytes):
