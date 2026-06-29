@@ -1,6 +1,6 @@
-'''Contains all logic for interfacing with descriptor json"s
+'''Contains all logic for interfacing with metadata json"s
 NodeMeta            - Translates JSON <-> Application
-NodeDescriptorStore - Updates node metadata, updates descriptor with new entries
+NodeMetadataStore   - Updates node metadata, updates metadata with new entries
 DatacenterTargets   - Links files to datacenter headers'''
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
-###--------------------------------- Metadata/Descriptor --------------------------------------###
+###--------------------------------- Metadata --------------------------------------###
 
 @dataclass(frozen=True)
 class NodeMeta:
@@ -62,8 +62,8 @@ class NodeMeta:
 
 ###--------------------------------------- Store ----------------------------------------------###
 
-class NodeDescriptorStore(QObject):
-    '''Owns the descriptor database.'''
+class NodeMetadataStore(QObject):
+    '''Owns the metadata database.'''
     SAVE_DEBOUNCE_MS = 2000
     entry_registered = pyqtSignal(str)  # hid str
     entry_updated    = pyqtSignal(str)  # hid str
@@ -72,7 +72,7 @@ class NodeDescriptorStore(QObject):
         self, 
         json_path: Path, 
         *, 
-        auto_save: bool = True, 
+        auto_save: bool = False, 
         parent:    QObject | None = None
     ) -> None:
         super().__init__(parent)
@@ -90,7 +90,7 @@ class NodeDescriptorStore(QObject):
     def load(self) -> None:
         '''Parse json into a flat dict[str, NodeMeta]'''
         if not self._path.exists():
-            logger.info(f'Descriptor file not found at {self._path} - Starting anew')
+            logger.info(f'metadata file not found at {self._path} - Starting anew')
             return 
         try:
             raw: dict[str, dict] = json.loads(self._path.read_text(encoding='utf-8'))
@@ -100,16 +100,16 @@ class NodeDescriptorStore(QObject):
                 try:
                     parsed[hid] = NodeMeta.from_dict(entry)
                 except Exception as e:
-                    logger.debug(f'Descriptor parse error for "{hid}": {e}')
+                    logger.debug(f'Metadata parse error for "{hid}": {e}')
                     errors += 1
             with self._lock:
                 self._db = parsed
             logger.info(
-                f'Loaded {len(parsed)} descriptors from {self._path.name}'
+                f'Loaded {len(parsed)} metadata from {self._path.name}'
                 + (f' ({errors} skipped)' if errors else '') 
             )
         except Exception as e:
-            logger.error(f'Failed to load descriptor database: {e}', exc_info=True)
+            logger.error(f'Failed to load metadata database: {e}', exc_info=True)
         
     def enrich(self, node: VfsNode) -> None:
         '''Stamp metadata onto a node'''
@@ -162,10 +162,10 @@ class NodeDescriptorStore(QObject):
             self._dirty = True
         # Update search model
         if is_new:
-            logger.debug(f'Descriptor registered: {hid}')
+            logger.debug(f'Metadata registered: {hid}')
             self.entry_registered.emit(hid)
         else:
-            logger.debug(f'Descriptor updated: {hid}')
+            logger.debug(f'Metadata updated: {hid}')
             self.entry_updated.emit(hid)
         # Trigger save debounce
         if self._auto_save:
@@ -173,7 +173,7 @@ class NodeDescriptorStore(QObject):
 
     ### Persistence for expansion
     def save(self) -> None:
-        '''Current descriptor back to disk'''
+        '''Current metadata back to disk'''
         self._save_timer.stop()
         self._save_to_disk()
 
@@ -188,7 +188,7 @@ class NodeDescriptorStore(QObject):
         return tuple(sorted)
 
     def _save_to_disk(self) -> None:
-        logger.debug('Attempting to save updated Descriptors to disk...')
+        logger.debug('Attempting to save updated metadata to disk...')
         with self._lock:
             if not self._dirty:
                 logger.debug('No new entries.')
@@ -201,9 +201,9 @@ class NodeDescriptorStore(QObject):
                 json.dumps(sorted_ss, indent=2, ensure_ascii=False),
                 encoding='utf-8'
             )
-            logger.info(f'Descriptor updated - {len(snapshot)} total entries -> {self._path.name}')
+            logger.info(f'Metadata updated - {len(snapshot)} total entries -> {self._path.name}')
         except Exception as e:
-            logger. error(f'Failed to save descriptor: {e}', exc_info=True)
+            logger. error(f'Failed to save metadata: {e}', exc_info=True)
             with self._lock:
                 self._dirty = True
 
@@ -245,7 +245,7 @@ class NodeDescriptorStore(QObject):
             if disk_idx_str not in self._db:
                 self.register(disk_idx_str, target=hid_tuple)
                 count += 1
-        logger.info(f'Migrate {count} datacenter target entries into descriptor store.')
+        logger.info(f'Migrate {count} datacenter target entries into metadata store.')
         return count
 
 ###--------------------------------------------- Radiata Datacenter targets --------------------------------------------------------###
@@ -298,7 +298,7 @@ class DatacenterTargets:
 
     @classmethod
     def to_hid_str_map(cls):
-        '''Used to export and repopulate descriptor with target_hids
+        '''Used to export and repopulate metadata with target_hids
         yields hid string representations mapped to flat integer tuples'''
         for disk_idx, hid in cls._TARGET_STATIC.items():
             yield str(disk_idx), hid

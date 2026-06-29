@@ -10,7 +10,7 @@ MainWindow
     EditorPage
 
 MainWindow always contains log console
-WorkspacePage always contains FileDescriptorPanel and SearchOverlay
+WorkspacePage always contains FileMetadataPanel and SearchOverlay
 '''
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from core.dispatcher import Dispatcher
 from core.registry import Registry, GLOBAL_ACTIONS
 from core.contracts import BaseEditor
 from core.workers import ActionStatus, ActionResult, ActionType, ActionDef, EditorPayload, TaskHandle
-from core.descriptor_manager import NodeDescriptorStore
+from core.metadata_manager import NodeMetadataStore
 from ui.logger import LoggingWindow
 from ui.tree_model import TreeProxyModel, VfsTreeModel, FlatSearchModel
 from ui.theme_manager import ThemeManager
@@ -72,14 +72,14 @@ class MainWindow(QMainWindow):
         self.settings      = QSettings('RadiataModding', 'Tool')
         self.current_theme = self.app_settings.theme_name
         self._zoom_delta = self.app_settings.zoom_delta
-        # Setup descriptor database
-        self.descriptor_store = NodeDescriptorStore(get_resource_path('ui/assets/radi_metadata.json'), auto_save=True, parent=self)
-        self.descriptor_store.load()
-        self.dispatcher.set_descriptor_store(self.descriptor_store)
+        # Setup metadata database
+        self.metadata_store = NodeMetadataStore(get_resource_path('ui/assets/radi_metadata.json'), auto_save=True, parent=self)
+        self.metadata_store.load()
+        self.dispatcher.set_metadata_store(self.metadata_store)
         # Setup View
         self.stack          = QStackedWidget()
         self.welcome_page   = WelcomePage(self.app_settings)
-        self.workspace_page = WorkspaceWidget(self.descriptor_store)
+        self.workspace_page = WorkspaceWidget(self.metadata_store)
         self.staging_page   = StagingPage(self.dispatcher)
         self.rebuild_page   = RebuildStatusPage()
         self.editor_page    = EditorPage()
@@ -90,9 +90,9 @@ class MainWindow(QMainWindow):
             self.workspace_page, 
             self.editor_page,
             self.dispatcher, 
-            self.descriptor_store,
+            self.metadata_store,
         )
-        self.menu_manager = MainMenuBar(self, self.workspace_page, self.dispatcher, self.descriptor_store, self.app_settings)
+        self.menu_manager = MainMenuBar(self, self.workspace_page, self.dispatcher, self.metadata_store, self.app_settings)
         self._setup_statusbar()
         self._connect_signals()
         self._restore_layout()
@@ -240,9 +240,9 @@ class MainWindow(QMainWindow):
 ###------------------------------------------ Workspace UI -------------------------------------###
 
 class WorkspaceWidget(QWidget):
-    def __init__(self, descriptor_store: NodeDescriptorStore, parent=None) -> None:
+    def __init__(self, metadata_store: NodeMetadataStore, parent=None) -> None:
         super().__init__(parent)
-        self.descriptor_store = descriptor_store
+        self.metadata_store = metadata_store
         self._init_views()
         self._assemble_layout()
 
@@ -259,7 +259,7 @@ class WorkspaceWidget(QWidget):
         self.sidebar_stack.addWidget(self.tree_view)
         self.sidebar_stack.addWidget(self.search_results_view)
 
-        self.descriptor_panel = FileDescriptorPanel(self.descriptor_store)
+        self.metadata_panel = FileMetadataPanel(self.metadata_store)
         self.log_console = LoggingWindow()
 
     def _assemble_layout(self) -> None:
@@ -267,10 +267,10 @@ class WorkspaceWidget(QWidget):
         layout.setContentsMargins(0,0,0,0)
         layout.setSpacing(0)
 
-        # Horizontal split:  Tree | Descriptor
+        # Horizontal split:  Tree | Metadata
         self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.h_splitter.addWidget(self.sidebar_stack)
-        self.h_splitter.addWidget(self.descriptor_panel)
+        self.h_splitter.addWidget(self.metadata_panel)
         self.h_splitter.setStretchFactor(0, 3)
         self.h_splitter.setStretchFactor(1, 2)
 
@@ -314,13 +314,13 @@ class WorkspaceController(QObject):
             workspace:        WorkspaceWidget, 
             editor_page:      EditorPage, 
             dispatcher:       Dispatcher, 
-            descriptor_store: NodeDescriptorStore,
+            metadata_store: NodeMetadataStore,
     ) -> None:
         super().__init__(parent=workspace)
         self.view             = workspace
         self.editor_page      = editor_page
         self.dispatcher       = dispatcher
-        self.descriptor_store = descriptor_store
+        self.metadata_store   = metadata_store
         self.tree_model:     VfsTreeModel | None = None
         self.proxy_model:  TreeProxyModel | None = None
         self._last_selected_node: VfsNode | None = None
@@ -338,7 +338,7 @@ class WorkspaceController(QObject):
 
         self._current_session: EditorSession | None = None
 
-        self.view.descriptor_panel.metadata_changed.connect(self._on_metadata_changed)
+        self.view.metadata_panel.metadata_changed.connect(self._on_metadata_changed)
 
     def init_workspace(self, root_node: VfsNode) -> None:
         if not self.dispatcher.vfs:
@@ -359,7 +359,7 @@ class WorkspaceController(QObject):
         self.view.tree_view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         
         ### Search / Filter
-        self.search_model = FlatSearchModel(self.dispatcher.vfs, self.descriptor_store)
+        self.search_model = FlatSearchModel(self.dispatcher.vfs, self.metadata_store)
         self.view.search_results_view.setModel(self.search_model)
         self.view.search_results_view.clicked.connect(self._on_search_result_clicked)
         self.view.search_results_view.doubleClicked.connect(self._on_search_double_click)
@@ -370,7 +370,7 @@ class WorkspaceController(QObject):
         self.view.installEventFilter(self)
         self.view.tree_view.installEventFilter(self)
         self.view.search_results_view.installEventFilter(self)
-        self.view.descriptor_panel.tagClicked.connect(self.on_tag_clicked)
+        self.view.metadata_panel.tagClicked.connect(self.on_tag_clicked)
 
         try:
             self.view.tree_view.customContextMenuRequested.disconnect()
@@ -425,13 +425,13 @@ class WorkspaceController(QObject):
         hids_str = node.hierarchical_id_str
         node.name = title
         node.category = tags
-        self.descriptor_store.register(
+        self.metadata_store.register(
             hid=hids_str,
             title=title,
             description=description,
             tags=list(tags)
         )
-        self.view.descriptor_panel.load_node(node, title, description, tags)
+        self.view.metadata_panel.load_node(node, title, description, tags)
 
     ###----------------- Tree interactions-------------------###
 
@@ -444,16 +444,16 @@ class WorkspaceController(QObject):
             return
         self._last_selected_node = node
 
-        meta   = self.descriptor_store.get(node.hierarchical_id_str)
+        meta   = self.metadata_store.get(node.hierarchical_id_str)
         title = meta.title if meta and meta.title else node.name
         desc  = meta.description if meta else ''
         tags  = meta.tags if meta and meta.tags else node.category
-        self.view.descriptor_panel.load_node(node, title, desc, tags)
+        self.view.metadata_panel.load_node(node, title, desc, tags)
         props_def = Registry.get_action(node, 'Properties')
         if props_def:
             self.dispatcher.execute_node_action(node, 'Properties')
         else:
-            self.view.descriptor_panel.set_properties_text('-')
+            self.view.metadata_panel.set_properties_text('-')
 
     def handle_tree_double_click(self, index: QModelIndex) -> None:
         if not self.proxy_model:
@@ -627,7 +627,7 @@ class WorkspaceController(QObject):
             case ActionType.DIALOG:
                 if (result.action_name == 'Properties'):
                     if result.payload or result.message:
-                        self.view.descriptor_panel.set_properties_text(str(result.payload or result.message))
+                        self.view.metadata_panel.set_properties_text(str(result.payload or result.message))
                     else:
                         logger.warning('"Properties" action returned without payload...')
                 else:
@@ -769,16 +769,16 @@ class WorkspaceController(QObject):
         self.search_overlay.hide_overlay()
 
 
-###----------------------------------- Descriptor Panel ------------------------------------###
+###----------------------------------- Metadata Panel ------------------------------------###
 
-class FileDescriptorPanel(QWidget):
+class FileMetadataPanel(QWidget):
     '''Right panel of the workspace'''
     metadata_changed = pyqtSignal(object, str, str, tuple)  # (node, title, description, tags)
     tagClicked       = pyqtSignal(str)                      # tag str
 
-    def __init__(self, descriptor_store: NodeDescriptorStore, parent: QWidget | None = None, controller = None) -> None:
+    def __init__(self, metadata_store: NodeMetadataStore, parent: QWidget | None = None, controller = None) -> None:
         super().__init__(parent)
-        self._store = descriptor_store
+        self._store = metadata_store
         self._current_node: VfsNode | None = None
         self._setup_ui()
 
@@ -997,7 +997,7 @@ class _ClickableTag(QLabel):
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
-        self.setObjectName('DescriptorTag')
+        self.setObjectName('MetadataTag')
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mousePressEvent(self, ev: QMouseEvent | None) -> None:
@@ -1125,18 +1125,18 @@ class MainMenuBar:
             main_window:      MainWindow, 
             workspace_page:   WorkspaceWidget, 
             dispatcher:       Dispatcher,
-            descriptor_store: NodeDescriptorStore,
+            metadata_store: NodeMetadataStore,
             app_settings:     AppSettings 
         ) -> None:
         self.window     = main_window
         self.workspace  = workspace_page
         self.dispatcher = dispatcher
-        self._store     = descriptor_store
+        self._store     = metadata_store
         self.settings   = app_settings
 
         self._build_file_menu()
         self._build_view_menu()
-        self._build_descriptor_menu()
+        self._build_metadata_menu()
         self._build_info_menu()
 
     @property
@@ -1219,17 +1219,18 @@ class MainMenuBar:
         toggle_hidden.triggered.connect(self._handle_toggle_hidden)
         view_menu.addAction(toggle_hidden)
 
-    def _build_descriptor_menu(self) -> None:
-        descriptor_menu = self.menu_bar.addMenu('Descriptors')
-        assert descriptor_menu is not None
+    def _build_metadata_menu(self) -> None:
+        pass
+        # metadata_menu = self.menu_bar.addMenu('metadata')
+        # assert metadata_menu is not None
 
-        build_action = QAction('Export new JSON', self.window)
-        build_action.triggered.connect(self._handle_export_template)
-        descriptor_menu.addAction(build_action)
+        # build_action = QAction('Export new JSON', self.window)
+        # build_action.triggered.connect(self._handle_export_template)
+        # metadata_menu.addAction(build_action)
 
-        save_action = QAction('Save Now', self.window)
-        save_action.triggered.connect(self._store.save)
-        descriptor_menu.addAction(save_action)
+        # save_action = QAction('Save Now', self.window)
+        # save_action.triggered.connect(self._store.save)
+        # metadata_menu.addAction(save_action)
 
     def _build_info_menu(self) -> None:
         info_menu = self.menu_bar.addMenu('Info')
@@ -1283,7 +1284,7 @@ class MainMenuBar:
     def _handle_export_template(self) -> None:
         if not self.dispatcher.vfs:
             return
-        path, _ = QFileDialog.getSaveFileName(self.window, 'Export Descriptor JSON', 'descriptors.json', 'JSON Files (*.json)')
+        path, _ = QFileDialog.getSaveFileName(self.window, 'Export metadata JSON', 'metadatas.json', 'JSON Files (*.json)')
         if not path:
             return
         output = Path(path)

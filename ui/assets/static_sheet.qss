@@ -216,13 +216,13 @@ QToolTip {
     color: {BG_SECONDARY};
 }
 
-#DescriptorTag {
+#MetadataTag {
     background-color: {BG_SECONDARY};
     color: {TEXT};
     font-weight: bold;
     border-radius: 3px;
 }
-#DescriptorTag:hover {
+#MetadataTag:hover {
     background-color: {INTERACTIVE_HOVER};
     color: {TEXT};
 }

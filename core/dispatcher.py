@@ -13,7 +13,7 @@ from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
 from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle
 from core.navigator import VfsNavigator
-from core.descriptor_manager import NodeDescriptorStore
+from core.metadata_manager import NodeMetadataStore
 if TYPE_CHECKING:
     from core.contracts import BaseHandler, BaseEditor
 
@@ -53,7 +53,7 @@ class Dispatcher(QObject):
         self.vfs:                        VfsManager | None = None
         self.active_handler:            BaseHandler | None = None
         self.nav:                      VfsNavigator | None = None
-        self._descriptor_store: NodeDescriptorStore | None = None
+        self._metadata_store: NodeMetadataStore | None = None
         self.tracker          = ModTracker()
         self.task_coordinator = TaskCoordinator()
         self._setup_connections()
@@ -69,8 +69,8 @@ class Dispatcher(QObject):
 
         self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection) # pyrefly: ignore this is valid despite stub
 
-    def set_descriptor_store(self, store: NodeDescriptorStore) -> None:
-        self._descriptor_store = store
+    def set_metadata_store(self, store: NodeMetadataStore) -> None:
+        self._metadata_store = store
 
     def _relay_tracking_state(self):
         '''Emit counts so UI doesn't need to recalc'''
@@ -315,8 +315,8 @@ class Dispatcher(QObject):
         '''Send ISO loading to a worker thread'''
         if self.active_handler:
             self.active_handler.close()
-        if not self._descriptor_store:
-            logger.debug(f'No file metadata loaded... {self._descriptor_store}')
+        if not self._metadata_store:
+            logger.debug(f'No file metadata loaded... {self._metadata_store}')
 
         task_handle = self.task_coordinator.start_task(
             Actions.load_iso,
@@ -328,7 +328,7 @@ class Dispatcher(QObject):
         return task_handle
 
     def _migrate_targets_if_needed(self) -> None:
-        store = self._descriptor_store
+        store = self._metadata_store
         if store is None:
             return
         has_targets = any(meta.target_hid is not None for meta in store._db.values())
@@ -392,8 +392,8 @@ class Dispatcher(QObject):
         self.vfs = VfsManager(
             root,
             node_enricher=(
-                self._descriptor_store.enrich
-                if self._descriptor_store else None
+                self._metadata_store.enrich
+                if self._metadata_store else None
             )
         )
         self.vfs.enrich_initial_tree()

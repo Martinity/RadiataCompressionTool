@@ -30,7 +30,7 @@ QPushButton {
     min-width: {BTN_MIN_WIDTH};
 }
 
-#DescriptorTag {
+#MetadataTag {
     font-size: {FONT_SIZE};
 }
 

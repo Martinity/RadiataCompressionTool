@@ -34,7 +34,7 @@ class ActionType(Enum):
 
     TREE_EXPAND  - execute_action returns a VfsNode — dispatcher inserts children
     PROCESS      - execute_action returns node data in Any format — stored as payload
-    DIALOG       - execute_action returns a display string — shown in descriptor panel or dialog
+    DIALOG       - execute_action returns a display string — shown in metadata panel or dialog
     EXPORT       - write node data to disk
     IMPORT       - read file from disk into node
     '''

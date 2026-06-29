@@ -12,7 +12,7 @@ from core.node import VfsManager
 from utilities import human_size
 if TYPE_CHECKING:
     from core.node import VfsNode
-    from core.descriptor_manager import NodeDescriptorStore
+    from core.metadata_manager import NodeMetadataStore
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -246,14 +246,14 @@ class _QueryResult:
     score: int
 
 class FlatSearchModel(QAbstractListModel):
-    '''Flat list of search results. Built from descriptor store'''
+    '''Flat list of search results. Built from metadata store'''
     TagsRole     = Qt.ItemDataRole.UserRole + 1
     ResolvedRole = Qt.ItemDataRole.UserRole + 2
 
-    def __init__(self,  vfs: VfsManager, descriptor_store: NodeDescriptorStore, parent=None,) -> None:
+    def __init__(self,  vfs: VfsManager, metadata_store: NodeMetadataStore, parent=None,) -> None:
         super().__init__(parent)
         self._vfs         = vfs
-        self._store       = descriptor_store
+        self._store       = metadata_store
         self._index:      list[_SearchEntry] = []
         self._results:    list[_QueryResult] = []
         self._query       = ''
@@ -262,8 +262,8 @@ class FlatSearchModel(QAbstractListModel):
         self._build_from_store()
         self._upgrade_from_vfs(vfs.root)
 
-        descriptor_store.entry_registered.connect(self._on_entry_registered)
-        descriptor_store.entry_updated.connect(self._on_entry_updated)
+        metadata_store.entry_registered.connect(self._on_entry_registered)
+        metadata_store.entry_updated.connect(self._on_entry_updated)
         self._pending_insert: tuple[VfsNode, int, int] | None = None
         vfs.insert_start.connect(self._on_insert_start)
         vfs.insert_finished.connect(self._on_insert_finished)
@@ -340,16 +340,16 @@ class FlatSearchModel(QAbstractListModel):
     
     ### Index Population
     def _build_from_store(self) -> None:
-        '''Index every descriptor entry'''
+        '''Index every metadata entry'''
         store_items = self._store._db.items()
         for hid_str, meta in store_items:
             entry = self._build_uninstantiated_entry(hid_str, meta)
             self._hid_to_idx[hid_str] = len(self._index)
             self._index.append(entry)
-        logger.debug(f'FlatSearchModel: indexed {len(self._index)} descriptor entries')
+        logger.debug(f'FlatSearchModel: indexed {len(self._index)} metadata entries')
 
     def _upgrade_from_vfs(self, node: VfsNode) -> None:
-        '''Match descriptor entries to VFS entries to mark current instantiation'''
+        '''Match metadata entries to VFS entries to mark current instantiation'''
         for child in node.children:
             if child.is_hidden:
                 continue
@@ -380,7 +380,7 @@ class FlatSearchModel(QAbstractListModel):
             self._recompute_results()
 
     def _on_entry_registered(self, hid_str: str) -> None:
-        '''Called when new entries are added to the descriptor store'''
+        '''Called when new entries are added to the metadata store'''
         meta = self._store.get(hid_str)
         if meta is None:
             return
@@ -401,7 +401,7 @@ class FlatSearchModel(QAbstractListModel):
             self._recompute_results()
 
     def _on_entry_updated(self, hid_str: str) -> None:
-        '''Called when a descriptor store entry is modified'''
+        '''Called when a metadata store entry is modified'''
         idx = self._hid_to_idx.get(hid_str)
         if idx is None:
             return
@@ -464,7 +464,7 @@ class FlatSearchModel(QAbstractListModel):
         )
 
     def _build_uninstantiated_entry(self, hid_str: str, meta: Any) -> _SearchEntry:
-        '''Build an for a descriptor entry, a node not yet in the VFS'''
+        '''Build an for a metadata entry, a node not yet in the VFS'''
         name_lower = (meta.title if meta.title else f'Unresolved ({hid_str})').lower()
         tags_lower  = tuple(t.lower() for t in meta.tags)
         desc_lower = ''
@@ -492,7 +492,7 @@ class FlatSearchModel(QAbstractListModel):
         )
 
     def rebuild_index(self) -> None:
-        '''Rebuild the entire index. Used when mass descriptor updates occur'''
+        '''Rebuild the entire index. Used when mass metadata updates occur'''
         self.beginResetModel()
         self._index.clear()
         self._hid_to_idx.clear()
