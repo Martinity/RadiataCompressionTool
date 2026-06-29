@@ -22,10 +22,10 @@ from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, 
     QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QSizePolicy,
-    QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QTextBrowser, QStatusBar,
+    QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QStatusBar,
     QScrollArea, QFrame, QGraphicsOpacityEffect, QAbstractItemView, QLineEdit, QMenuBar
 )
-from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent
+from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent, QStandardItem, QStandardItemModel, QColor
 
 from core.node import VfsNode
 from core.dispatcher import Dispatcher
@@ -207,6 +207,7 @@ class MainWindow(QMainWindow):
         root_node = nodes[0]
         self.controller.init_workspace(root_node)
         self.stack.setCurrentIndex(AppPage.WORKSPACE)
+        self.workspace_page.setFocus()
         self.status_bar.showMessage('ISO loaded - verifying build...')
         has_iso = bool(nodes)
         self.menu_manager.open_action.setEnabled(not has_iso)
@@ -1259,6 +1260,10 @@ class MainMenuBar:
     def _handle_theme_change(self, theme_name: str) -> None:
         for name, action in self._theme_actions.items():
             action.setChecked(name == theme_name)
+            if action.isChecked():
+                action.setEnabled(False)
+                continue
+            action.setEnabled(True)
         self.window.set_theme(theme_name)
 
     def _handle_toggle_log(self, checked: bool) -> None:
@@ -1286,7 +1291,8 @@ class MainMenuBar:
         QMessageBox.information(self.window, 'Template Exported', f'{count} new stub(s) added.\nSave to {output.name}')
 
     def _handle_legend(self) -> None:
-        LegendViewer(self.window).exec()
+        theme_name = self.window.current_theme
+        LegendView(ThemeManager.THEMES.get(theme_name)).exec()
 
 ###------------------------------------------------- Search Overlay ---------------------------------------------------------###
 
@@ -1353,32 +1359,127 @@ class SearchOverlay(QLabel):
 
 ###------------------------------------------- File Legend ------------------------------------------###
 
-class LegendViewer(QDialog):
-    '''Creates a paging dialog for known file magics and their supposed use as well as current support'''
-    def __init__(self, parent=None) -> None:
+def build_legend_tree(theme) -> QStandardItemModel:
+    model = QStandardItemModel()
+    model.setHorizontalHeaderLabels(["Extension", "Description", "Support"])
+
+    def add_category(name) -> QStandardItem:
+        category = QStandardItem(name)
+        category.setEditable(False)
+        category.setBackground(QColor(theme.BORDER))
+        empty1 = QStandardItem("")
+        empty2 = QStandardItem("")
+        empty1.setBackground(QColor(theme.BORDER))
+        empty2.setBackground(QColor(theme.BORDER))
+        model.appendRow([category, empty1, empty2])
+        return category
+
+    def add_item(parent, ext, desc, support="") -> None:
+        ext_item = QStandardItem(ext)
+        desc_item = QStandardItem(desc)
+        support_item = QStandardItem(support)
+        for item in (ext_item, desc_item, support_item):
+            item.setEditable(False)
+        parent.appendRow([ext_item, desc_item, support_item])
+
+    ### File System
+    fs = add_category("File System")
+    add_item(fs, ".idx", "TOC", "Fully supported: 'Open ISO'")
+    add_item(fs, ".slz", "Compressed file", "Fully supported: 'Decompress'")
+    add_item(fs, ".sle", "Encrypted compressed file", "Fully supported: 'Decompress'")
+    add_item(fs, ".kods", "Custom archive format", "Fully supported: 'Unpack'")
+    add_item(fs, ".bcb", "Packed entity data", "---")
+    add_item(fs, ".vib", "Vibration motor data", "---")
+    add_item(fs, ".elf", "Executables", "---")
+
+    ### Audio
+    audio = add_category("Audio")
+    add_item(audio, ".seqw", "Audio file container for ADPCM and PCM format streams", "---")
+    add_item(audio, ".vag", "PS2 standard audio format", "---")
+    add_item(audio, ".020", "Audio files. Mostly shorter instrumental SFX, occasional full song.", "Supported: TAC Audio Viewer, 'Export as WAV'. Missing: 'Import from WAV'")
+
+    ### Movie
+    movie = add_category("Movie")
+    add_item(movie, ".fmv", "Movies", "---")
+
+    ### Mesh
+    mesh = add_category("Mesh")
+    add_item(mesh, ".fps", "Mesh data head", "Partially supported: 'Deconstruct Chain'. \n'.fps-segment' also supports the experimental 'Extract FIS'")
+    add_item(mesh, ".fss", "Mesh data terminal")
+    add_item(mesh, ".idom", "Mesh data")
+    add_item(mesh, ".lctp", "Mesh data", "Partially supported: 'Deconstruct Chain'")
+
+    ### Event
+    event = add_category("Event")
+    add_item(event, ".evd", "Event VM dispatcher data", "---")
+
+    ### Animation
+    anim = add_category("Animation")
+    add_item(anim, ".fas", "Animation data head", "Partially supported: 'Deconstruct Chain'")
+    add_item(anim, ".hfas", "Animation data terminal")
+    add_item(anim, ".rmac", "Animation data", "Partially supported: 'Deconstruct Chain'")
+    add_item(anim, ".rta", "Animation data")
+    add_item(anim, ".paf", "Animation data")
+
+    ### Texture
+    tex = add_category("Texture")
+    add_item(tex, ".fis", "Texture data", "Supported: 'FIS Texture Editor', 'Export as PNG'. Missing: 'Import from PNG'")
+    add_item(tex, ".fisp", "Texture data")
+    add_item(tex, ".fisa", "Texture data")
+    add_item(tex, ".tim2", "PS2 standard texture format", "---")
+
+    ### Scene
+    scene = add_category("Scene")
+    add_item(scene, ".rbad", "Radiata Background Animation Data", "---")
+    add_item(scene, ".rlf", "Scene data")
+    add_item(scene, ".rmf", "Scene data")
+    add_item(scene, ".ndnc", "Scene data")
+    add_item(scene, ".xbdc", "Scene data")
+    add_item(scene, ".pcdc", "Scene data")
+    add_item(scene, ".dnal", "Scene data")
+    add_item(scene, ".tgil", "Map animation container", "Partially supported: 'Deconstruct Chain'")
+
+    ### Gameplay
+    game = add_category("Gameplay")
+    add_item(game, ".mpa", "Sprite animation data")
+    add_item(game, ".dth", "Gameplay data")
+    add_item(game, ".cpa", "Gameplay data")
+    add_item(game, ".ipa", "Gameplay data")
+    add_item(game, ".fdc", "Gameplay data")
+
+    ### Unknown
+    unk = add_category("Unknown / Descriptor")
+    add_item(unk, ".rcp", "Grouped ID table", "---")
+    add_item(unk, ".rcad", "Descriptor data")
+    add_item(unk, ".png", "PNG image")
+
+    note = add_category('Notes:')
+    add_item(note, "....segment", '"Deconstruct Chain" unpacks segments with the extension '
+                            'suffix \n"segment" to prevent unpacking previously unpacked files.')
+
+    return model
+
+class LegendView(QDialog):
+    def __init__(self, theme, parent=None) -> None:
         super().__init__(parent)
-        self.pages = [Legend1, Legend2]
-        self.page = 0
-        self.setWindowTitle('File Legend for Radiata Stories')
+        self.setWindowTitle('Legend')
+        self.resize(600,500)
         layout = QVBoxLayout(self)
-        self.resize(500, 750)
-        self.browser = QTextBrowser()
-        self.browser.setHtml(self.pages[0])
-        self.next_btn = QPushButton('Next')
-        self.next_btn.setObjectName('FloatClearButton')
-        self.next_btn.clicked.connect(self.next_page)
-        layout.addWidget(self.browser)
-        layout.addWidget(self.next_btn)
+        self.tree = LegendModel(theme)
+        layout.addWidget(self.tree)
 
-    def next_page(self) -> None:
-        self.page += 1
+class LegendModel(QTreeView):
+    def __init__(self, theme):
+        super().__init__()
+        self.setModel(build_legend_tree(theme))
 
-        if self.page >= len(self.pages):
-            self.accept()
-            return
-        self.browser.setHtml(self.pages[self.page])
-        if self.page == len(self.pages) - 1:
-            self.next_btn.setText('Close')
+        self.setHeaderHidden(False)
+        self.expandAll()
+        self.setRootIsDecorated(True)
+        self.setIndentation(12)
+        self.resizeColumnToContents(0)
+        self.resizeColumnToContents(1)
+        self.resizeColumnToContents(2)
 
 ###------------------------------------------- Utility ------------------------------------------###
 
@@ -1396,81 +1497,3 @@ def _clear_layout(layout) -> None:
         if item.layout():
             _clear_layout(item.layout())
 
-Legend1 = '''
-<html><body>
-<h3>File Legend (1/2)</h3>
-<table border="1" cellspacing="0" cellpadding="4">    <tr>
-        <th>Extension</th>
-        <th>Description</th>
-        <th>Support</th>
-    </tr>
-
-    <tr><th colspan="3">File System</th></tr>
-    <tr><td>.slz</td><td>Compressed file</td><td>100%</td></tr>
-    <tr><td>.sle</td><td>Encrypted compressed file</td><td>100%</td></tr>
-    <tr><td>.kods</td><td>Custom archive</td><td>100%</td></tr>
-    <tr><td>.bcb</td><td>Packed entity data</td><td>100%</td></tr>
-    <tr><td>.vib</td><td>Vibration motor data</td><td>0%</td></tr>
-    <tr><td>.elf</td><td>Executables</td><td>---</td></tr>
-    <tr><td>.idx</td><td>TOC</td><td>100%</td></tr>
-
-    <tr><th colspan="3">Audio</th></tr>
-    <tr><td>.seqw</td><td>Sound data</td><td>0%</td></tr>
-    <tr><td>.VAG</td><td>PS2 standard audio format</td><td>0%</td></tr>
-    <tr><td>.020</td><td>TAC audio</td><td>Viewer / Export</td></tr>
-
-    <tr><th colspan="3">Movie</th></tr>
-    <tr><td>.fmv</td><td>Movies</td><td>0%</td></tr>
-
-    <tr><th colspan="3">Mesh</th></tr>
-    <tr><td>.fps</td><td>Mesh data</td><td></td></tr>
-    <tr><td>.fss</td><td>Mesh data</td><td></td></tr>
-    <tr><td>.idom</td><td>Mesh data</td><td></td></tr>
-    <tr><td>.lctp</td><td>Mesh data</td><td></td></tr>
-
-    <tr><th colspan="3">Event</th></tr>
-    <tr><td>.evd</td><td>Event VM dispatcher data</td><td>0%</td></tr>
-</table>
-</body></html>
-'''
-Legend2 = '''
-<html><body>
-<h3>Supported Formats (2/2)</h3>
-<table border="1" cellspacing="0" cellpadding="4">
-    <tr><th colspan="3">Animation</th></tr>
-    <tr><td>.fas</td><td>Animation data</td><td></td></tr>
-    <tr><td>.hfas</td><td>Animation data</td><td></td></tr>
-    <tr><td>.rmac</td><td>Animation data</td><td></td></tr>
-    <tr><td>.rta</td><td>Animation data</td><td></td></tr>
-    <tr><td>.paf</td><td>Animation data</td><td></td></tr>
-
-    <tr><th colspan="3">Texture</th></tr>
-    <tr><td>.fis</td><td>Texture data</td><td></td></tr>
-    <tr><td>.fisp</td><td>Texture data</td><td></td></tr>
-    <tr><td>.fisa</td><td>Texture data</td><td></td></tr>
-    <tr><td>.tim2</td><td>PS2 standard texture format</td><td>0%</td></tr>
-
-    <tr><th colspan="3">Scene</th></tr>
-    <tr><td>.rbad</td><td>Radiata Background Animation Data</td><td>0%</td></tr>
-    <tr><td>.rlf</td><td>Scene data</td><td></td></tr>
-    <tr><td>.rmf</td><td>Scene data</td><td></td></tr>
-    <tr><td>.ndnc</td><td>Scene data</td><td></td></tr>
-    <tr><td>.xbdc</td><td>Scene data</td><td></td></tr>
-    <tr><td>.pcdc</td><td>Scene data</td><td></td></tr>
-    <tr><td>.dnal</td><td>Scene data</td><td></td></tr>
-    <tr><td>.tgil</td><td>Container for map animation data</td><td></td></tr>
-
-    <tr><th colspan="3">Gameplay</th></tr>
-    <tr><td>.mpa</td><td>Sprite animation data</td><td></td></tr>
-    <tr><td>.dth</td><td>Gameplay data</td><td></td></tr>
-    <tr><td>.cpa</td><td>Gameplay data</td><td></td></tr>
-    <tr><td>.ipa</td><td>Gameplay data</td><td></td></tr>
-    <tr><td>.fdc</td><td>Gameplay data</td><td></td></tr>
-
-    <tr><th colspan="3">Unknown / Descriptor</th></tr>
-    <tr><td>.rcp</td><td>Unknown table of grouped IDs</td><td>0%</td></tr>
-    <tr><td>.rcad</td><td>Descriptor data</td><td></td></tr>
-    <tr><td>.png</td><td>PNG image</td><td></td></tr>
-</table>
-</body></html>
-'''

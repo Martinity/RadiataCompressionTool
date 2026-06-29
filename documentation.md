@@ -1,8 +1,8 @@
-# Radiata Modding Tool — Plugin Developer API
+# Radiata Modding Tool: Plugin Developer API
 
 This document covers everything needed to implement a **handler** (binary
 format interpreter) or **editor** (UI widget), and how they interact through
-the session and dispatcher pipeline.
+the session and dispatcher pipeline. In general payloads of type `bytes` are handled automatically by the contracts, for more complex plugins you will need to override to the desired type.
 
 ---
 
@@ -18,7 +18,7 @@ the session and dispatcher pipeline.
    - [RebuildResult](#rebuildresult)
 3. [Editor API](#editor-api)
    - [Registration](#editor-registration)
-   - [BaseEditor — minimum implementation](#baseeditor--minimum-implementation)
+   - [BaseEditor: Minimum implementation](#baseeditor--minimum-implementation)
    - [Loading lifecycle](#loading-lifecycle)
    - [Save lifecycle](#save-lifecycle)
    - [Undo / Redo](#undo--redo)
@@ -72,7 +72,7 @@ session.reject_save()  (on failure)
 ```
 
 Handlers run on **worker threads**. Editors run on the **main thread**.
-They never call each other directly — the dispatcher and session mediate.
+They never call each other directly. The Dispatcher and the EditorSession drive the states.
 
 ---
 
@@ -127,7 +127,7 @@ Abstract base class. Never use `BaseHandler` directly. Instead choose the specia
 
 #### `get_file_tree() → VfsNode`  *(abstract)*
 
-Build and return the virtual file tree. Called on a **worker thread**
+Build and return the file tree. Called on a **worker thread**
 when a `TREE_EXPAND` action fires.
 
 ```python
@@ -146,7 +146,7 @@ def get_file_tree(self) -> VfsNode:
 
 #### `get_raw_node(node: VfsNode) → bytes`  *(abstract)*
 
-Return raw bytes for a single virtual node without any pending edits.
+Return raw bytes for a single node without any pending edits.
 Called by the navigator when resolving a node's content.
 
 ```python
@@ -248,7 +248,7 @@ def execute_action(self, node, action_name, **kwargs):
 
 ### PhysicalHandler
 
-ONLY for ISO handling, plugin developers can mostly ignore this section. The init handle is opened in `__init__` and **must** be released after `get_file_tree()` via `release_handle()`. All subsequent reads must open private handles:
+ONLY for ISO handling, most plugin developers can ignore this section. The init handle is opened in `__init__` and **must** be released after `get_file_tree()` via `release_handle()`. All subsequent reads must open private handles:
 
 ```python
 def get_raw_node(self, node: VfsNode) -> bytes:
@@ -327,9 +327,9 @@ class MyFormatEditor(BaseEditor):
 
 ---
 
-### BaseEditor — minimum implementation
+### BaseEditor: minimum implementation
 
-**Mutable editor** — two methods required:
+**Mutable editor**, two methods required:
 
 ```python
 class MyEditor(BaseEditor):
@@ -344,7 +344,7 @@ class MyEditor(BaseEditor):
         return ...
 ```
 
-**Read-only editor** — inherit from `BaseViewer` instead, one method required:
+**Read-only editor**, inherit from `BaseViewer`, one method required:
 
 ```python
 class MyViewer(BaseViewer):
@@ -362,8 +362,7 @@ class MyViewer(BaseViewer):
 | `dataChanged` | `bool` | Emit via `set_dirty(True/False)`. Drives Save/Revert button state. |
 | `undo_state_changed` | `(bool, bool)` | `(can_undo, can_redo)`. Shows/enables Undo/Redo buttons. |
 
-Both are declared on `BaseEditor` — `undo_state_changed` is a no-op
-until your editor emits it.
+Both are declared on `BaseEditor`.
 
 ---
 
@@ -371,7 +370,7 @@ until your editor emits it.
 
 | Attribute | Default | Description |
 |---|---|---|
-| `is_mutable` | `True` | Set `False` (via `BaseViewer`) to hide Save/Revert |
+| `is_mutable` | `True` | Set `False`, via `BaseViewer`, to hide Save/Revert |
 
 ---
 
@@ -381,7 +380,7 @@ Called in this exact order for every editor open.
 
 #### `begin_loading(node: VfsNode) → None`
 
-Calls **main thread** before the worker starts. Show a placeholder.
+Called on the **main thread** before the worker starts. Show a placeholder.
 `super().begin_loading(node)` stores `self.current_node`.
 
 ```python
@@ -393,7 +392,7 @@ def begin_loading(self, node: VfsNode) -> None:
 
 #### `receive_data(result: Any, data_resolver: Callable | None) → None`
 
-Calls **main thread** when the worker finishes. Default implementation
+Called on the **main thread** when the worker finishes. Default implementation
 handles `result: bytes` only. Calls `_populate_ui(result)` and stores
 `result` in `_original_payload`.
 
@@ -409,7 +408,6 @@ def receive_data(self, result: Any, data_resolver=None) -> None:
         return
 
     self.my_data = result
-    self.set_dirty(False)
     self._populate_ui(result)
 ```
 
@@ -458,22 +456,7 @@ def cleanup(self) -> None:
 
 ### Save lifecycle
 
-EditorPage drives saving. Editors do not initiate saves.
-
-```
-User clicks Save
- └─ EditorSession.apply_changes()
-     ├─ editor.snapshot()   -> freeze current_data into _pending_data
-     └─ dispatcher.apply_edit(node, _pending_data, on_success, on_failure)
-          │
-          ├── [ Bytes Path — Executed on Main Thread ]
-          │    └─ tracker.mark_modified() ──► session.confirm_save()
-          │
-          └── [ Non-Bytes Path — Dispatched to Worker Thread ]
-               └─► handler.decode_editor_data()
-                    ├─► Success ──► session.confirm_save()
-                    └─► Failure ──► session.reject_save(reason)
-```
+EditorPage drives saving. Editors do not initiate saves they signal for them.
 
 #### `current_data() → Any`
 
@@ -500,8 +483,7 @@ def confirm_changes_applied(self) -> None:
     super().confirm_changes_applied()   # advances _original_payload, calls set_dirty(False)
 ```
 
-What "reset to clean" means depends on your history implementation — clear the
-undo/redo stacks and re-initialise from the current state so prior edits can no
+What "reset to clean" means depends on your history implementation. In general, you must clear the undo/redo stacks and re-initialise from the current state so prior edits can no
 longer be undone back past the save point.
 
 #### `reject_changes_applied(reason: str) → None`
@@ -524,7 +506,7 @@ def _on_cell_edited(self):
 Called when the user clicks Revert. Base implementation calls
 `_populate_ui(self._original_payload)` and `set_dirty(False)`.
 
-Override only when you need extra teardown (ex. clearing a custom history stack):
+Override only when you need extra teardown, such as when clearing a custom history stack:
 
 ```python
 def discard_changes(self) -> None:
@@ -543,9 +525,9 @@ Implement a history manager (custom or `QUndoStack`) and wire it to
 `undo_state_changed`. EditorPage shows the Undo/Redo buttons the first time it fires and
 hides them when both are `False`.
 
-The dirty state must always be driven by **explicit `set_dirty()` calls** — not
-by history signals. Call `set_dirty(True)` when a change is recorded, and
-`set_dirty(False)` after a successful save or a full revert. For more complete examples see HexEditor and FisEditor.
+The dirty state must always be driven by **explicit `set_dirty()` calls**. 
+Call `set_dirty(True)` when a change is recorded, and`set_dirty(False)` after a successful 
+save or a full revert. For more complete examples of custom and QUndoStack implementations see HexEditor and FisEditor respectively.
 
 ```python
 class MyEditor(BaseEditor):
@@ -586,7 +568,8 @@ class MyEditor(BaseEditor):
 
 ### BaseViewer
 
-`BaseViewer(BaseEditor)` with `is_mutable = False`.
+Convenience subclass for immutable plugins.
+`BaseViewer(BaseEditor)` with `is_mutable = False`. 
 
 `set_dirty` is a no-op so `dataChanged` is never emitted. Save,
 Revert, Undo, and Redo are hidden by EditorPage automatically.
@@ -594,7 +577,7 @@ Revert, Undo, and Redo are hidden by EditorPage automatically.
 ```python
 @Registry.register_editor(
     name='TAC Audio Viewer', handler=TacHandler,
-    extensions=('.020',), editor_role='View',
+    extensions=('.020',)
 )
 class TacAudioEditor(BaseViewer):
 
@@ -648,7 +631,7 @@ from core.handlers.generic_binary_leaf import GenericBinaryHandler
 
 @Registry.register_editor(
     name='Text Editor', handler=GenericBinaryHandler,
-    extensions=('.txt',), editor_role='Edit',
+    extensions=('.txt',)
 )
 class TextEditor(BaseEditor):
 
@@ -690,7 +673,7 @@ from typing          import Any
 
 @Registry.register_editor(
     name='FIS Info Viewer', handler=FisHandler,
-    extensions=('.fis',), editor_role='View',
+    extensions=('.fis',)
 )
 class FisInfoViewer(BaseViewer):
 
@@ -729,7 +712,7 @@ from typing          import Any
 
 @Registry.register_editor(
     name='My Structured Editor', handler=MyHandler,
-    extensions=('.mfmt',), editor_role='Edit',
+    extensions=('.mfmt',)
 )
 class MyStructuredEditor(BaseEditor):
 
@@ -795,24 +778,3 @@ class MyStructuredEditor(BaseEditor):
     def _render(self) -> None:
         pass
 ```
-
----
-
-## Current TODO list:
-
-- Check stylesheet when there are more elements. Consider implementing generic objects rather than specific -> `/ui/style_sheet.py`
-- Improve stylesheet naming and fix hovering/selection coloring `/ui/assets/static_sheet.py` & `/ui/assets/dynamic_sheet.py`
-- File type legend... what to do? -> `/ui/ui_core.py`
-- There is probably some bugs left to do with the save/revert/undo/redo wiring, further investigation required -> `/ui/editor_page.py` & `/ui/editors/`
-- Radiata Theme needs to go for now, I can reimplement it later if I feel like actually making it good.
-
-## Future TODO list:
-
-- FPS complexe texture data is falsly decoded as regular fis texture data and when repacked will result in bugs at runtime
-- FIS editor decoding CLUT shifts 7F to 80, does it matter? -> `/core/handlers/fis_leaf.py`
-- Hex editor toggle for bottom values to display in hex or dec -> `/ui/editors/hex_editor.py`
-- Staging page diff... This could be greatly improved but I don't want to spend a ton of time on anything beyond the basics to allow better analysis of custom format building -> `/ui/ui_core.py`
-- 0FDC unpacking, seems to be an archive of slz format -> `/core/handlers/fdc_handler.py`
-- Icons? -> `/ui/...`
-- seqw handler -> `/core/handler/seqw_handler.py`
-- Improve the efficiency of loading HDD users are struggling currently

@@ -398,7 +398,7 @@ class FisEditorWidget(BaseEditor):
     def confirm_changes_applied(self) -> None:
         '''
         Called by the session after a successful save
-        updated _original_payload so discard_changes reverts to the latest saved state
+        updates _original_payload so discard_changes reverts to the latest saved state
         '''
         if self._pending_data is not None and isinstance(self._pending_data, tuple):
             img, raw_fis = self._pending_data
