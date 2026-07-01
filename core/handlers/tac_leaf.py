@@ -6,6 +6,7 @@ import ctypes
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -130,6 +131,29 @@ def _native_library_name() -> str:
     return "libtac_codec.so"
 
 
+def _platform_tag() -> tuple[str, str]:
+    if sys.platform.startswith("win"):
+        osname = "windows"
+    elif sys.platform == "darwin":
+        osname = "macos"
+    else:
+        osname = "linux"
+    return osname, platform.machine().lower()
+
+
+def _prebuilt_tac_paths() -> list[Path]:
+    name = _native_library_name()
+    osname, arch = _platform_tag()
+    dirs: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        base = Path(meipass)
+        dirs += [base / "native", base]
+    root = _native_root()
+    dirs += [root / "prebuilt" / f"{osname}-{arch}", root / "prebuilt" / osname]
+    return [d / name for d in dirs]
+
+
 def _find_c_compiler() -> str | None:
     if sys.platform.startswith("win"):
         return shutil.which("gcc")
@@ -162,6 +186,16 @@ def _build_needed(library_path: Path, sources: list[tuple[Path, str]], force: bo
 
 
 def ensure_native_decoder(force_rebuild: bool = False) -> Path:
+    # Tier 1: a prebuilt lib bundled with the app (works frozen, no compiler needed).
+    for cand in _prebuilt_tac_paths():
+        if cand.exists():
+            return cand
+
+    # Frozen bundles have no compiler and a read-only payload — give a clear error.
+    if getattr(sys, "frozen", False):
+        raise TacError("TAC native library missing from bundle")
+
+    # Tier 2: compile from the shipped source (developers running from source).
     root = _native_root()
     build_dir = root / ".tac_build"
     library_path = build_dir / _native_library_name()
