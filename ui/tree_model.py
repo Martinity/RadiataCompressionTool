@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel, QAbstractListModel
+from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, QSortFilterProxyModel, QAbstractListModel, QTimer
 from PyQt6.QtGui import QColor
 from core.node import VfsManager
 from utilities import human_size
@@ -258,15 +258,19 @@ class FlatSearchModel(QAbstractListModel):
         self._results:    list[_QueryResult] = []
         self._query       = ''
         self._hid_to_idx: dict[str, int] = {}
-
-        self._build_from_store()
-        self._upgrade_from_vfs(vfs.root)
+        self._built       = False  # deferred: index is built on first set_query call
 
         descriptor_store.entry_registered.connect(self._on_entry_registered)
         descriptor_store.entry_updated.connect(self._on_entry_updated)
         self._pending_insert: tuple[VfsNode, int, int] | None = None
         vfs.insert_start.connect(self._on_insert_start)
         vfs.insert_finished.connect(self._on_insert_finished)
+
+        # Debounce timer: recompute runs once ~120ms after the last set_query call
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(120)
+        self._debounce_timer.timeout.connect(self._recompute_results)
 
     ### Qt API
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -313,12 +317,23 @@ class FlatSearchModel(QAbstractListModel):
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
     ### Query
+    def _ensure_built(self) -> None:
+        '''Lazily build the search index on first use. Skips entries already added by signal handlers.'''
+        if self._built:
+            return
+        self._built = True
+        self._build_from_store()
+        self._upgrade_from_vfs(self._vfs.root)
+        logger.debug(f'FlatSearchModel: lazy build complete ({len(self._index)} entries)')
+
     def set_query(self, query: str) -> None:
+        if not self._built:
+            self._ensure_built()
         q = query.lower().strip()
         if q == self._query:
             return
         self._query = q
-        self._recompute_results()
+        self._debounce_timer.start()  # (re)starts the 120ms countdown; fires _recompute_results once
 
     def result_count(self) -> int:
         return len(self._results)
@@ -340,13 +355,18 @@ class FlatSearchModel(QAbstractListModel):
     
     ### Index Population
     def _build_from_store(self) -> None:
-        '''Index every descriptor entry'''
+        '''Index every descriptor entry. Skips entries already in _hid_to_idx
+        (added by _on_entry_registered before the lazy build ran).'''
         store_items = self._store._db.items()
+        added = 0
         for hid_str, meta in store_items:
+            if hid_str in self._hid_to_idx:
+                continue  # already added by a signal handler before the lazy build
             entry = self._build_uninstantiated_entry(hid_str, meta)
             self._hid_to_idx[hid_str] = len(self._index)
             self._index.append(entry)
-        logger.debug(f'FlatSearchModel: indexed {len(self._index)} descriptor entries')
+            added += 1
+        logger.debug(f'FlatSearchModel: _build_from_store added {added} entries (total {len(self._index)})')
 
     def _upgrade_from_vfs(self, node: VfsNode) -> None:
         '''Match descriptor entries to VFS entries to mark current instantiation'''
@@ -497,6 +517,7 @@ class FlatSearchModel(QAbstractListModel):
         self._index.clear()
         self._hid_to_idx.clear()
         self._results.clear()
+        self._built = True  # cleared above so _build_from_store will add all entries cleanly
         self._build_from_store()
         self._upgrade_from_vfs(self._vfs.root)
         self.endResetModel()
