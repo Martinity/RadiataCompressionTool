@@ -12,11 +12,23 @@ if TYPE_CHECKING:
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
+###----------------------------------- Exceptions ----------------------------------------###
+
+class ExpansionTimeoutError(RuntimeError):
+    """Raised when a VFS node expansion request times out.
+
+    This is a hard error: it means the rebuild thread waited the full
+    EXPANSION_TIMEOUT for an expansion task to complete and it never did.
+    Letting the rebuild continue with stale/empty data would produce a
+    silently corrupt output, so we raise instead.
+    """
+    pass
+
 ###----------------------------------- Navigator ----------------------------------------###
 
 class VfsNavigator:
     '''Handles all tree traveling logic'''
-    EXPANSION_TIMEOUT = 1.0
+    EXPANSION_TIMEOUT = 30.0  # seconds; raised from 1.0 — real disk+decompress can be slow
     def __init__(
             self, 
             vfs: VfsManager, 
@@ -26,6 +38,7 @@ class VfsNavigator:
         self.vfs  = vfs
         self.read = data_reader                      # dispatcher.get_node_data
         self.expansion_callback = expansion_callback # dispatcher._expand_node
+        self._rollup_touched: set[VfsNode] = set()
 
     ###--------------------- Public API -----------------------###
 
@@ -110,11 +123,13 @@ class VfsNavigator:
                     else:
                         payload, target_data = result, None
                     parent.pending_data = payload
+                    self._rollup_touched.add(parent)
                     if target_data and parent.target: # Datacenter rebuild
                         self.resolve_data_from_hid(parent.target) # Ensure target is in VFS
                         target_node = self.vfs.get_node_by_id(parent.target)
                         if target_node:
                             target_node.pending_data = target_data
+                            self._rollup_touched.add(target_node)
                             current_queue.add(target_node)
                             task_handle.log_message.emit(f'Datacenter modification queued: {parent.name} -> {parent.target}')
                         else:
@@ -147,6 +162,12 @@ class VfsNavigator:
         task_handle.log_message.emit(f'Sending {len(nonseq_nodes)} nodes to cached roll-up')
         return self.rollup_nodes(list(nonseq_nodes), task_handle)
 
+    def clear_rollup_pending(self) -> None:
+        '''Clear pending_data cached on parents/targets during the last rollup.'''
+        for node in self._rollup_touched:
+            node.clear_pending()
+        self._rollup_touched.clear()
+
     ###---------------------- helpers -------------------------###
 
     def _expand_pending(self, unresolved: list[tuple[int,...]]) -> None:
@@ -170,19 +191,28 @@ class VfsNavigator:
             if ancestor.expansion_pending and ancestor._expansion_event: # Expansion in progress
                 logger.debug(f'Waiting for in-progress expansion of ID: {ancestor.hierarchical_id_str}')
                 if not ancestor._expansion_event.wait(timeout=self.EXPANSION_TIMEOUT):
-                    logger.error(f'Timeout waiting for expansion of ID: {ancestor.hierarchical_id_str}')
+                    raise ExpansionTimeoutError(
+                        f'Timeout ({self.EXPANSION_TIMEOUT}s) waiting for in-progress expansion of '
+                        f'{ancestor.hierarchical_id_str}. Rebuild aborted to prevent stale-data corruption.'
+                    )
             elif ancestor.children: # Expanded but missing target
                 logger.warning(f'{ancestor.hierarchical_id_str} has children but target HID not found')
                 wait = ancestor.begin_expansion()
                 self.expansion_callback(ancestor, wait)
                 if not wait.wait(timeout=self.EXPANSION_TIMEOUT):
-                    logger.error(f'Timeout re-expanding {ancestor.hierarchical_id_str}')
+                    raise ExpansionTimeoutError(
+                        f'Timeout ({self.EXPANSION_TIMEOUT}s) re-expanding {ancestor.hierarchical_id_str}. '
+                        f'Rebuild aborted to prevent stale-data corruption.'
+                    )
             else: # First time expansion
                 logger.debug(f'Expanding {ancestor}')
                 wait = ancestor.begin_expansion()
                 self.expansion_callback(ancestor, wait)
                 if not wait.wait(timeout=self.EXPANSION_TIMEOUT):
-                    logger.error(f'Timeout expanding {ancestor.hierarchical_id_str}')
+                    raise ExpansionTimeoutError(
+                        f'Timeout ({self.EXPANSION_TIMEOUT}s) expanding {ancestor.hierarchical_id_str}. '
+                        f'Rebuild aborted to prevent stale-data corruption.'
+                    )
             safety_count += 1
             if safety_count > 20:
                 logger.warning(f'Failed to expand {len(unresolved)} node(s)')
