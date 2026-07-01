@@ -23,9 +23,10 @@ from PyQt6.QtWidgets import (
     QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, 
     QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QSizePolicy,
     QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QStatusBar,
-    QScrollArea, QFrame, QGraphicsOpacityEffect, QAbstractItemView, QLineEdit, QMenuBar
+    QScrollArea, QFrame, QAbstractItemView, QLineEdit, QMenuBar
 )
 from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent, QStandardItem, QStandardItemModel, QColor
+from PyQt6 import sip
 
 from core.node import VfsNode
 from core.dispatcher import Dispatcher
@@ -33,6 +34,7 @@ from core.registry import Registry, GLOBAL_ACTIONS
 from core.contracts import BaseEditor
 from core.workers import ActionStatus, ActionResult, ActionType, ActionDef, EditorPayload, TaskHandle
 from core.descriptor_manager import NodeDescriptorStore
+from core.version import __version__
 from ui.logger import LoggingWindow
 from ui.tree_model import TreeProxyModel, VfsTreeModel, FlatSearchModel
 from ui.theme_manager import ThemeManager
@@ -41,6 +43,8 @@ from ui.editor_page import EditorPage, EditorSession
 from ui.settings import AppSettings
 from utilities import human_size, get_resource_path, hline
 
+import functools
+import threading
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
@@ -66,6 +70,7 @@ class AppPage(IntEnum):
 class MainWindow(QMainWindow):
     def __init__(self, dispatcher: Dispatcher) -> None:
         super().__init__(parent=None)
+        self._main_thread_id = threading.get_ident()
         # Setup App
         self.dispatcher    = dispatcher
         self.app_settings  = AppSettings()
@@ -107,7 +112,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.rebuild_page)
         self.stack.addWidget(self.editor_page)
 
-        self.setWindowTitle('Radiata Modding Tool 2.0 Alpha')
+        self.setWindowTitle(f'Radiata Modding Tool 2.0 Alpha {__version__}')
         self.resize(1400, 900)
 
     @property
@@ -118,6 +123,12 @@ class MainWindow(QMainWindow):
 
     def _setup_statusbar(self) -> None:
         self.status_bar.showMessage('Ready', 3000)
+
+    def _on_worker_log(self, msg: str) -> None:
+        '''Bound slot for worker log_message signals — always runs on main thread.'''
+        if threading.get_ident() != self._main_thread_id:
+            logger.error("_on_worker_log ran off the main thread")
+        self.status_bar.showMessage(msg, 0)
 
     def _connect_signals(self) -> None:
         '''Only for main window state signals'''
@@ -183,7 +194,7 @@ class MainWindow(QMainWindow):
         if not isinstance(task_handle, TaskHandle):
             QMessageBox.critical(self, 'Load Error', f'No handler for {path.name}')
             return
-        task_handle.log_message.connect(lambda msg: self.status_bar.showMessage(msg, 0))
+        task_handle.log_message.connect(self._on_worker_log)
 
     def start_rebuild(self, staged_nodes: list[VfsNode]) -> None:
         '''Transitions UI and asks for save location before kicking off background thread'''
@@ -310,13 +321,14 @@ class WorkspaceWidget(QWidget):
 class WorkspaceController(QObject):
     '''Handles all signals and logic for the workspace'''
     def __init__(
-            self, 
-            workspace:        WorkspaceWidget, 
-            editor_page:      EditorPage, 
-            dispatcher:       Dispatcher, 
+            self,
+            workspace:        WorkspaceWidget,
+            editor_page:      EditorPage,
+            dispatcher:       Dispatcher,
             descriptor_store: NodeDescriptorStore,
     ) -> None:
         super().__init__(parent=workspace)
+        self._main_thread_id = threading.get_ident()
         self.view             = workspace
         self.editor_page      = editor_page
         self.dispatcher       = dispatcher
@@ -693,22 +705,26 @@ class WorkspaceController(QObject):
             session.fail('Navigato not initialised.')
             return
         session.set_active_task(task_handle)
-        task_handle.finished.connect(
-            lambda success, payload, s=session: self._on_editor_data_ready(s, success, payload)
-        )
+        task_handle.finished.connect(functools.partial(self._on_editor_data_ready, session))
 
         plugin_name = getattr(editor_class, '_plugin_name', editor_class.__name__)
         logger.info(f'Opening "{node.name}" in {plugin_name}')
 
     def _on_editor_data_ready(self, session: EditorSession, success: bool, payload: Any) -> None:
         '''Pass processed handler data to editor. Passes through 5 guards first.'''
+        if threading.get_ident() != self._main_thread_id:
+            logger.error("_on_editor_data_ready ran off the main thread")
         if not session.is_active(): # Session state
             logger.debug(f'{session} result discarded - state is {session.state!r}')
+            if sip.isdeleted(session.editor):
+                return
             session.editor.cleanup()
             return
         if session is not self._current_session: # Session currency
             logger.debug(f'{session} discarded - superseded by newer session')
             session.cancel()
+            if sip.isdeleted(session.editor):
+                return
             session.editor.cleanup()
             return
         if not success: # Task success
@@ -1304,10 +1320,7 @@ class SearchOverlay(QLabel):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.opacity_effect = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self.opacity_effect)
         self.opacity = 0.0
-        self.opacity_effect.setOpacity(self.opacity)
 
         self.fade_timer = QTimer(self)
         self.fade_timer.setInterval(50)
@@ -1320,14 +1333,32 @@ class SearchOverlay(QLabel):
 
         self.hide()
 
+    def _apply_opacity(self) -> None:
+        '''Bake current opacity alpha into the widget stylesheet.
+
+        Replaces the old QGraphicsOpacityEffect approach which forced offscreen
+        rasterization and caused Windows repaint artifacts.  The background is
+        kept fully transparent; only the text colour carries the alpha.
+        '''
+        c = QColor(ThemeManager.active_theme.TEXT)
+        alpha = int(self.opacity * 255)
+        self.setStyleSheet(
+            f'#SearchOverlay {{'
+            f'color: rgba({c.red()}, {c.green()}, {c.blue()}, {alpha});'
+            f'background-color: rgba(0, 0, 0, 0);'
+            f'font-weight: bold;'
+            f'font-size: 42px;'
+            f'}}'
+        )
+
     def show_text(self, text: str) -> None:
         if not text:
             self.hide_overlay()
             return
-        
+
         self.setText(text)
         self.opacity = .80
-        self.opacity_effect.setOpacity(self.opacity)
+        self._apply_opacity()
         self.adjustSize()
 
         if self.parentWidget():
@@ -1348,11 +1379,10 @@ class SearchOverlay(QLabel):
             self.opacity = 0
             self.fade_timer.stop()
             self.hide()
-        self.opacity_effect.setOpacity(self.opacity)
+        self._apply_opacity()
 
     def hide_overlay(self) -> None:
         self.opacity = 0
-        self.opacity_effect.setOpacity(0)
         self.fade_timer.stop()
         self.idle_timer.stop()
         self.hide()

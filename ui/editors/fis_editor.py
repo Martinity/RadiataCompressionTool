@@ -31,7 +31,6 @@ class HistoryManager(QObject):
         self.redo_stack: list[QImage] = []
 
         self._current_state:  QImage | None = None
-        self._baseline_state: QImage | None = None
         self._pending_state:  QImage | None = None
 
         self.debounce_timer = QTimer(self)
@@ -41,32 +40,33 @@ class HistoryManager(QObject):
 
     def initialize(self, initial_state: QImage) -> None:
         self.debounce_timer.stop()
-        self._current_state  = initial_state.copy()
-        self._baseline_state = None
-        self._pending_state  = None
+        self._current_state = initial_state.copy()
+        self._pending_state = None
         self.undo_stack.clear()
         self.redo_stack.clear()
         self._emit_status()
 
     def push_change(self, new_state: QImage) -> None:
-        if not self.debounce_timer.isActive():
-            self._baseline_state = new_state.copy()
-        self._pending_state = None
+        # First edit of a debounce burst: snapshot the pre-edit state for undo.
+        if not self.debounce_timer.isActive() and self._current_state is not None:
+            self.undo_stack.append(self._current_state.copy())
+            self.redo_stack.clear()
+        self._pending_state = new_state.copy()
         self.debounce_timer.start()
+        self._emit_status()
 
     def _commit_state(self) -> None:
-        if self._baseline_state:
-            self.undo_stack.append(self._baseline_state)
-            self._baseline_state = None
-        self._current_state = None
-        self.redo_stack.clear()
+        # Finalize the coalesced burst as the new current state.
+        if self._pending_state is not None:
+            self._current_state = self._pending_state
+            self._pending_state = None
         self._emit_status()
 
     def undo(self) -> QImage | None:
         if self.debounce_timer.isActive():
             self.debounce_timer.stop()
             self._commit_state()
-        if not self.undo_stack or not self._current_state:
+        if not self.undo_stack or self._current_state is None:
             return None
         self.redo_stack.append(self._current_state.copy())
         self._current_state = self.undo_stack.pop()
@@ -77,7 +77,7 @@ class HistoryManager(QObject):
         if self.debounce_timer.isActive():
             self.debounce_timer.stop()
             self._commit_state()
-        if not self.redo_stack or not self._current_state:
+        if not self.redo_stack or self._current_state is None:
             return None
         self.undo_stack.append(self._current_state.copy())
         self._current_state = self.redo_stack.pop()
@@ -352,6 +352,7 @@ class FisEditorWidget(BaseEditor):
                 f'Expected FisEditorPayload, got {type(result).__name__}. '
                 f'Ensure FisHandler.prepare_editor_data returns FisEditorPayload.'
             )
+            return
         self.img     = result.image.copy()
         self.info    = result.info
         self.raw_fis = result.raw_bytes
@@ -393,7 +394,7 @@ class FisEditorWidget(BaseEditor):
         Return (QImage, raw_fis_bytes) for dispatcher -> handler.decode_editor_payload
         Called by snapshot() before saving state
         '''
-        return (self.img, self.raw_fis) if self.img and self.raw_fis else self._original_payload
+        return (self.img.copy(), self.raw_fis) if self.img and self.raw_fis else self._original_payload
 
     def confirm_changes_applied(self) -> None:
         '''
