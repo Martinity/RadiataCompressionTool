@@ -1,6 +1,6 @@
 /* ====================== Base ====================== */
 QMainWindow, QWidget {
-    background-color: {BG_MAIN};
+    background-color: {BG_WINDOW};
     color: {TEXT};
     font-family: {FONT_SANS};
     font-weight: {BASE_FONT_WEIGHT};
@@ -8,38 +8,52 @@ QMainWindow, QWidget {
 }  
 
 QTreeView, QListView, QTableView, QListWidget, QTreeWidget {
-    background-color: {BG_SECONDARY};
+    background-color: {BG_SURFACE};
     border: 1px solid {BORDER};
     selection-background-color: {ACCENT};
-    selection-color: #ffffff;
     gridline-color: {BORDER};
 }
-
 QTreeView::item:hover, QListView::item:hover,
 QTableView::item:hover, QListWidget::item:hover {
-    background-color: {BG_TERTIARY};
+    background-color: {BG_HOVER};
+}
+QTreeView:focus, QListView:focus, QTableView:focus {
+    outline: none;
+}
+QTreeView::item:selected:hover, QListView::item:selected:hover,
+QTableView::item:selected:hover, QListWidget::item:selected:hover {
+    background-color: {ACCENT_HOVER};
 }
 
-QTreeView:focus, QlistView:focus, QTableView:focus {
-    outline: none;
+QFrame#HLine {
+    border: none;
+    background-color: {BORDER};
+    min-height: 1px;
+    max-height: 1px;
+}
+
+QFrame#VLine {
+    border: none;
+    background-color: {BORDER};
+    min-width: 1px;
+    max-width: 1px;
 }
 
 /* Headers */
 QHeaderView::section {
-    background-color: {BG_SECONDARY};
+    background-color: {BG_SURFACE};
     color: {TEXT};
     font-weight: bold;
     padding: 4px;
     border: none;
 }
-
 QHeaderView::section:hover {
-    background-color: {BG_TERTIARY};
+    background-color: {BG_HOVER};
 }
 
 /* Scrollbars */
 QScrollBar:vertical {
-    background: {BG_SECONDARY};
+    background: {BG_SURFACE};
     width: 12px;
     margin: 0px;
 }
@@ -49,7 +63,7 @@ QScrollBar::handle:vertical {
     border-radius: 5px;
 }
 QScrollBar:horizontal {
-    background: {BG_SECONDARY};
+    background: {BG_SURFACE};
     height: 12px;
     margin: 0px;
 }
@@ -74,17 +88,39 @@ QScrollBar::add-page:horizontal, QScrollBar::add-page:horizontal {
 }
 
 /* Buttons */
-QPushButton {
+QPushButton, #BtnSurface {
     background-color: {INTERACTIVE};
     color: {TEXT};
     border: none;
     border-radius: 4px;
 }
-QPushButton:hover {
+QPushButton:hover, #BtnSurface:hover {
     background-color: {INTERACTIVE_HOVER};
 }
-QPushButton:pressed {
+QPushButton:pressed, #BtnSurface:pressed {
     background-color: {ACCENT};
+}
+QPushButton:disabled, #BtnSurface:disabled {
+    color: {TEXT_MUTED};
+}
+
+#BtnLarge {
+    border-radius: 8px;
+}
+#BtnLarge:hover {
+    background-color: {ACCENT_HOVER};
+}
+
+#BtnImportant {
+    background-color: {ACCENT};
+    font-weight: bold;
+}
+#BtnImportant:hover {
+    background-color: {ACCENT_HOVER};
+}
+#BtnImportant:disabled {
+    background-color: {INTERACTIVE};
+    color: {TEXT_MUTED};
 }
 
 QMenuBar {
@@ -96,7 +132,7 @@ QMenuBar::item:selected {
 }
 
 QMenu {
-    background-color {BG_SECONDARY};
+    background-color {BG_SURFACE};
     border: 1px solid {BORDER};
 }
 QMenu::item:selected {
@@ -106,12 +142,12 @@ QMenu:enabled {
     color: {TEXT};
 }
 QMenu:disabled {
-    color: {SUCCESS};
+    color: {TEXT_MUTED};
 }
 
 /* Inputs */
 QLineEdit, QTextEdit, QPlainTextEdit {
-    background-color: {BG_SECONDARY};
+    background-color: {BG_SURFACE};
     color: {TEXT};
     border: 1px solid {BORDER};
     padding: 4px;
@@ -124,7 +160,7 @@ QSplitter::handle {
 /* Progress Bar */
 QProgressBar {
     border: 1px solid {BORDER};
-    background-color: {BG_SECONDARY};
+    background-color: {BG_SURFACE};
     text-align: center;
     border-radius: 4px;
     color: {TEXT};
@@ -139,7 +175,7 @@ QLabel {
 }
 
 QComboBox {
-    background-color: {BG_SECONDARY};
+    background-color: {BG_SURFACE};
     border: 1px solid {BORDER};
     padding: 4px;
 }
@@ -148,93 +184,57 @@ QComboBox::drop-down {
 }
 
 QToolTip {
-    background-color: {BG_MAIN};
-    color: {TEXT};
+    background-color: {BG_WINDOW};
+    color: {TEXT_MUTED};
 }
 
 /* ====================== Custom Objects ====================== */
+/* ============== Buttons ============== */
+/* ============== Text ============== */
+#TextTitle {
+    font-weight: bold;
+}
 
-#WelcomeSubtitle {
-    color: #888888;
+#TextHeader {
+    font-weight: bold;
+}
+
+#TextSubtitle {
+    color: {TEXT_MUTED};
     margin-bottom: 4px;
 }
-#WelcomeButton {
-    border-radius: 8px;
-}
 
-#ConfirmButton {
-    font-weight: bold;
+#TextMono {
+    background-color: {BG_SURFACE};
+    font-family: {FONT_MONO};
+}
+#TextMono::item:hover {
+    background-color: {BG_HOVER};
+}
+#TextMono::item:selected {
     background-color: {ACCENT};
 }
-#ConfirmButton:hover {
+#TextMono::item:selected:hover {
     background-color: {ACCENT_HOVER};
 }
-#ConfirmButton:disabled {
-    background-color: {BG_MAIN};
-    color: {BG_MAIN};
+
+#TextMuted {
+    color: {TEXT_MUTED};
 }
 
-#SectionHeader {
-    font-weight: bold;
-}
-
-#PageTitle {
-    font-weight: bold;
-}
-
-#LogOutput {
-    font-family: {FONT_MONO};
-}
-
-#EditorToolbar {
-    background-color: {BG_MAIN};
-    border-bottom: 1px solid {BORDER};
-}
-
-#HexView {
-    background-color: {BG_SECONDARY};
-    font-family: {FONT_MONO};
-}
-#HexView::item:hover {
-    background-color: {BG_TERTIARY};
-}
-
-#FloatClearButton {
-    background-color: {INTERACTIVE};
-    border: none;
-}
-#FloatClearButton:hover {
-    background-color: {INTERACTIVE_HOVER};
-}
-#FloatClearButton:pressed {
-    background-color: {ACCENT};
-}
-#FloatClearButton:enabled {
-    color: {TEXT};
-}
-#FloatClearButton:disabled {
-    color: {BG_SECONDARY};
-}
-
-#MetadataTag {
-    background-color: {BG_SECONDARY};
-    color: {TEXT};
-    font-weight: bold;
-    border-radius: 3px;
-}
-#MetadataTag:hover {
-    background-color: {INTERACTIVE_HOVER};
-    color: {TEXT};
-}
-
-#SearchOverlay {
+#TextOverlay {
     background-color: rgba(0, 0, 0, 0);
     color: {TEXT};
     font-weight: bold;
     font-size: 42px;
 }
 
-#GenericText {
-    color: {TEXT};
-    font-family: {FONT_SANS};
+/* ============== Surfaces ============== */
+#SurfaceToolbar {
+    background-color: {BG_WINDOW};
+    border-bottom: 1px solid {BORDER};
+}
+
+#SurfacePanel {
+    background-color: {BG_SURFACE};
 }

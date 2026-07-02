@@ -132,6 +132,7 @@ class Dispatcher(QObject):
         self, 
         node: VfsNode, 
         data: Any, 
+        editor: BaseEditor | None = None,
         on_success: Callable[[], None]    | None = None,
         on_failure: Callable[[str], None] | None = None,
     ) -> None | TaskHandle:
@@ -146,7 +147,10 @@ class Dispatcher(QObject):
                 on_success()
             return
 
-        handler_class = Registry.get_handler(node)
+        handler_class = (
+            Registry.get_handler_for_editor(editor) if editor is not None else
+            Registry.get_handler(node)
+        )
         if not handler_class:
             error_msg = f'No handler registered for "{node.name}" to compile payload.'
             logger.error(error_msg)
@@ -438,9 +442,9 @@ class Dispatcher(QObject):
         
         match action_def.action_type:
             case ActionType.IMPORT:
-                if isinstance(result.payload, bytes):
-                    self.apply_edit(result.node, result.payload)
-                    self.rebuild_log.emit(f'Import applied to {result.node.name}')
+                # edits get applied via fallback handler, prevents silent failing
+                self.apply_edit(result.node, result.payload, editor=None)
+                self.rebuild_log.emit(f'Import applied to {result.node.name}')
             case ActionType.TREE_EXPAND:
                 if self.vfs:
                     new_nodes: list[VfsNode] = []

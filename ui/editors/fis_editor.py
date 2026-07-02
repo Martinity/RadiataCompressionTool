@@ -228,11 +228,10 @@ class FisEditorWidget(BaseEditor):
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
-        bar.setObjectName('EditorToolbar')
+        bar.setObjectName('SurfaceToolbar')
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(10, 5, 10, 5)
 
-        self._title_label = QLabel('FIS Texture Viewer')
         self._btn_export  = QPushButton('Export PNG')
         self._btn_export.setEnabled(False)
         self._btn_export.clicked.connect(self._export_png)
@@ -240,7 +239,6 @@ class FisEditorWidget(BaseEditor):
         # self._btn_rotate = QPushButton('Rotate 90°')
         # self._btn_rotate.clicked.connect(self._rotate_texture)
 
-        lay.addWidget(self._title_label)
         lay.addStretch()
         # lay.addWidget(self._btn_rotate)
         lay.addWidget(self._btn_export)
@@ -370,9 +368,7 @@ class FisEditorWidget(BaseEditor):
         self._populate_palette()
         self._display_image(self.img)
         self._populate_info(self.info)
-        self._title_label.setText(
-            f'{self.current_node.name}  —  {self.info.width}×{self.info.height}  {self.info.psm_name}'
-        )
+
         self._btn_export.setEnabled(True)
         logger.debug(f'FIS: loaded {self.current_node.name} ({self.info.width}×{self.info.height} {self.info.psm_name})')
 

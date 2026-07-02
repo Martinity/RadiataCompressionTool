@@ -676,7 +676,7 @@ class WorkspaceController(QObject):
         # Build the dispatch funtion that will close confirm/reject callbacks
         def dispatch_fn(node: VfsNode, data: Any) -> None:
             self.dispatcher.apply_edit(
-                node, data,
+                node, data, new_editor,
                 on_success=session.confirm_save,
                 on_failure=session.reject_save,
             )
@@ -797,14 +797,14 @@ class FileMetadataPanel(QWidget):
 
     def _build_header(self) -> QWidget:
         bar = QWidget()
-        bar.setObjectName('EditorToolbar')
+        bar.setObjectName('SurfaceToolbar')
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(10, 6, 8, 6)
 
         self._name_label = QLabel('No file selected')
-        self._name_label.setObjectName('SectionHeader')
+        self._name_label.setObjectName('TextTitle')
         self._hid_label  = QLabel('')
-        self._hid_label.setObjectName('SectionHeader')
+        self._hid_label.setObjectName('TextHeader')
         
         name_col = QVBoxLayout()
         name_col.setSpacing(1)
@@ -812,7 +812,7 @@ class FileMetadataPanel(QWidget):
         name_col.addWidget(self._hid_label)
 
         self._edit_btn = QPushButton('✎')
-        self._edit_btn.setObjectName('FloatClearButton')
+        self._edit_btn.setObjectName('TextTitle')
         self._edit_btn.setFixedWidth(70)
         self._edit_btn.setEnabled(False)
         self._edit_btn.clicked.connect(self._enter_edit_mode)
@@ -841,23 +841,21 @@ class FileMetadataPanel(QWidget):
         self._desc_label = QLabel()
         self._desc_label.setWordWrap(True)
         self._desc_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self._desc_label.setObjectName('GenericText')
         self._desc_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout.addWidget(self._desc_label)
         layout.addWidget(hline())
         ### Properties
         props_header = QLabel('Properties')
-        props_header.setObjectName('SectionHeader')
+        props_header.setObjectName('TextHeader')
         self._props_label = QLabel('-')
         self._props_label.setWordWrap(True)
         self._props_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self._props_label.setObjectName('GenericText')
         layout.addWidget(props_header)
         layout.addWidget(self._props_label)
         layout.addWidget(hline())
         ### File Info
         info_header = QLabel('File Info')
-        info_header.setObjectName('SectionHeader')
+        info_header.setObjectName('TextHeader')
         self._info_container = QWidget()
         self._info_layout    = QVBoxLayout(self._info_container)
         self._info_layout.setContentsMargins(0, 0, 0, 0)
@@ -894,8 +892,7 @@ class FileMetadataPanel(QWidget):
         btn_row = QHBoxLayout()
         self._save_btn   = QPushButton('Save')
         self._cancel_btn = QPushButton('Cancel')
-        self._save_btn.setObjectName('ConfirmButton')
-        self._cancel_btn.setObjectName('FloatClearButton')
+        self._save_btn.setObjectName('BtnImportant')
         self._save_btn.clicked.connect(self._on_save)
         self._cancel_btn.clicked.connect(self._exit_edit_mode)
         btn_row.addStretch()
@@ -997,7 +994,7 @@ class _ClickableTag(QLabel):
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
-        self.setObjectName('MetadataTag')
+        self.setObjectName('BtnSurface')
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mousePressEvent(self, ev: QMouseEvent | None) -> None:
@@ -1009,7 +1006,7 @@ def _info_row(label: str, value: str) -> QWidget:
     layout = QHBoxLayout(row)
     layout.setContentsMargins(0, 0, 0, 0)
     key = QLabel(label)
-    key.setObjectName('SectionHeader')
+    key.setObjectName('TextHeader')
     val = QLabel(value)
     val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     layout.addWidget(key)
@@ -1030,10 +1027,10 @@ class WelcomePage(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         subtitle = QLabel('Select a Radiata Stories ISO...')
-        subtitle.setObjectName('WelcomeSubtitle')
+        subtitle.setObjectName('TextSubtitle')
 
         self.button = QPushButton()
-        self.button.setObjectName('WelcomeButton')
+        self.button.setObjectName('BtnLarge')
         self.set_loading(False)
         self.button.clicked.connect(self.open_file_dialog)
 
@@ -1069,13 +1066,12 @@ class RebuildStatusPage(QWidget):
         
         header_bar = QHBoxLayout()
         self._cancel_btn = QPushButton('Cancel ISO Build')
-        self._cancel_btn.setObjectName('FloatClearButton')
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._on_cancel)
         header_bar.addWidget(self._cancel_btn)
         header_bar.addStretch()
         self.header = QLabel('Rebuilding ISO...')
-        self.header.setObjectName('PageTitle')
+        self.header.setObjectName('TextTitle')
         self.header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_bar.addWidget(self.header)
         header_bar.addStretch()
@@ -1091,7 +1087,7 @@ class RebuildStatusPage(QWidget):
         
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setObjectName('LogOutput')
+        self.log_output.setObjectName('TextMono')
         layout.addWidget(self.log_output)
 
         self._task_handle = None
@@ -1301,7 +1297,7 @@ class SearchOverlay(QLabel):
     '''Floating centered text overlay that fades when idle for searching'''
     def __init__(self, parent: QWidget | None) -> None:
         super().__init__(parent)
-        self.setObjectName('SearchOverlay')
+        self.setObjectName('TextOverlay')
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -1483,12 +1479,6 @@ class LegendModel(QTreeView):
         self.resizeColumnToContents(2)
 
 ###------------------------------------------- Utility ------------------------------------------###
-
-def _divider() -> QFrame:
-    line = QFrame()
-    line.setFrameShape(QFrame.Shape.HLine)
-    line.setFrameShadow(QFrame.Shadow.Sunken)
-    return line
 
 def _clear_layout(layout) -> None:
     while layout.count():

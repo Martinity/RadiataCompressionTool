@@ -1,23 +1,23 @@
-'''BaseEditor Global editor for any format. Takes any raw byte stream as input. Shitty hex editor :"v'''
+'''Global fallback editor for any node. Uses the hex_model to specify the specific rules.'''
 from __future__ import annotations
 
 import struct
 from typing import Any
 from PyQt6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox,
-    QTableView, QHeaderView, QWidget, QMenu, QApplication, QLineEdit, QFrame,
+    QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox, QStackedLayout,
+    QWidget, QMenu, QApplication, QLineEdit, QFrame
 )
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QItemSelection, pyqtSignal
-from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction, QUndoCommand, QUndoStack
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, pyqtSignal, QItemSelectionModel
+from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction, QUndoCommand, QUndoStack, QClipboard
 
 from core.contracts import BaseEditor
 from core.handlers.generic_binary_leaf import GenericBinaryHandler
 from core.registry import Registry
 from core.node import VfsNode
-from utilities import human_size
-
-import logging
-logger = logging.getLogger(f'radiata.{__name__}')
+from ui.hex_model import (
+    HexTableView, BYTES_PER_ROW, TOTAL_COLUMNS, EDITABLE_COLUMNS, COL_OFFSET, 
+    COL_BYTE_START, COL_BYTE_END, COL_ASCII, HexGridModelBase
+)
 
 
 class HistoryManager(QUndoCommand):
@@ -55,35 +55,35 @@ class HexEditorWidget(BaseEditor):
         self.undo_state_changed.emit(self.undo_stack.canUndo(), self.undo_stack.canRedo())
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        self._stack = QStackedLayout(self)
+        self._stack.setContentsMargins(0, 0, 0, 0)
 
-        layout.addWidget(self._build_header_bar())
+        self._status_label = QLabel()
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_label.setWordWrap(True)
 
-        self.table_view = QTableView()
-        self.table_view.setObjectName('HexView')
-        self.table_view.horizontalHeader().setVisible(False)
-        self.table_view.verticalHeader().setVisible(False)
-        self.table_view.setShowGrid(False)
-        self.table_view.setSelectionMode(QTableView.SelectionMode.ContiguousSelection)
+        editor_widget = QWidget()
+        editor_layout = QVBoxLayout(editor_widget)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
+        editor_layout.addWidget(self._build_header_bar())
+
+        self.table_view = HexTableView()
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._show_context_menu)
         self.table_view.setTabKeyNavigation(True)
-        layout.addWidget(self.table_view)
+        editor_layout.addWidget(self.table_view)
 
-        layout.addWidget(self._build_inspector())
+        editor_layout.addWidget(self._build_inspector())
+        self._stack.addWidget(self._status_label)
+        self._stack.addWidget(editor_widget)
 
     def _build_header_bar(self) -> QWidget:
         bar = QWidget()
-        bar.setObjectName('EditorToolbar')
+        bar.setObjectName('SurfaceToolbar')
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(10, 5, 10, 5)
 
-        self.info_label = QLabel('Hex View')
-        self.info_label.setObjectName('SectionHeader') # Give it visual weight
-
-        # Restrict search bar width so it doesn't stretch awkwardly across the screen
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText('Search bytes (e.g. 4A 2F)...')
         self.search_input.setFixedWidth(250)
@@ -96,12 +96,9 @@ class HexEditorWidget(BaseEditor):
 
         btn_prev = QPushButton('◀')
         btn_next = QPushButton('▶')
-        btn_prev.setFixedSize(24, 24)
-        btn_next.setFixedSize(24, 24)
         btn_prev.clicked.connect(self._search_prev)
         btn_next.clicked.connect(self._search_next)
 
-        lay.addWidget(self.info_label)
         lay.addStretch()
         lay.addWidget(QLabel('Find:'))
         lay.addWidget(self.search_input)
@@ -113,21 +110,17 @@ class HexEditorWidget(BaseEditor):
     def _build_inspector(self) -> QWidget:
         '''Status bar showing byte interpretations at the current cursor position.'''
         frame = QFrame()
-        frame.setObjectName('EditorToolbar')
+        frame.setObjectName('SurfaceToolbar')
         frame.setFixedHeight(28)
         lay = QHBoxLayout(frame)
         lay.setContentsMargins(10, 2, 10, 2)
         lay.setSpacing(16)
 
-        self._insp_offset  = QLabel('Offset: —')
-        self._insp_u8      = QLabel('u8: —')
-        self._insp_i8      = QLabel('i8: —')
-        self._insp_u16_le  = QLabel('u16 LE: —')
-        self._insp_u32_le  = QLabel('u32 LE: —')
-        self._insp_sel     = QLabel('Sel: —')
-
-        for lbl in (self._insp_offset, self._insp_u8, self._insp_i8,
-                    self._insp_u16_le, self._insp_u32_le, self._insp_sel):
+        self._insp_labels: dict[str, QLabel] = {
+            key: QLabel(f'{key}: -') for key in
+            ('Offset', 'u8', 'i8', 'u16 LE', 'u32 LE', 'Sel')
+        }
+        for lbl in self._insp_labels.values():
             lay.addWidget(lbl)
 
         lay.addStretch()
@@ -137,16 +130,19 @@ class HexEditorWidget(BaseEditor):
         QShortcut(QKeySequence('Ctrl+C'), self).activated.connect(lambda: self._copy('hex'))
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self.search_input.setFocus)
 
-    def show_load_error(self, message: str) -> None:
-        self.info_label.setText(f'Load failed: {message}')
-        logger.error(f'HexEditor: {message}')
+    def show_error(self, message: str) -> None:
+        '''Swap to the editor page in the stack and display error.'''
+        self._status_label.setText(f'Error:\n{message}')
+        self._stack.setCurrentIndex(0)
+        super().show_error(message)   # also logs
 
     ###---------------------------- Contractuals ---------------------------------###
 
     def begin_loading(self, node: VfsNode) -> None:
         '''Shows placeholder while the worker thread fetches data'''
         super().begin_loading(node)
-        self.info_label.setText(f'Loading {node.name}...')
+        self._status_label.setText(f'Loading {node.name}...')
+        self._stack.setCurrentIndex(0)
         if self.model:
             self.table_view.setModel(None)
             self.model = None
@@ -159,7 +155,7 @@ class HexEditorWidget(BaseEditor):
         Clearing the undo stack here marks it clean
         '''
         if not isinstance(data, bytes):
-            self.info_label.setText('Cannot display: expected bytes')
+            self.show_error('Cannot display: expected bytes')
             return
 
         self.undo_stack.clear()
@@ -170,27 +166,8 @@ class HexEditorWidget(BaseEditor):
         if selection_model:
             selection_model.currentChanged.connect(self._on_cursor_changed)
             selection_model.selectionChanged.connect(self._on_selection_changed)
-        
-        # Column Widths
-        header = self.table_view.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table_view.setColumnWidth(0, 85)
-        for col in range(1, 17):
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
-            self.table_view.setColumnWidth(col, 26)
-        header.setSectionResizeMode(17, QHeaderView.ResizeMode.Stretch)
+        self._stack.setCurrentIndex(1)
 
-        size_str = human_size(len(data))
-        self.info_label.setText(
-            f'Editing: {self.current_node.name} {size_str}' if self.current_node
-            else f'Hex View {size_str}'
-        )
-        logger.debug(f'HexEditor: populated {len(data)} bytes.')
-
-    def show_error(self, message: str) -> None:
-        '''Show error inline in the header bar.'''
-        self.info_label.setText(f'Load failed: {message}')
-        super().show_error(message)   # also logs
 
     def current_data(self) -> Any:
         '''Return current bytes including any in-progress edits.'''
@@ -205,7 +182,6 @@ class HexEditorWidget(BaseEditor):
         if not self.is_dirty() or not self.current_node:
             return
         self._pending_data = None
-        # _populate_ui clears the undo stack → cleanChanged(True) → set_dirty(False)
         self._populate_ui(self._original_payload)
 
     def undo(self) -> None:
@@ -223,22 +199,31 @@ class HexEditorWidget(BaseEditor):
     # Selection helpers
     # ------------------------------------------------------------------
 
-    def _selected_bytes(self) -> bytes:
-        '''Return the bytes corresponding to the current hex-column selection.'''
+    def _selected_positions(self) -> list[int]:
+        '''Return the selected data in sequential order'''
         if not self.model:
-            return b''
+            return []
         selection_model = self.table_view.selectionModel()
+        if not selection_model:
+            return []
         indexes = sorted(
-            (idx for idx in selection_model.selectedIndexes() if 1 <= idx.column() <= 16),
+            (idx for idx in selection_model.selectedIndexes() if idx.column() in EDITABLE_COLUMNS),
             key=lambda i: (i.row(), i.column()),
         )
-        data = self.model.get_bytes()
-        out  = bytearray()
-        for idx in indexes:
-            byte_pos = idx.row() * 16 + (idx.column() - 1)
-            if byte_pos < len(data):
-                out.append(data[byte_pos])
-        return bytes(out)
+        return [idx.row() * BYTES_PER_ROW + (idx.column() - COL_BYTE_START) for idx in indexes]
+
+    def _selected_bytes(self) -> bytes:
+        '''Return the selected data in bytes'''
+        if not self.model:
+            return b''
+        data = self.model .get_bytes()
+        return bytes(data[pos] for pos in self._selected_positions() if pos < len(data))
+
+    @property
+    def clipboard(self) -> QClipboard:
+        clipboard = QApplication.clipboard()
+        assert clipboard is not None
+        return clipboard
 
     def _copy(self, fmt: str) -> None:
         raw = self._selected_bytes()
@@ -254,29 +239,24 @@ class HexEditorWidget(BaseEditor):
             text = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in raw)
         else:
             return
-        QApplication.clipboard().setText(text)
+        self.clipboard.setText(text)
 
     def _paste_hex(self) -> None:
         if not self.model:
             return
-        text = QApplication.clipboard().text()
+        text = self.clipboard.text()
         try:
             raw = bytes.fromhex(text.replace(' ', '').replace('\n', ''))
         except ValueError:
             QMessageBox.warning(self, 'Paste error', 'Clipboard is not valid hex bytes.')
             return
-        selection_model = self.table_view.selectionModel()
-        cells = sorted(
-            (idx for idx in selection_model.selectedIndexes() if 1 <= idx.column() <= 16),
-            key=lambda i: (i.row(), i.column()),
-        )
+        positions = self._selected_positions()
         changes = {}
-        for i, idx in enumerate(cells):
+        for i, pos in enumerate(positions):
             if i >= len(raw):
                 break
-            pos = idx.row() * 16 + (idx.column() - 1)
             if pos < len(self.model._data) and self.model._data[pos] != raw[i]:
-                 changes[pos] = raw[i]
+                changes[pos] = raw[i]
 
         if changes:
             self.undo_stack.push(HistoryManager(self.model, changes, 'Paste hex bytes'))
@@ -284,13 +264,10 @@ class HexEditorWidget(BaseEditor):
     def _fill_zero(self) -> None:
         if not self.model:
             return
-        selection_model = self.table_view.selectionModel()
-        changes = {}
-        for idx in selection_model.selectedIndexes():
-            if 1 <= idx.column() <= 16:
-                pos = idx.row() * 16 + (idx.column() - 1)
-                if pos < len(self.model._data) and self.model._data[pos] != 0:
-                    changes[pos] = 0
+        changes = {
+            pos: 0 for pos in self._selected_positions()
+            if pos < len(self.model._data) and self.model._data[pos] != 0
+        }
         if changes:
             self.undo_stack.push(HistoryManager(self.model, changes, 'Fill zeros'))
 
@@ -300,6 +277,7 @@ class HexEditorWidget(BaseEditor):
         menu = QMenu(self)
 
         copy_menu = menu.addMenu('Copy')
+        assert copy_menu is not None
         for label, fmt in (
             ('As hex bytes  (4A 2F …)',      'hex'),
             ('As Python literal  (b"\\x…")', 'python'),
@@ -320,7 +298,9 @@ class HexEditorWidget(BaseEditor):
         fill_act.triggered.connect(self._fill_zero)
         menu.addAction(fill_act)
 
-        menu.exec(self.table_view.viewport().mapToGlobal(pos))
+        vp = self.table_view.viewport()
+        assert vp is not None
+        menu.exec(vp.mapToGlobal(pos))
 
     def _search_next(self, reverse: bool = False) -> None:
         if not self.model:
@@ -351,130 +331,102 @@ class HexEditorWidget(BaseEditor):
             return None
 
     def _select_byte_range(self, byte_pos: int, length: int) -> None:
-        if not self.model:
+        '''ClearAndSelect to reset the LinearSelectionModel anchor to the new pos'''
+        if not self.model or length <= 0:
             return
         selection_model = self.table_view.selectionModel()
-        selection_model.clearSelection()
-        selection = QItemSelection()
-        for i in range(length):
-            pos = byte_pos + i
-            row = pos // 16
-            col = (pos % 16) + 1
-            idx = self.model.index(row, col)
-            selection.select(idx, idx)
-        selection_model.select(selection, selection_model.SelectionFlag.Select)
-        self.table_view.scrollTo(self.model.index(byte_pos // 16, (byte_pos % 16) + 1))
+        if not selection_model:
+            return
+        last_pos = byte_pos + length - 1
+        start_index = self.model.index(byte_pos // 16, (byte_pos % 16) + 1)
+        end_index = self.model.index(last_pos // 16, (last_pos % 16) + 1)
+
+        selection_model.setCurrentIndex(
+            start_index, QItemSelectionModel.SelectionFlag.ClearAndSelect
+        )
+        if length > 1:
+            selection_model.select(end_index, QItemSelectionModel.SelectionFlag.Select)
+        self.table_view.scrollTo(start_index)
 
     def _current_byte_offset(self) -> int:
         idx = self.table_view.currentIndex()
-        if idx.isValid() and 1 <= idx.column() <= 16:
-            return idx.row() * 16 + (idx.column() - 1)
+        if idx.isValid() and idx.column() in EDITABLE_COLUMNS:
+            return idx.row() * BYTES_PER_ROW + (idx.column() - COL_BYTE_START)
         return 0
 
     ###-------------------------- Inspector ----------------------------------###
 
     def _on_cursor_changed(self, current: QModelIndex, _prev: QModelIndex) -> None:
-        if not self.model or not current.isValid() or not (1 <= current.column() <= 16):
+        if not self.model or not current.isValid() or current.column() not in EDITABLE_COLUMNS:
             return
-        pos  = current.row() * 16 + (current.column() - 1)
+        pos   = current.row() * BYTES_PER_ROW + (current.column() - COL_BYTE_START)
         data = self.model.get_bytes()
+        lbls = self._insp_labels
 
-        self._insp_offset.setText(f'Offset: {hex(pos)}')
-        self._insp_u8.setText(f'u8: {data[pos]}' if pos < len(data) else 'u8: -')
-        self._insp_i8.setText(
-            f'i8: {struct.unpack_from("b", data, pos)[0]}' if pos < len(data) else 'i8: -'
-        )
+        lbls['Offset'].setText(f'Offset: {hex(pos)}')
+        lbls['u8'].setText(f'u8: {data[pos]}' if pos < len(data) else 'u8: -')
+        lbls['i8'].setText(f'i8: {struct.unpack_from("b", data, pos)[0]}' if pos < len(data) else 'i8: -')
+
         def safe_unpack(fmt: str, size: int) -> str:
             return str(struct.unpack_from(fmt, data, pos)[0]) if pos + size <= len(data) else '-'
 
-        self._insp_u16_le.setText(f'u16 LE: {safe_unpack("<H", 2)}')
-        self._insp_u32_le.setText(f'u32 LE: {safe_unpack("<I", 4)}')
+        lbls['u16 LE'].setText(f'u16 LE: {safe_unpack("<H", 2)}')
+        lbls['u32 LE'].setText(f'u32 LE: {safe_unpack("<I", 4)}')
 
     def _on_selection_changed(self, *_) -> None:
         raw = self._selected_bytes()
         n   = len(raw)
-        self._insp_sel.setText(f'Sel: {n} byte{"s" if n != 1 else ""}' if raw else 'Sel: -')
+        self._insp_labels['Sel'].setText(f'Sel: {n} byte{"s" if n != 1 else ""}' if raw else 'Sel: -')
 
     def _reset_inspector(self) -> None:
-        for lbl in (self._insp_offset, self._insp_u8, self._insp_i8, self._insp_sel):
-            text = lbl.text().split(':')[0]
-            lbl.setText(f'{text}: —')
-
+        for key, lbl in self._insp_labels.items():
+            lbl.setText(f'{key}: -')
 
 ###---------------------------------------- Model -------------------------------------###
 
-class HexTableModel(QAbstractTableModel):
+class HexTableModel(HexGridModelBase):
     '''
     18 columns:
-      col  0      — offset label (read-only)
+      col  0      — offset label   (read-only)
       cols 1-16   — hex byte cells (editable)
-      col  17     — ASCII dump (read-only)
+      col  17     — ASCII dump     (read-only)
     '''
-    _COLUMNS = 18
     # Colours for modified bytes
-    _MODIFIED_FG = QColor('#E2A96B')
-    _MODIFIED_BG = QColor('#2A2218')
+    _MODIFIED_FG  = QColor('#E2A96B')
+    _MODIFIED_BG  = QColor('#2A2218')
+    _EXTREMITY_FG = QColor('#888888')
 
     def __init__(self, data: bytes, undo_stack: QUndoStack, parent=None) -> None:
-        super().__init__(parent)
-        self._data:     bytearray  = bytearray(data)
+        super().__init__(data, parent)
+        self._data:     bytearray  = bytearray(data) # Overrides for mutability
         self._original: bytes      = data
         self._modified: set[int]   = set()
         self.undo_stack            = undo_stack
 
-    def rowCount(self, parent=QModelIndex()) -> int:
-        return (len(self._data) + 15) // 16
-
-    def columnCount(self, parent=QModelIndex()) -> int:
-        return self._COLUMNS
-
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
-        base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if 1 <= index.column() <= 16:
-            return base | Qt.ItemFlag.ItemIsEditable
-        return base
+        if index.column() in (COL_OFFSET, COL_ASCII):
+            return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable
 
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return None
-
-        row, col = index.row(), index.column()
-        pos = row * 16 + (col - 1)
-
-        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
-            
-            if col == 0:
-                return f'{row * 16:08X}'
-            if 1 <= col <= 16:
-                return f'{self._data[pos]:02X}' if pos < len(self._data) else ''
-            if col == 17:
-                chunk = self._data[row * 16: (row + 1) * 16]
-                return ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
-
-        if role == Qt.ItemDataRole.ForegroundRole:
-            if 1 <= col <= 16:
-                if pos in self._modified:
-                    return QBrush(self._MODIFIED_FG)
-            elif col == 0:
-                # Mute the offset address column
-                return QBrush(QColor('#777777')) 
-            elif col == 17:
-                # Mute the ASCII dump column
-                return QBrush(QColor('#888888'))
-
-        if role == Qt.ItemDataRole.BackgroundRole and 1 <= col <= 16:
+    def _cell_color(self, pos: int, col: int, role: int) -> QBrush | None:
+        if col in EDITABLE_COLUMNS:
             if pos in self._modified:
-                return QBrush(self._MODIFIED_BG)
-
+                return QBrush(
+                    self._MODIFIED_FG if role == Qt.ItemDataRole.ForegroundRole
+                    else self._MODIFIED_BG
+                )
+            return None
+        if col in (COL_OFFSET, COL_ASCII) and role == Qt.ItemDataRole.ForegroundRole:
+            return QBrush(self._EXTREMITY_FG)
         return None
 
     def setData(self, index: QModelIndex, value: str, role: int = Qt.ItemDataRole.EditRole) -> bool:
-        if role != Qt.ItemDataRole.EditRole or not (1 <= index.column() <= 16):
+        if role != Qt.ItemDataRole.EditRole or index.column() not in EDITABLE_COLUMNS:
             return False
 
-        pos = index.row() * 16 + (index.column() - 1)
+        pos = index.row() * BYTES_PER_ROW + (index.column() - COL_BYTE_START)
         if pos >= len(self._data):
             return False
 
@@ -488,6 +440,7 @@ class HexTableModel(QAbstractTableModel):
 
         if self._data[pos] == new_byte:
             return False
+
         self.undo_stack.push(HistoryManager(self, {pos: new_byte}, f'Edit byte at {hex(pos)}'))
         return True
 
@@ -500,20 +453,12 @@ class HexTableModel(QAbstractTableModel):
             else:
                 self._modified.discard(pos)
             
-            row, col = pos // 16, (pos % 16) + 1
-            idx = self.index(row, col)
+            row = pos // BYTES_PER_ROW
+            col = (pos % BYTES_PER_ROW) + COL_BYTE_START
+            idx: QModelIndex = self.index(row, col)
             self.dataChanged.emit(idx, idx)
-            self.dataChanged.emit(self.index(row, 17), self.index(row, 17))
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        return None
-    
-    ###--------------------------------- Helpers -------------------------------------###
-
-    def get_bytes(self) -> bytes:
-        return bytes(self._data)
+            ascii_idx: QModelIndex = self.index(row, COL_ASCII)
+            self.dataChanged.emit(ascii_idx, ascii_idx)
 
     def get_bytes_mutable(self) -> bytearray:
-        '''Return the internal bytearray directly — callers must call notify_all_changed after.'''
         return self._data
-

@@ -85,7 +85,7 @@ class EditorSession:
             logger.debug(f'Session {self.session_id} reject aborted: C++ Editor object is dead.')
             return
         self.editor.reject_changes_applied(reason)
-        self._transition('ready')
+        self._transition('error')
         cb, self._post_save_failure = self._post_save_failure, None
         if cb:
             cb(reason)
@@ -166,16 +166,16 @@ class EditorPage(QWidget):
         bar.setContentsMargins(10, 5, 10, 5)
 
         self._back_btn = QPushButton('Back')
-        self._back_btn.setObjectName('FloatClearButton')
         self._back_btn.clicked.connect(self._on_back)
 
         self._editor_title = QLabel('Editor')
-        self._editor_title.setObjectName('SectionHeader')
+        self._editor_title.setObjectName('TextHeader')
 
         self.btn_undo   = QPushButton('Undo')
         self.btn_redo   = QPushButton('Redo')
         self.btn_revert = QPushButton('Revert')
         self.btn_save   = QPushButton('Save')
+        self.btn_save.setObjectName('BtnImportant')
 
         self.btn_undo.setToolTip('Ctrl+Z')
         self.btn_redo.setToolTip('Ctrl+Y')
@@ -249,7 +249,6 @@ class EditorPage(QWidget):
         self.btn_redo.setEnabled(can_redo)
 
     def _deconstruct_old_session(self) -> None:
-        self.back_requested.emit
         if self._current_session:
             self._current_session.state_changed_callback = None
             self._current_session.cancel()
@@ -343,17 +342,17 @@ class EditorPage(QWidget):
         self.back_requested.emit()
     
     def _on_save(self) -> None:
-        if self._current_session:
+        if self._current_session and self._current_session.state == 'ready':
             self._current_session.apply_changes()
 
     def _on_revert(self) -> None:
-        if self._current_session:
+        if self._current_session and self._current_session.state == 'ready':
             self._current_session.editor.discard_changes()
 
     def _on_undo(self) -> None:
-        if self._current_session:
+        if self._current_session and self._current_session.state == 'ready':
             self._current_session.editor.undo()
 
     def _on_redo(self) -> None:
-        if self._current_session:
+        if self._current_session and self._current_session.state == 'ready':
             self._current_session.editor.redo()

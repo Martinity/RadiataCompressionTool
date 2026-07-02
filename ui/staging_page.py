@@ -1,15 +1,15 @@
-'''StagingPage has it's own file?! Yes, ui_core was getting to big for my liking.'''
+'''StagingPage contents including; hexdiff, stats, staging queue files.'''
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, QAbstractTableModel, QModelIndex
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget, QListWidgetItem, 
-                            QSplitter, QTableView, QHeaderView)
-from PyQt6.QtGui import QFont, QBrush, QColor, QShortcut, QKeySequence
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget, QListWidgetItem, 
+    QSplitter, QTableView
+)
+from PyQt6.QtGui import QBrush, QColor, QShortcut, QKeySequence
 from core.node import VfsNode, ModTracker
 from utilities import human_size, hline, vline
-
-import logging
-logger = logging.getLogger(f'radiata.{__name__}')
+from ui.hex_model import HexTableView, HexGridModelBase, EDITABLE_COLUMNS
 
 _COL_CHANGED_FG = QColor('#E2A96B')
 _COL_CHANGED_BG = QColor('#2A2218')
@@ -18,71 +18,35 @@ _COL_ADDED_BG   = QColor("#345342")
 _COL_REMOVED_FG = QColor('#E06C75')
 _COL_REMOVED_BG = QColor('#2A1A1C')
 
-class HexDiffModel(QAbstractTableModel):
-    '''Read-only hex model'''
-    _COLS = 18
+###--------------------------------------- Hex Model ----------------------------------------------###
 
+class HexDiffModel(HexGridModelBase):
+    '''Read-only hex model with diff-based byte coloring'''
     def __init__(self, data: bytes, diff_mask: list[str], parent=None) -> None:
-        super().__init__(parent)
-        self._data = data
+        super().__init__(data, parent)
         self._mask = diff_mask
 
-    ###---------------------------------------------- QT API -----------------------------------------###
-
-    def rowCount(self, parent=QModelIndex()) -> int:
-        return max(1, (len(self._data) + 15) // 16)
-    
-    def columnCount(self, parent=QModelIndex()) -> int:
-        return self._COLS
-    
-    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
-        if not index.isValid():
-            return Qt.ItemFlag.NoItemFlags
-        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-    
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
+    def _cell_color(self, pos: int, col: int, role: int) -> QBrush | None:
+        if col not in EDITABLE_COLUMNS or pos >= len(self._mask):
             return None
-        row, col = index.row(), index.column()
-        pos = row * 16 + (col - 1)
-        if role == Qt.ItemDataRole.DisplayRole:
-            if col == 0:
-                return f'{row * 16:08X}'
-            if 1 <= col <= 16:
-                return f'{self._data[pos]:02X}' if pos < len(self._data) else ''
-            if col == 17:
-                chunk = self._data[row * 16: row * 16 + 16]
-                return ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
-        if role in (Qt.ItemDataRole.ForegroundRole, Qt.ItemDataRole.BackgroundRole):
-            if 1 <= col <= 16 and pos < len(self._mask):
-                kind = self._mask[pos]
-                if kind == 'changed':
-                    return QBrush(
-                        _COL_CHANGED_FG if role == Qt.ItemDataRole.ForegroundRole
-                        else _COL_CHANGED_BG
-                    )
-                if kind == 'added':
-                    return QBrush(
-                        _COL_ADDED_FG if role == Qt.ItemDataRole.ForegroundRole
-                        else _COL_ADDED_BG
-                    )
-                if kind == 'removed':
-                    return QBrush(
-                        _COL_REMOVED_FG if role == Qt.ItemDataRole.ForegroundRole
-                        else _COL_REMOVED_BG
-                    )
-        return None
-    
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        return None
+        kind = self._mask[pos]
+        pair = {
+            'changed' : (_COL_CHANGED_FG, _COL_CHANGED_BG),
+            'added'   : (_COL_ADDED_FG,   _COL_ADDED_BG),
+            'removed' : (_COL_REMOVED_FG, _COL_REMOVED_BG)
+        }.get(kind)
+        if not pair:
+            return None
+        fg, bg = pair
+        return QBrush(fg if role == Qt.ItemDataRole.ForegroundRole else bg)
     
     ###--------------------------------- Diff Mask -------------------------------------------------###
 
     @staticmethod
     def build_masks(new_data: bytes, orig_data: bytes) -> tuple[list[str], list[str]]:
         '''Produce diffs per byte'''
-        n, o      = len(new_data), len(orig_data)
-        common    = min(n, o)
+        n, o       = len(new_data), len(orig_data)
+        common          = min(n, o)
         new_mask  = ['same'] * n
         orig_mask = ['same'] * o
 
@@ -100,22 +64,9 @@ class HexDiffModel(QAbstractTableModel):
         return new_mask, orig_mask
     
 def _make_hex_view(model: HexDiffModel) -> QTableView:
-    view = QTableView()
+    view = HexTableView()
     view.setModel(model)
-    view.setFont(QFont('Courier New', 10))
-    view.horizontalHeader().setVisible(False)
-    view.verticalHeader().setVisible(False)
-    view.setShowGrid(False)
-    view.setSelectionMode(QTableView.SelectionMode.ContiguousSelection)
     view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-
-    h = view.horizontalHeader()
-    h.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-    view.setColumnWidth(0, 85)
-    for col in range(1, 17):
-        h.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
-        view.setColumnWidth(col, 26)
-    h.setSectionResizeMode(17, QHeaderView.ResizeMode.Stretch)
     return view
 
 class HexDiffPanel(QWidget):
@@ -126,17 +77,17 @@ class HexDiffPanel(QWidget):
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(8, 0, 0, 0)
         root.setSpacing(0)
 
         stats_bar = QWidget()
-        stats_bar.setObjectName('EditorToolbar')
+        stats_bar.setObjectName('SurfaceToolbar')
         stats_layout = QHBoxLayout(stats_bar)
-        stats_layout.setContentsMargins(0, 0, 0, 0)
+        stats_layout.setContentsMargins(4, 4, 4, 4)
         stats_layout.setSpacing(12)
 
         self._node_label = QLabel('Select a modified file')
-        self._node_label.setObjectName('SecitonHeader')
+        self._node_label.setObjectName('TextHeader')
         self._stats_label = QLabel('')
 
         legend = QHBoxLayout()
@@ -158,22 +109,22 @@ class HexDiffPanel(QWidget):
         stats_layout.addWidget(self._stats_label)
         stats_layout.addStretch(12)
         stats_layout.addLayout(legend)
-        stats_layout.setContentsMargins(0 ,0, 6, 6)
+        stats_layout.setContentsMargins(6 ,6 , 6, 6)
         stats_layout.setVerticalSizeConstraint(QHBoxLayout.SizeConstraint.SetFixedSize)
         root.addWidget(stats_bar)
 
         # Hex view headers
         headers = QWidget()
         header_layout = QHBoxLayout(headers)
-        header_layout.setContentsMargins(4, 2, 4, 2)
+        header_layout.setContentsMargins(8, 8, 8, 8)
         self._new_header = QLabel('New (modified)')
         self._orig_header = QLabel('Original')
-        self._new_header.setObjectName('SectionHeader')
-        self._orig_header.setObjectName('SectionHeader')
+        self._new_header.setObjectName('TextHeader')
+        self._orig_header.setObjectName('TextHeader')
         header_layout.addWidget(self._new_header, stretch=1)
         header_layout.addWidget(vline())
         header_layout.addWidget(self._orig_header, stretch=1)
-        header_layout.setContentsMargins(0, 0, 6, 6)
+        header_layout.setContentsMargins(6, 6, 6, 6)
         header_layout.setVerticalSizeConstraint(QHBoxLayout.SizeConstraint.SetFixedSize)
         root.addWidget(headers)
         root.addWidget(hline())
@@ -207,7 +158,7 @@ class HexDiffPanel(QWidget):
 
         changed = sum(1 for m in new_mask  if m == 'changed')
         added   = sum(1 for m in new_mask  if m == 'added')
-        removed = sum(1 for m in orig_data if m == 'removed')
+        removed = sum(1 for m in orig_mask if m == 'removed')
 
         self._new_model = HexDiffModel(new_data, new_mask)
         self._orig_model = HexDiffModel(orig_data, orig_mask)
@@ -234,7 +185,6 @@ class HexDiffPanel(QWidget):
         self._orig_header.setText('Original')
         self._stats_label.setText('')
 
-
 ###------------------------------------- Staging Page --------------------------------------###
 
 class StagingPage(QWidget):
@@ -260,7 +210,7 @@ class StagingPage(QWidget):
 
         top = QWidget()
         top_layout = QVBoxLayout(top)
-        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setContentsMargins(6, 4, 4, 0)
         top_layout.setSpacing(6)
 
         lists_row = QHBoxLayout()
@@ -268,7 +218,7 @@ class StagingPage(QWidget):
 
         unstage_col = QVBoxLayout()
         unstage_lbl = QLabel('Unstaged Changes')
-        unstage_lbl.setObjectName('SectionHeader')
+        unstage_lbl.setObjectName('TextHeader')
         self.unstaged_list = QListWidget()
         self.unstaged_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         unstage_col.addWidget(unstage_lbl)
@@ -298,7 +248,7 @@ class StagingPage(QWidget):
 
         staged_col = QVBoxLayout()
         staged_lbl = QLabel('Staged (ready to build)')
-        staged_lbl.setObjectName('SectionHeader')
+        staged_lbl.setObjectName('TextHeader')
         self.staged_list = QListWidget()
         self.staged_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         staged_col.addWidget(staged_lbl)
@@ -310,9 +260,10 @@ class StagingPage(QWidget):
         top_layout.addLayout(lists_row)
 
         action_bar = QHBoxLayout()
+        action_bar.setContentsMargins(6, 6, 6, 6)
         self.btn_back = QPushButton('< Back')
-        self.btn_back.setObjectName('FloatClearButton')
         self.btn_confirm = QPushButton('Build New ISO')
+        self.btn_confirm.setObjectName('BtnImportant')
         self.btn_confirm.setEnabled(False)
         action_bar.addWidget(self.btn_back)
         action_bar.addStretch()

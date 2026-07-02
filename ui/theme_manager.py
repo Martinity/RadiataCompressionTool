@@ -7,48 +7,52 @@ import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
 class DarkTheme:
-    BG_MAIN           = '#202020'
-    BG_SECONDARY      = '#161616'
-    BG_TERTIARY       = '#1a1a1a'
+    BG_WINDOW         = '#202020'
+    BG_SURFACE        = '#161616'
+    BG_HOVER          = '#1a1a1a'
     BORDER            = '#333333'
     TEXT              = '#dcddde'
+    TEXT_MUTED        = '#999999'
     ACCENT            = '#7f6df2'
     ACCENT_HOVER      = '#8875ff'
-    SUCCESS           = '#a8a9ad'
     INTERACTIVE       = '#2a2a2a'
     INTERACTIVE_HOVER = '#303030'
-    SCROLL_BG         = 'rgba(255, 255, 255, 0.05)'
+    ERROR             = '#3d0000'
+    ERROR_HOVER       = '#470000'
     SCROLL_HOVER      = 'rgba(255, 255, 255, 0.2)'
     FONT_SANS         = '"Segoe UI", "Open Sans", sans-serif'
     FONT_MONO         = '"Courier New", monospace'
     BASE_FONT_WEIGHT  = 'normal'
 
-class RadiataTheme:
-    BG_MAIN           = '#94825a'
-    BG_SECONDARY      = '#847441'
-    BG_TERTIARY       = '#ab9c65'
-    BORDER            = '#5b5851'
-    TEXT              = '#302217'
-    ACCENT            = '#f1c562'
-    ACCENT_HOVER      = '#ddcaac'
-    SUCCESS           = '#f1c562'
-    INTERACTIVE       = '#e5dabe'
-    INTERACTIVE_HOVER = '#efe5aa'
-    SCROLL_BG         = 'rgba(255, 255, 255, 0.05)'
-    SCROLL_HOVER      = 'rgba(255, 255, 255, 0.2)'
+class LightTheme:
+    BG_WINDOW         = '#ffffff'
+    BG_SURFACE        = '#f2f3f5'
+    BG_HOVER          = '#f5f6f8'
+    BORDER            = '#dddddd'
+    TEXT              = '#2e3338'
+    TEXT_MUTED        = '#888888'
+    ACCENT            = '#705dcf'
+    ACCENT_HOVER      = '#7a6ae6'
+    INTERACTIVE       = '#f2f3f5'
+    INTERACTIVE_HOVER = '#e9e9e9'
+    ERROR             = '#990000'
+    ERROR_HOVER       = '#bb0000'
+    SCROLL_HOVER      = 'rgba(0, 0, 0, 0.2)'
     FONT_SANS         = '"Segoe UI", "Open Sans", sans-serif'
     FONT_MONO         = '"Courier New", monospace'
-    BASE_FONT_WEIGHT  = 'bold'
+    BASE_FONT_WEIGHT  = 'normal'
+
 
 class ThemeManager:
     current_font_size = 14
-    active_theme: type[DarkTheme] | type[RadiataTheme] = DarkTheme
+    active_theme: type = DarkTheme
     _raw_template = None
     _app = None
 
     THEMES = {
-        'Radiata': RadiataTheme,
-        'Dark':    DarkTheme
+        # 'Radiata': RadiataTheme,
+        'Dark':    DarkTheme,
+        'Light':   LightTheme
     }
 
     @classmethod
@@ -80,17 +84,18 @@ class ThemeManager:
 
         # The mapping dictionary
         replacements = {
-            '{BG_MAIN}':           theme.BG_MAIN,
-            '{BG_SECONDARY}':      theme.BG_SECONDARY,
-            '{BG_TERTIARY}':       theme.BG_TERTIARY,
+            '{BG_WINDOW}':         theme.BG_WINDOW,
+            '{BG_SURFACE}':        theme.BG_SURFACE,
+            '{BG_HOVER}':          theme.BG_HOVER,
             '{BORDER}':            theme.BORDER,
             '{TEXT}':              theme.TEXT,
+            '{TEXT_MUTED}':        theme.TEXT_MUTED,
             '{ACCENT}':            theme.ACCENT,
             '{ACCENT_HOVER}':      theme.ACCENT_HOVER,
-            '{SUCCESS}':           theme.SUCCESS,
             '{INTERACTIVE}':       theme.INTERACTIVE,
             '{INTERACTIVE_HOVER}': theme.INTERACTIVE_HOVER,
-            '{SCROLL_BG}':         theme.SCROLL_BG,
+            '{ERROR}':             theme.ERROR,
+            '{ERROR_HOVER}':       theme.ERROR_HOVER,
             '{SCROLL_HOVER}':      theme.SCROLL_HOVER,
             '{FONT_SANS}':         theme.FONT_SANS,
             '{FONT_MONO}':         theme.FONT_MONO,
@@ -99,9 +104,9 @@ class ThemeManager:
             '{FONT_SIZE}':         f'{fs}px',
             '{FONT_SIZE_SMALL}':   f'{fs - 2}px',
             '{FONT_SIZE_LARGE}':   f'{fs + 5}px',
-            '{BTN_PADDING}':       f'{fs // 4}px {fs // 2}px',
+            '{BTN_PADDING}':       f'{max(1, fs // 4)}px {max(1, fs // 2)}px',
             '{BTN_PADDING_LARGE}': f'{fs}px {fs * 2}px',
-            '{BTN_MIN_WIDTH}':     f'{fs * 2}px',
+            '{BTN_MIN_WIDTH}':     f'{fs * 2.5}px',
         }
         full_sheet = cls._raw_template
         for key, value in replacements.items():
@@ -109,7 +114,7 @@ class ThemeManager:
 
         cls._app.setStyleSheet(full_sheet)
 
-        logger.debug(f'Stylesheet {theme_name} initialised.')
+        logger.debug(f'Stylesheet {theme_name} initialised. (Font Size:{fs})')
 
     @staticmethod
     def load_custom_font(font_path: Path):

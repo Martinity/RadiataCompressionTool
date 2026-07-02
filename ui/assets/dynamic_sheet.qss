@@ -1,39 +1,31 @@
 /* Only font-related rules
-When the UI font-size changes it will reload only this. 
+When the zoom level changes it will reload only this. 
 */
 
 QMainWindow, QWidget, QTreeView, QListView, QTableView, QListWidget,
-QHeaderView::section, QPushButton, QLabel, QTextEdit, QLineEdit {
+QHeaderView::section, QPushButton, QLabel, QTextEdit, QLineEdit, 
+#TextMono, #BtnSurface, #BtnDanger, #BtnImportant {
     font-size: {FONT_SIZE};
 }
 
-#WelcomeButton {
-    font-size: {FONT_SIZE_LARGE};
+#BtnLarge {
     padding: {BTN_PADDING_LARGE};
-}
-
-#PageTitle {
     font-size: {FONT_SIZE_LARGE};
 }
 
-#FloatClearButton, #GenericText, #LogOutput, QToolTip, #HexView {
+#TextTitle {
+    font-size: {FONT_SIZE_LARGE};
+}
+
+#TextSubtitle {
     font-size: {FONT_SIZE_SMALL};
 }
 
-QPushButton {
+QPushButton, #BtnImportant, #BtnSurface, #BtnDanger {
     padding: {BTN_PADDING};
     min-width: {BTN_MIN_WIDTH};
 }
 
-#ConfirmButton {
-    padding: {BTN_PADDING};
-    min-width: {BTN_MIN_WIDTH};
-}
-
-#MetadataTag {
-    font-size: {FONT_SIZE};
-}
-
-#SearchOverlay {
+#TextOverlay {
     font-size: 42px;
 }

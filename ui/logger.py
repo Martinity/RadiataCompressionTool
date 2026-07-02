@@ -3,9 +3,9 @@ For more advanced debugging implementation should use {__name__}
 Only signals messages to the workspace log console (or any build console where __name__ helps)'''
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QGridLayout, QPushButton, QPlainTextEdit, QWidget
+from PyQt6.QtWidgets import QPushButton, QPlainTextEdit
 from PyQt6.QtGui import QTextCursor, QColor
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
 import logging
 
@@ -40,32 +40,21 @@ def setup_logging(level: int = logging.INFO) -> QtLogHandler:
 
 ###---------------------------------------- UI ---------------------------------------------###
 
-class LoggingWindow(QWidget):
+class LoggingWindow(QPlainTextEdit):
     '''Log viewer widget'''
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName('TextSubtitle')
+        self.setReadOnly(True)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setObjectName('LogView')
-        self.log_view.setReadOnly(True)
-        self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-
-        self.clear_button = QPushButton('Clear')
-        self.clear_button.setObjectName('FloatClearButton')
-        self.clear_button.clicked.connect(self.log_view.clear)
-
-        layout = QGridLayout(self)
-        layout.setContentsMargins(0,0,0,0)
-        layout.addWidget(self.log_view, 0, 0)
-
-        layout.addWidget(
-            self.clear_button,
-            0,0,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight
-        )
+        self.clear_button = QPushButton('Clear', self)
+        self.clear_button.clicked.connect(self.clear)
+        self.clear_button.show()
+        self.update_button_position()
 
     def __repr__(self) -> str:
-        lines = self.log_view.document().lineCount()
+        lines = self.document().lineCount()
         return f"<LoggingWindow lines={lines}>"
 
     def __str__(self) -> str:
@@ -74,19 +63,22 @@ class LoggingWindow(QWidget):
     @pyqtSlot(str, int)
     def append_log(self, message: str, level: int):
         '''Slot gets logs from QtLogHandler'''
-        scrollbar = self.log_view.verticalScrollBar()
+        scrollbar = self.verticalScrollBar()
+        assert scrollbar is not None
         at_bottom = scrollbar.value() >= (scrollbar.maximum() - 10)
 
+        from ui.theme_manager import ThemeManager
+        theme = ThemeManager.active_theme
         colors = {
-            logging.DEBUG: "#7f6df2",
-            logging.INFO: "#dcddde",
-            logging.WARNING: "#ffaa33",
-            logging.ERROR: "#ff3333",
-            logging.CRITICAL: "#990000"
+            logging.DEBUG:     theme.ACCENT,
+            logging.INFO:      theme.TEXT,
+            logging.WARNING:   "#ffaa33",
+            logging.ERROR:     "#ff3333",
+            logging.CRITICAL:  "#990000"
         }
-        color = colors.get(level, "#dcddde")
+        color = colors.get(level, theme.TEXT)
 
-        cursor = self.log_view.textCursor()
+        cursor = self.textCursor()
         cursor.beginEditBlock()
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
@@ -98,5 +90,17 @@ class LoggingWindow(QWidget):
         cursor.endEditBlock()
 
         if at_bottom:
-            self.log_view.moveCursor(QTextCursor.MoveOperation.End)
-            # self.log_view.ensureCursorVisible()
+            self.moveCursor(QTextCursor.MoveOperation.End)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_button_position()
+
+    def update_button_position(self) -> None:
+        padding = 4
+        scroll_width = self.verticalScrollBar().width() if self.verticalScrollBar() else 0
+        button_width = self.clear_button.width()
+        x = self.width() - button_width - padding * 2 - scroll_width
+        y = padding
+        self.clear_button.move(x, y)
+        self.clear_button.raise_()

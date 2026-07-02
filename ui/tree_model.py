@@ -298,7 +298,7 @@ class FlatSearchModel(QAbstractListModel):
             if meta and meta.description:
                 parts.append(meta.description)
             if not entry.is_resolved:
-                parts.append('⚠ Not yet loaded by VFS — double-click to navigate')
+                parts.append('𔓎 Not yet loaded by VFS. Click to expand to file. 𔓎')
             return '\n'.join(parts)
         if role == Qt.ItemDataRole.ForegroundRole:
             if not entry.is_resolved:

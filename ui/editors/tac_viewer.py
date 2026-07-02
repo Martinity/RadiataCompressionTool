@@ -5,8 +5,12 @@ import wave
 from pathlib import Path
 from io import BytesIO
 from typing import Any
-from PyQt6.QtCore import QTimer, Qt, QIODevice
-from PyQt6.QtWidgets import QWidget, QFrame, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QCheckBox, QSlider, QMessageBox, QFileDialog, QStyle, QStyleOptionSlider
+from PyQt6.QtCore import QTimer, Qt, QIODevice, QSettings
+from PyQt6.QtWidgets import (
+    QWidget, QFrame, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, 
+    QCheckBox, QSlider, QMessageBox, QFileDialog, QStyle, QStyleOptionSlider,
+    QStackedLayout,
+)
 from PyQt6.QtGui import QPainter, QPen
 from PyQt6.QtMultimedia import QAudioSink, QAudioFormat
 from core.contracts import BaseViewer
@@ -54,12 +58,23 @@ class TacAudioEditor(BaseViewer):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(self._build_toolbar())
-        root.addWidget(self._build_info_panel())
-        root.addStretch()
+        self._stack = QStackedLayout(self)
+        self._stack.setContentsMargins(0, 0, 0, 0)
+
+        self._status_label = QLabel()
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_label.setWordWrap(True)
+
+        editor_widget = QWidget()
+        editor_layout = QVBoxLayout(editor_widget)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
+        editor_layout.addWidget(self._build_toolbar())
+        editor_layout.addWidget(self._build_info_panel())
+        editor_layout.addStretch()
+
+        self._stack.addWidget(self._status_label)
+        self._stack.addWidget(editor_widget)
  
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -67,7 +82,6 @@ class TacAudioEditor(BaseViewer):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(10, 5, 10, 5)
  
-        self._title_label = QLabel("TAC Audio")
         self._btn_export  = QPushButton("Export WAV")
         self._btn_rebuild = QPushButton("Rebuild Decoder")
         self._btn_export.setEnabled(False)
@@ -75,7 +89,6 @@ class TacAudioEditor(BaseViewer):
         self._btn_export.clicked.connect(self._export_wav)
         self._btn_rebuild.clicked.connect(lambda: self._redecode(force_rebuild=True))
  
-        lay.addWidget(self._title_label)
         lay.addStretch()
         lay.addWidget(self._btn_export)
         lay.addWidget(self._btn_rebuild)
@@ -112,7 +125,9 @@ class TacAudioEditor(BaseViewer):
  
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
-        self._volume_slider.setValue(75)
+        settings = QSettings('RadiataModding', 'Tool')
+        saved_volume = settings.value('volume', 75, type=int)
+        self._volume_slider.setValue(saved_volume)
         self._volume_slider.setFixedWidth(120)
         self._volume_slider.valueChanged.connect(self._set_volume)
  
@@ -143,7 +158,9 @@ class TacAudioEditor(BaseViewer):
         super().begin_loading(node)
         self._stop_playback()
         self._reset_state()
-        self._title_label.setText(f'Loading {node.name}...')
+
+        self._status_label.setText(f'Loading {node.name}...')
+        self._stack.setCurrentIndex(0)
         self._set_controls_enabled(False)
 
     def receive_data(self, result: Any, data_resolver=None) -> None:
@@ -172,10 +189,7 @@ class TacAudioEditor(BaseViewer):
         self._seek_slider.setRange(0, self._duration_ms())
         self._seek_slider.set_loop_position(self._loop_position_ms())
         self._update_time_label(0, self._duration_ms())
-        self._title_label.setText(
-            f'{self.current_node.name} - {result.info.duration_seconds:.2f}s'
-            if self.current_node else 'TAC Audio'
-        )
+        self._stack.setCurrentIndex(1)
         self._set_controls_enabled(True)
         logger.debug(
             f'TacAudioEditor: loaded {result.info.frame_count} frames '
@@ -183,7 +197,8 @@ class TacAudioEditor(BaseViewer):
         )
 
     def show_load_error(self, message: str) -> None:
-        self._title_label.setText(f'Load failed: {message}')
+        self._status_label.setText(f'Load failed:\n{message}')
+        self._stack.setCurrentIndex(0)
         self._set_controls_enabled(False)
         logger.error(f'TacAudioEditor: {message}')
 
@@ -352,6 +367,8 @@ class TacAudioEditor(BaseViewer):
             self._pause_playback()
  
     def _set_volume(self, value: int) -> None:
+        settings = QSettings('RadiataModding', 'Tool')
+        settings.setValue('volume', value)
         if self._audio_sink:
             self._audio_sink.setVolume(value / 100)
  

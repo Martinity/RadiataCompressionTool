@@ -33,13 +33,15 @@ def human_size(n: int) -> str:
 
 def hline() -> QFrame:
     f = QFrame()
+    f.setObjectName('HLine')
     f.setFrameShape(QFrame.Shape.HLine)
     f.setFrameShadow(QFrame.Shadow.Sunken)
     return f
 
 def vline() -> QFrame:
     f = QFrame()
+    f.setObjectName('VLine')
     f.setFrameShape(QFrame.Shape.HLine)
     f.setFrameShadow(QFrame.Shadow.Sunken)
-    f.setFixedWidth(2)
     return f
+

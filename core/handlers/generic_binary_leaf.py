@@ -21,9 +21,10 @@ class GenericBinaryHandler(LeafHandler):
         return raw_bytes
     
     def decode_editor_data(self, node: VfsNode, payload: Any, **kwargs) -> bytes:
+        if isinstance(payload, bytearray):
+            return bytes(payload)
         if not isinstance(payload, bytes):
             raise TypeError(
                 f'GenericBinaryHanlder.decode_editor_data expected bytes, got {type(payload).__name__}'
-                f'HexEditorWidget should always emit bytes via apply_requested.'
             )
         return payload
