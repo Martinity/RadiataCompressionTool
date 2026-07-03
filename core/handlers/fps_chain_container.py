@@ -7,7 +7,7 @@ from typing import Any
 from core.contracts import ContainerHandler
 from core.workers import ActionDef, ActionType
 from core.node import VfsNode
-from core.extension_overrides import generate_ext_overrides
+from core.extension_overrides import lookup_extension
 from core.registry import Registry
 
 import logging
@@ -47,14 +47,13 @@ class FpsChainHandler(ContainerHandler):
             name=f"{getattr(self.handler_parent, 'name', 'Chain')}_contents",
             parent=self.handler_parent,
         )
-        extensions = generate_ext_overrides()
         max_size = len(self.data)
         pos = 0
         idx = 0
         while pos < max_size:
             raw_header = bytes(self.data[pos:pos+16])
             header_obj = self.parse_header(raw_header)
-            ext: str = next((match for sig, match in extensions.items() if header_obj.magic.startswith(sig)), '.bin')
+            ext: str = lookup_extension(header_obj.magic)
             ext = f'{ext}-Segment'
             
             node = VfsNode(
@@ -87,7 +86,7 @@ class FpsChainHandler(ContainerHandler):
             is_last = (i == len(node.children) - 1)
             payload = (
                 child.pending_data[16:]
-                if child in staged_set and child.pending_data
+                if child in staged_set and child.pending_data is not None
                 else bytes(self.data[child.offset + 16 : child.offset + child.size])
             )
             new_node += self._build_header(child.header[:4], payload, previous_size, is_last)

@@ -1,4 +1,5 @@
 '''File Extension naming overrides and currently also a losely stored database of game formats'''
+from functools import lru_cache
 
 HEADERS = {
     # Core containers       | Purpose                             | In tool support
@@ -54,12 +55,46 @@ HEADERS = {
     (0x89504E47).to_bytes(4, 'big'): ".png", # image
 }
 
+@lru_cache(maxsize=1)
 def generate_ext_overrides() -> dict[bytes, str]:
-    """Build complete magic→extension map."""
+    """Build complete magic→extension map. Result is cached; callers must not mutate it."""
     overrides = {}
 
     for idx, name in HEADERS.items():
         overrides[idx] = name
 
     return overrides
+
+
+@lru_cache(maxsize=1)
+def _ext_prefix_index() -> dict[int, dict[bytes, str]]:
+    """Build a length-bucketed prefix index from generate_ext_overrides().
+
+    Buckets are ordered by the first time a given signature length is
+    encountered when iterating the overrides dict (insertion order).  Because
+    no two signatures of different lengths are prefixes of each other in the
+    current table, bucket iteration order does not change which match wins —
+    but the equivalence test in tests/test_ext_lookup.py is the authoritative
+    guarantee.
+    """
+    d = generate_ext_overrides()
+    index: dict[int, dict[bytes, str]] = {}
+    for sig, ext in d.items():
+        index.setdefault(len(sig), {})[sig] = ext
+    return index
+
+
+def lookup_extension(header: bytes, default: str = '.bin') -> str:
+    """Return the extension for *header* using a prefix-index lookup.
+
+    Equivalent to:
+        next((m for s, m in generate_ext_overrides().items()
+              if header.startswith(s)), default)
+    but O(len(buckets)) hash lookups instead of O(n) linear scan.
+    """
+    for length, table in _ext_prefix_index().items():
+        ext = table.get(header[:length])
+        if ext is not None:
+            return ext
+    return default
 

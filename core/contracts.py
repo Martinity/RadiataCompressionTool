@@ -176,7 +176,7 @@ class LeafHandler(BaseHandler):
         return self.handle.read()
     
     def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> bytes:
-        if node in staged_nodes and node.pending_data and self.task_handle:
+        if node in staged_nodes and node.pending_data is not None and self.task_handle:
             self.task_handle.log_message.emit(f'Node has been modified. Original size:{node.size} New size:{len(node.pending_data)}')
             return node.pending_data
         self.handle.seek(0)

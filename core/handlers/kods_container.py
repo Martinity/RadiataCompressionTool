@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from core.contracts import ContainerHandler, RebuildResult
-from core.extension_overrides import generate_ext_overrides
+from core.extension_overrides import lookup_extension
 from core.registry import Registry
 from core.node import VfsNode
 from core.workers import ActionDef, ActionType
@@ -50,8 +50,6 @@ class KodsHandler(ContainerHandler):
             header_obj = self.archiver.parse_header(self.payload_view, True)
             header_view = self.payload_view[:header_obj.payload_offset]
         master_map = self.archiver.get_kods_map(header_view, is_internal)
-        extensions = generate_ext_overrides()
-
         for meta in master_map:
             if not meta.is_valid or meta.size == 0 or meta.size == -1:
                 dummy_node = VfsNode(
@@ -65,7 +63,7 @@ class KodsHandler(ContainerHandler):
                 continue
             
             header = bytes(self.payload_view[meta.offset : meta.offset + 8])
-            ext: str = next((match for sig, match in extensions.items() if header.startswith(sig)), '.bin')
+            ext: str = lookup_extension(header)
             name = f'{meta.node_index:04d}' if is_internal else f'Entry {meta.node_index:02d}'
 
             node = VfsNode(
@@ -139,7 +137,7 @@ class KodsHandler(ContainerHandler):
             new_header.write(
                 offset.to_bytes(self.header_obj.stride, 'little')
                 if offset != -1
-                else self.header_obj.sentinel.to_bytes(self.header_obj.stride)
+                else self.header_obj.sentinel.to_bytes(self.header_obj.stride, 'little')
             )
         if self.header_obj.has_second_table: # Secondary table
             second_table_start = self.header_obj.header_size + (self.header_obj.num_entries * self.header_obj.stride)

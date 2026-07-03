@@ -2,9 +2,11 @@
 from dataclasses import dataclass
 from core.registry import Registry
 from core.contracts import ContainerHandler
-from core.extension_overrides import generate_ext_overrides
+from core.extension_overrides import lookup_extension
 from core.node import VfsNode
 from core.workers import ActionDef, ActionType
+from core.native.compressor_loader import (
+    native_decompress, native_unscramble, native_compress, native_scramble)
 from typing import Optional, Any
 
 import logging
@@ -34,12 +36,14 @@ class CompressorHandler(ContainerHandler):
         super().__init__(source)
         self.handler_parent = parent
         self.raw_source = memoryview(self.handle.read())
+        self._cached_tree: VfsNode | None = None
     
     def get_file_tree(self) -> VfsNode:
-        '''Return a node for the compressed file'''
+        '''Return a node for the compressed file (cached after first build)'''
+        if self._cached_tree is not None:
+            return self._cached_tree
         root = VfsNode() # dummy nodes
 
-        extension_dict: dict[bytes, str] = generate_ext_overrides()
         current_offset = 0
         chunk_idx = 0
 
@@ -60,7 +64,7 @@ class CompressorHandler(ContainerHandler):
             chunk_view = self.raw_source[current_offset : current_offset + header_obj.compressed_size + 16]
             compressor = RadiCompressor(chunk_view) # slice out header bytes for node
             inline_header = compressor.decompress(get_header=True)
-            ext: str = next((match for sig, match in extension_dict.items() if inline_header.startswith(sig)), '.bin')
+            ext: str = lookup_extension(inline_header)
 
             node = VfsNode(
                 name=f'{chunk_idx:04d}',
@@ -83,6 +87,7 @@ class CompressorHandler(ContainerHandler):
             
             root.append_child(node)
             chunk_idx += 1
+        self._cached_tree = root
         return root
 
     def get_raw_node(self, node: VfsNode) -> bytes:
@@ -105,24 +110,24 @@ class CompressorHandler(ContainerHandler):
         for i, child in enumerate(node.children):
             is_final_payload = i == len(node.children) - 1
             if child in staged_nodes and child.compressed_header: # Modified child
-                if not child.pending_data:
+                if child.pending_data is None:
                     continue
                 raw_bytes = child.pending_data
                 target_mode = child.compressed_header.mode
                 is_encrypted = child.compressed_header.magic == 'SLE'
 
-                if raw_bytes[2:6] == b'1bcb':
+                if raw_bytes[0:4] == b'1bcb':
                     is_final_payload = True # mark (is_final_payload = true) so (next_file_offset = 0). There may be more payloads
 
                 compressor = RadiCompressor(memoryview(raw_bytes), target_mode=target_mode, target_is_encrypted=is_encrypted, is_final_payload=is_final_payload)
                 compressed_output = compressor.compress()
 
-                padding_size = (-len(compressed_output)) & (0x800 - 1) if raw_bytes[2:6] == b'1bcb' else 0 # bcb sector alignment
+                padding_size = (-len(compressed_output)) & (0x800 - 1) if raw_bytes[0:4] == b'1bcb' else 0 # bcb sector alignment
                 new_compressed_file += compressed_output + (b'\00' * padding_size)
 
             else: # Unmodified child
                 compressed_size = child.compressed_header.compressed_size
-                next_file_offset = child.compressed_header.decompressed_size
+                next_file_offset = child.compressed_header.next_file_offset
                 chunk_size = next_file_offset if next_file_offset > 0 else (compressed_size + 16)
                 original_chunk = bytearray(self.raw_source[child.offset:child.offset + chunk_size])
                 if is_final_payload and next_file_offset != 0:
@@ -384,6 +389,16 @@ class RadiCompressor():
             self.data = memoryview(bytes(self.data) + b'\x00')
             n += 1
 
+        # Native fast path (falls through to Python below if unavailable).
+        native_payload = native_compress(self.data, self.mode.mode)
+        if native_payload is not None:
+            next_file_offset = len(native_payload) + 16 if not self.is_final_payload else 0
+            header = self._encode_header(len(native_payload), original_size, next_file_offset)
+            if self.is_encrypted:
+                native_payload = self._scramble_slz_payload(native_payload)
+                header = header[:2] + b'E' + header[3:]
+            return bytes(header + native_payload)
+
         head = [-1] * self.hash_size
         prev = [-1] * self.mode.window_size
 
@@ -460,6 +475,10 @@ class RadiCompressor():
 
     def _scramble_slz_payload(self, data: bytes) -> bytes:
         '''Scramble the compressed'''
+        native = native_scramble(bytes(data))
+        if native is not None:
+            return native
+
         KEY = self.SCRAMBLE_KEY
         scrambled = bytearray()
         mod_value = 0x03
@@ -485,6 +504,16 @@ class RadiCompressor():
         
         compressed_size = int.from_bytes(self.data[4:8], 'little')
         expected_size = int.from_bytes(self.data[8:12], 'little')
+
+        # Native fast path (falls through to Python below if unavailable).
+        native_cap = min(expected_size, 64) if get_header else expected_size
+        native_out = native_decompress(self.data[16:], native_cap, self.mode.mode)
+        if native_out is not None:
+            if not get_header and len(native_out) != expected_size:
+                logger.warning(f"Size mismatch! Header uncompressed={hex(expected_size)}, "
+                    f"produced={hex(len(native_out))}")
+            return native_out
+
         pos = 16
         decompressed = bytearray()
         
@@ -580,6 +609,13 @@ class RadiCompressor():
         KEY = self.SCRAMBLE_KEY
         comp_size = int.from_bytes(self.data[4:8], 'little')
         payload = self.data[16:]
+
+        # Native fast path (falls through to Python below if unavailable).
+        n = min(comp_size, len(payload))
+        native = native_unscramble(bytes(payload[:n]))
+        if native is not None:
+            return bytes(self.data[:2]) + b'Z' + bytes(self.data[3:16]) + native
+
         unscrambled = bytearray()
         mod_value = 0x03
 
