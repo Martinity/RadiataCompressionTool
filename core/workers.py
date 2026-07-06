@@ -73,8 +73,10 @@ class EditorPayload:
 
 class LoadIsoResult(NamedTuple):
     '''Payload for _on_iso_loaded'''
-    handler: PhysicalHandler
-    root:    VfsNode
+    success: bool
+    handler: PhysicalHandler | None = None
+    root:    VfsNode         | None = None
+    error:   str             | None = None
 
 ###---------------------------------------- Tasks ------------------------------------------###
 
@@ -332,14 +334,18 @@ class Actions:
         handler_class: type,
         path:          Path,
         task_handle:   TaskHandle,
-    ) -> tuple:
+    ) -> tuple | None:
         '''Read the TOC and split the disk into it's physical files'''
-        task_handle.checkpoint()
-        handler = handler_class(path, None)
-        task_handle.checkpoint()
-        root = handler.get_file_tree()
-        handler.release_handle()
-        return LoadIsoResult(handler, root)
+        try:
+            handler = handler_class(path, None)
+            task_handle.checkpoint()
+            root = handler.get_file_tree()
+            handler.release_handle()
+            return LoadIsoResult(True, handler, root)
+        except ValueError as e:
+            task_handle.finished.emit(False, str(e))
+            task_handle.checkpoint()
+            return None
 
     @staticmethod
     def rebuild_iso(
@@ -417,7 +423,7 @@ class Actions:
                 action_name='Export',
                 node=node,
                 status=ActionStatus.SUCCESS,
-                message=f'Saved to {output_path.name}'
+                message=f'Sucuessfully exported to {output_path.name}'
             )
         except Exception as e:
             logger.error(f'Export failed: {e}', exc_info=True)

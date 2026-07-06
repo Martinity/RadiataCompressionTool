@@ -29,24 +29,24 @@ class Dispatcher(QObject):
     Dispatcher does not need to now what an action needs to execute.
     '''
     # Tree / Tracker
-    iso_loaded        = pyqtSignal(list)     # [root]
+    iso_loaded        = pyqtSignal(object)           # [root], None failed
     expand_requested  = pyqtSignal(object, object)   # (VfsNode, wait_event)
-    node_changed      = pyqtSignal(VfsNode)  # Update for TreeView
-    tracking_update   = pyqtSignal(int, int) # (modified_count, staged_count)
+    node_changed      = pyqtSignal(VfsNode)          # Update for TreeView
+    tracking_update   = pyqtSignal(int, int)         # (modified_count, staged_count)
     # Page transitions
-    rebuild_requested = pyqtSignal(list)     # For MainWindow page swap
+    rebuild_requested = pyqtSignal(list)             # For MainWindow page swap
     # Rebuild Task
-    rebuild_progress = pyqtSignal(int)       # completion %
-    rebuild_log      = pyqtSignal(str)       # log for rebuild page
-    rebuild_complete = pyqtSignal(bool, str) # (success, message)
+    rebuild_progress = pyqtSignal(int)               # completion %
+    rebuild_log      = pyqtSignal(str)               # log for rebuild page
+    rebuild_complete = pyqtSignal(bool, str)         # (success, message)
     # ISO verification
-    iso_verified = pyqtSignal(str)           # Build string
+    iso_verified = pyqtSignal(str)                   # Build string
     # Generic node actions
-    action_complete = pyqtSignal(object)     # ActionResult 
-    workspace_log   = pyqtSignal(str)        # Testing usefulness of log signalling
+    action_complete = pyqtSignal(object)             # ActionResult 
+    workspace_log   = pyqtSignal(str)                # Testing usefulness of log signalling
     # IO 
-    io_progress = pyqtSignal(int, str)       # completion %
-    io_complete = pyqtSignal(bool, object)   # (success, result)
+    io_progress = pyqtSignal(int, str)               # completion %
+    io_complete = pyqtSignal(bool, object)           # (success, result)
 
     def __init__(self) -> None:
         super().__init__()
@@ -339,7 +339,8 @@ class Dispatcher(QObject):
         if has_targets:
             return
         logger.info('No target entries found - running DatacenterTargets migration.')
-        count = store.migrate_datacenter_targets()
+        count = store.ingest_datacenter_targets()
+        count += store.ingest_metadata()
         store.save()
         logger.info(f'Migration complete: {count} target entries written to {store._path.name}')
         logger.info('Re-enrichment pass complete - datacenter nodes have .kods extension.')
@@ -380,16 +381,14 @@ class Dispatcher(QObject):
         task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         task_handle.finished.connect(_on_expand_done)
 
-    def _on_iso_loaded(self, success: bool, result: object) -> None:
+    def _on_iso_loaded(self, success: bool, result: object, task_handle: TaskHandle) -> None:
         '''Takes the ISO's root+children nodes and intializes:
         VfsManager -> VfsNavigator -> metadata -> and signals'''
         from core.workers import LoadIsoResult
-        if not success:
-            msg = str(result) if not isinstance(result, LoadIsoResult) else 'Unknown error'
-            logger.error(f'ISO failed: {msg}')
-            return
-        if not isinstance(result, LoadIsoResult):
-            logger.error(f'_on_iso_loaded: unexpected result type {type(result)}')
+        if not isinstance(result, LoadIsoResult) or not success:
+            msg = result.error if isinstance(result, LoadIsoResult) else str(result)
+            logger.error(f'ISO load failed: {msg}')
+            self.iso_loaded.emit(None)
             return
         handler, root = result.handler, result.root
         self.active_handler = handler
@@ -403,7 +402,6 @@ class Dispatcher(QObject):
         self.vfs.enrich_initial_tree()
         self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
         # self._migrate_targets_if_needed()   #Uncomment for building metadata from scratch
-
         verify_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
         verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         verify_handle.finished.connect(self._on_iso_verified)

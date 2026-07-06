@@ -152,12 +152,12 @@ class MainWindow(QMainWindow):
         logging.getLogger('radiata').setLevel(logging.DEBUG if self.app_settings.verbose_logging else logging.INFO)
 
     def _apply_theme(self) -> None:
-        '''Apply the current_theme at current _zoom_delta'''
+        '''Apply the current_theme without changing the zoom'''
         ThemeManager.apply_theme(self.current_theme, self._zoom_delta)
 
     def adjust_zoom(self, delta: int):
         self._zoom_delta += delta
-        ThemeManager.apply_theme(self.current_theme, delta)
+        ThemeManager.apply_theme(self.current_theme, self._zoom_delta)
         self.app_settings.zoom_delta = self._zoom_delta
         logger.debug(f'Zoom Adjusted (Font size set to: {ThemeManager.current_font_size})')
 
@@ -182,6 +182,7 @@ class MainWindow(QMainWindow):
         task_handle = self.dispatcher.load_source(path)
         if not isinstance(task_handle, TaskHandle):
             QMessageBox.critical(self, 'Load Error', f'No handler for {path.name}')
+            self.welcome_page.set_loading(False)
             return
         task_handle.log_message.connect(lambda msg: self.status_bar.showMessage(msg, 0))
 
@@ -199,10 +200,10 @@ class MainWindow(QMainWindow):
         if handle:
             self.rebuild_page.set_task_handle(handle)
 
-    def _on_iso_loaded(self, nodes: list) -> None:
-        if not nodes:
-            QMessageBox.critical(self, 'Load Error', 'Failed to initialise ISO.')
-            self.status_bar.showMessage('Load failed', 5000)
+    def _on_iso_loaded(self, nodes: list | None) -> None:
+        self.welcome_page.set_loading(False)
+        if nodes is None:
+            QMessageBox.critical(self, 'Load Error', 'Invalid ISO.')
             return
         root_node = nodes[0]
         self.controller.init_workspace(root_node)
@@ -622,7 +623,7 @@ class WorkspaceController(QObject):
         if not action_def:
             logger.debug(f'No ActionDef for action "{result.action_name}"')
             return
-        
+
         match action_def.action_type:
             case ActionType.DIALOG:
                 if (result.action_name == 'Properties'):
@@ -642,9 +643,11 @@ class WorkspaceController(QObject):
                     if editor_classes:
                         self.launch_editor(result.node, editor_classes[0])
             case ActionType.EXPORT:
+                QMessageBox.information(self.view, 'Export Action Result', result.message)
                 logger.info(f'Exported: {result.message}')
             case ActionType.IMPORT:
-                pass # tree is refreshed via signal
+                QMessageBox.information(self.view, 'Import Action Result', result.message)
+                # tree is refreshed via signal
 
     def _on_expand_complete(self, result: ActionResult) -> None:
         if result.status != ActionStatus.SUCCESS or not self.tree_model or not self.proxy_model:
@@ -1026,7 +1029,7 @@ class WelcomePage(QWidget):
         layout.setContentsMargins(50,50,50,50)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        subtitle = QLabel('Select a Radiata Stories ISO...')
+        subtitle = QLabel('Select a Radiata Stories ISO')
         subtitle.setObjectName('TextSubtitle')
 
         self.button = QPushButton()
@@ -1049,7 +1052,7 @@ class WelcomePage(QWidget):
             self.button.setText('Loading...')
             self.button.setEnabled(False)
         else:
-            self.button.setText('Open ISO...')
+            self.button.setText('Open ISO')
             self.button.setEnabled(True)
 
 ###------------------------------------- Rebuilding Page -----------------------------------###
@@ -1132,7 +1135,6 @@ class MainMenuBar:
 
         self._build_file_menu()
         self._build_view_menu()
-        self._build_metadata_menu()
         self._build_info_menu()
 
     @property
@@ -1144,6 +1146,12 @@ class MainMenuBar:
     def _build_file_menu(self) -> None:
         file_menu = self.menu_bar.addMenu('&File')
         assert file_menu is not None
+
+        self.dump_metadata = QAction('Dump metadata', self.window)
+        self.dump_metadata.triggered.connect(self._handle_meta_dump)
+        file_menu.addAction(self.dump_metadata)
+
+        file_menu.addSeparator()
 
         self.open_action = QAction('Open ISO', self.window)
         self.open_action.setShortcut('Ctrl+O')
@@ -1215,19 +1223,6 @@ class MainMenuBar:
         toggle_hidden.triggered.connect(self._handle_toggle_hidden)
         view_menu.addAction(toggle_hidden)
 
-    def _build_metadata_menu(self) -> None:
-        pass
-        # metadata_menu = self.menu_bar.addMenu('metadata')
-        # assert metadata_menu is not None
-
-        # build_action = QAction('Export new JSON', self.window)
-        # build_action.triggered.connect(self._handle_export_template)
-        # metadata_menu.addAction(build_action)
-
-        # save_action = QAction('Save Now', self.window)
-        # save_action.triggered.connect(self._store.save)
-        # metadata_menu.addAction(save_action)
-
     def _build_info_menu(self) -> None:
         info_menu = self.menu_bar.addMenu('Info')
         assert info_menu is not None
@@ -1237,6 +1232,14 @@ class MainMenuBar:
         info_menu.addAction(legend_action)
 
     #-------- Actions --------#
+    def _handle_meta_dump(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self.window, 'Dump metadata', 'radi_metadata.json', 'JSON Files (*.json);; All Files (*)')
+        if not path:
+            return
+        if not path.lower().endswith('.json'):
+            path += '.json'
+        self.window.metadata_store.dump_metadata(Path(path))
+
     def _handle_open(self) -> None:
         start_dir = self.settings.last_iso_dir or ''
         path, _ = QFileDialog.getOpenFileName(self.window, 'Open ISO', start_dir, 'ISO Files (*.iso);;All Files (*)')
@@ -1276,16 +1279,6 @@ class MainMenuBar:
         self.settings.show_hidden_files = checked
         if self.window.controller.proxy_model: # Prevent crashing when no proxy_model is live
             self.window.controller.proxy_model.set_show_hidden(checked)
-
-    def _handle_export_template(self) -> None:
-        if not self.dispatcher.vfs:
-            return
-        path, _ = QFileDialog.getSaveFileName(self.window, 'Export metadata JSON', 'metadatas.json', 'JSON Files (*.json)')
-        if not path:
-            return
-        output = Path(path)
-        count = self._store.export_template(self.dispatcher.vfs, output)
-        QMessageBox.information(self.window, 'Template Exported', f'{count} new stub(s) added.\nSave to {output.name}')
 
     def _handle_legend(self) -> None:
         theme_name = self.window.current_theme
@@ -1385,9 +1378,8 @@ def build_legend_tree(theme) -> QStandardItemModel:
     add_item(fs, ".slz", "Compressed file", "Fully supported: 'Decompress'")
     add_item(fs, ".sle", "Encrypted compressed file", "Fully supported: 'Decompress'")
     add_item(fs, ".kods", "Custom archive format", "Fully supported: 'Unpack'")
-    add_item(fs, ".bcb", "Packed entity data", "---")
-    add_item(fs, ".vib", "Vibration motor data", "---")
-    add_item(fs, ".elf", "Executables", "---")
+    add_item(fs, ".vib", "Vibration motor data")
+    add_item(fs, ".elf", "Executables and IOP modules")
 
     ### Audio
     audio = add_category("Audio")
@@ -1401,10 +1393,10 @@ def build_legend_tree(theme) -> QStandardItemModel:
 
     ### Mesh
     mesh = add_category("Mesh")
-    add_item(mesh, ".fps", "Mesh data head", "Partially supported: 'Deconstruct Chain'. \n'.fps-segment' also supports the experimental 'Extract FIS'")
+    add_item(mesh, ".fps", "Mesh data head", "Experimentally supported: 'Deconstruct Chain'. \n'.fps-segment' also supports the experimental 'Extract FIS'")
     add_item(mesh, ".fss", "Mesh data terminal")
     add_item(mesh, ".idom", "Mesh data")
-    add_item(mesh, ".lctp", "Mesh data", "Partially supported: 'Deconstruct Chain'")
+    add_item(mesh, ".lctp", "Mesh data", "Experimentally supported: 'Deconstruct Chain'")
 
     ### Event
     event = add_category("Event")
@@ -1412,9 +1404,9 @@ def build_legend_tree(theme) -> QStandardItemModel:
 
     ### Animation
     anim = add_category("Animation")
-    add_item(anim, ".fas", "Animation data head", "Partially supported: 'Deconstruct Chain'")
+    add_item(anim, ".fas", "Animation data head", "Experimentally supported: 'Deconstruct Chain'")
     add_item(anim, ".hfas", "Animation data terminal")
-    add_item(anim, ".rmac", "Animation data", "Partially supported: 'Deconstruct Chain'")
+    add_item(anim, ".rmac", "Animation data", "Experimentally supported: 'Deconstruct Chain'")
     add_item(anim, ".rta", "Animation data")
     add_item(anim, ".paf", "Animation data")
 
@@ -1427,25 +1419,26 @@ def build_legend_tree(theme) -> QStandardItemModel:
 
     ### Scene
     scene = add_category("Scene")
-    add_item(scene, ".rbad", "Radiata Background Animation Data", "---")
+    add_item(scene, ".rbad", "Map object references")
     add_item(scene, ".rlf", "Scene data")
     add_item(scene, ".rmf", "Scene data")
     add_item(scene, ".ndnc", "Scene data")
     add_item(scene, ".xbdc", "Scene data")
     add_item(scene, ".pcdc", "Scene data")
     add_item(scene, ".dnal", "Scene data")
-    add_item(scene, ".tgil", "Map animation container", "Partially supported: 'Deconstruct Chain'")
+    add_item(scene, ".tgil", "Map model data", "Experimentally supported: 'Deconstruct Chain'")
 
     ### Gameplay
     game = add_category("Gameplay")
-    add_item(game, ".mpa", "Sprite animation data")
     add_item(game, ".dth", "Gameplay data")
     add_item(game, ".cpa", "Gameplay data")
     add_item(game, ".ipa", "Gameplay data")
     add_item(game, ".fdc", "Gameplay data")
+    add_item(game, ".bcb", "Packed entity data, perhaps battle related")
 
     ### Unknown
     unk = add_category("Unknown / Descriptor")
+    add_item(unk, ".mpa", "Unknown ")
     add_item(unk, ".rcp", "Grouped ID table", "---")
     add_item(unk, ".rcad", "Descriptor data")
     add_item(unk, ".png", "PNG image")

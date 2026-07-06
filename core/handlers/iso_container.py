@@ -39,45 +39,6 @@ class IsoHandler(PhysicalHandler):
         total_entries: int = 0x1200
         sector_size: int = 0x800
 
-    class FileCategories:
-        '''Known File Categories'''
-        _CATEGORIES = {
-            range(8, 17):       ('FMV',),
-            range(3, 4):        ('Audio',),
-            range(42, 176):     ('TAC Audio',),
-            range(176, 181):    ('Audio',),
-            range(188, 189):    ('Audio',),
-            range(184, 188):    ('Script',),
-            range(204, 205):    ('Script',),
-            range(206, 207):    ('Script',),
-            range(4, 5):        ('Texture',),
-            range(26, 27):      ('Texture',),
-            range(189, 204):    ('Texture',),
-            range(205, 206):    ('Texture',),
-            range(207, 1206):   ('Map',),
-            range(1206, 1511):  ('Character',),
-            range(1511, 1688):  ('Monster',),
-            range(1688, 1939):  ('Prop',),
-            range(1939, 2126):  ('Equipment',),
-            range(2126, 2426):  ('VFX',),
-            range(2426, 3426):  ('Scene Setup',),
-            range(3426, 3629):  ('Animation',),
-            range(3730, 4151):  ('Battle Animation',),
-
-            range(0, 3):        ('System',), # boot
-            range(5, 8):        ('System',), # datacenter/SO3
-            range(18, 26):      ('System',), # stats
-            range(27, 42):      ('System',), # core/debug
-            range(182, 184):    ('System',), # game
-        }
-        @classmethod
-        def get_category(cls, index: int) -> tuple[str, ...]:
-            '''Return semantic file category'''
-            for index_range, name in cls._CATEGORIES.items():
-                if index in index_range:
-                    return name
-            return ("Unknown",)
-
     def __init__(self, iso_path: Path, parent=None):
         '''Initialize iso properties'''
         super().__init__(iso_path)
@@ -119,12 +80,11 @@ class IsoHandler(PhysicalHandler):
             # Real node
             header: bytes = self.handle.read(32)
             ext: str = next((match for sig, match in extension_dict.items() if header.startswith(sig)), self._check_pk(header))
-            category: tuple[str, ...] = self.FileCategories.get_category(disk_index)
             semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
 
             node = VfsNode(
                 name=semantic_name or 'Unknown',
-                category=category,
+                category=('',),
                 offset=offset,
                 size=(entry['size'] * self.params.sector_size),
                 parent=root,

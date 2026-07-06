@@ -154,6 +154,10 @@ class LinearSelectionModel(QItemSelectionModel):
 
     def select(self, selection, flags):
         target_offset: int | None = None
+        # Explicitly verify the mask
+        is_clear_and_select = (
+            flags & QItemSelectionModel.SelectionFlag.ClearAndSelect
+        ) == QItemSelectionModel.SelectionFlag.ClearAndSelect
 
         if isinstance(selection, QModelIndex): # Single Cell
             target_index: QModelIndex = selection
@@ -163,11 +167,11 @@ class LinearSelectionModel(QItemSelectionModel):
                 row = target_index.row()
                 target_offset = row * BYTES_PER_ROW + (BYTES_PER_ROW - 1)
                 if (self._active_gesture or self._anchor_offset is None
-                        or (flags & QItemSelectionModel.SelectionFlag.ClearAndSelect)):
+                        or is_clear_and_select):
                     self._anchor_offset  = row * BYTES_PER_ROW
                     self._active_gesture = False
             elif (self._active_gesture or self._anchor_offset is None # Selection on hex cell
-                  or (flags & QItemSelectionModel.SelectionFlag.ClearAndSelect)):
+                  or is_clear_and_select):
                 self._anchor_offset  = target_offset
                 self._active_gesture = False
 
@@ -187,6 +191,7 @@ class LinearSelectionModel(QItemSelectionModel):
             right_col     = max(COL_BYTE_START, min(COL_BYTE_END, qrange.right()))
             target_col    = right_col if anchor_col == left_col else left_col
             target_offset = target_row * BYTES_PER_ROW + (target_col - COL_BYTE_START)
+
         else: # Fallback
             super().select(selection, flags)
             return

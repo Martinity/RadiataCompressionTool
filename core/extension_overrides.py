@@ -1,57 +1,57 @@
-'''File Extension naming overrides and currently also a losely stored database of game formats'''
+'''File Extension naming overrides'''
 
 HEADERS = {
-    # Core containers       | Purpose                             | In tool support
-    b'SLZ'    : '.slz',     # Compressed file                     | 100%
-    b'SLE'    : '.sle',     # Encrypted compressed file           | 100%
-    b'Kods'   : '.kods',    # Custom archive (4 bytes)            | 100%
-    b'1bcb'   : '.bcb',     # Packed entity data                  | 100%
-    b'VIB'    : '.vib',     # Vibration motor data                | 0%
-    (0x464C457F).to_bytes(4, 'little'): ".elf", # Executables     | ---
-    (0xD51556).to_bytes(3, 'little'): ".idx",   # TOC             | 100%
+    # Core containers
+    b'SLZ'    : '.slz',
+    b'SLE'    : '.sle',
+    b'Kods'   : '.kods',
+    b'1bcb'   : '.bcb',
+    b'VIB'    : '.vib',
+    (0x464C457F).to_bytes(4, 'little'): ".elf",
+    (0xD51556).to_bytes(3, 'little'): ".idx",   # TOC 
     # Audio
-    b'SEQW'   : '.seqw',    # Sound data (4 bytes)                | 0%
-    b'VAGp'   : '.VAG',     # PS2 Standard format                 | 0%
-    (0x000020).to_bytes(3, 'little'): ".020", # TAC audio         | viewer/export
+    b'SEQW'   : '.seqw',
+    b'VAGp'   : '.VAG',
+    (0x000020).to_bytes(3, 'little'): ".020",
     # Movie
-    (0x225277).to_bytes(3, 'little'): ".fmv", # movies            | 0%
+    (0x225277).to_bytes(3, 'little'): ".fmv",
     # Mesh
-    b'FPS'    : '.fps',     # 
-    b'FSS'    : '.fss',     # 
-    b'IDOM'   : '.idom',    #
-    b'LCTP'   : '.lctp',    #
+    b'FPS'    : '.fps',
+    b'FSS'    : '.fss',
+    b'IDOM'   : '.idom',
+    b'LCTP'   : '.lctp',
     # Event
-    b'EVD'    : '.evd',     # Event vm dispatcher data            | 0%
+    b'EVD'    : '.evd',
     # Animation
-    b'FAS'    : '.fas',     # 
-    b'HFAS'   : '.hfas',    #
-    b'RMAC'   : '.rmac',    #
-    b'RTA'    : '.rta',     #
-    b'PAF'    : '.paf',     #
+    b'FAS'    : '.fas',
+    b'HFAS'   : '.hfas',
+    b'RMAC'   : '.rmac',
+    b'RTA'    : '.rta',
+    b'PAF'    : '.paf',
     # Texture
-    b'FIS\00' : '.fis',     # Texture data
-    b'FISP'   : '.fisp',    #
-    b'FISA'   : ',fisa',    # 
-    b'TIM2'   : '.tim2',    # PS2 Standard format                 | 0%
+    b'FIS\00' : '.fis',
+    b'FISP'   : '.fisp',
+    b'FISA'   : ',fisa',
+    b'TIM2'   : '.tim2',
     # Scene
-    b'RBAD'   : '.rbad',    # Radiata Background Animation Data   | 0%
-    b'RLF'    : '.rlf',     # 
-    b'RMF'    : '.rmf',     #
-    b'NDNC'   : '.ndnc',    #
-    b'XBDC'   : '.xbdc',    #
-    b'PCDC'   : '.pcdc',    # 
-    b'DNAL'   : '.dnal',    #
-    b'TGIL'   : '.tgil',    # Container for map animation data
+    b'RBAD'   : '.rbad',
+    b'RLF'    : '.rlf',
+    b'RMF'    : '.rmf',
+    b'NDNC'   : '.ndnc',
+    b'XBDC'   : '.xbdc',
+    b'PCDC'   : '.pcdc',
+    b'DNAL'   : '.dnal',
+    b'TGIL'   : '.tgil',
     # Gameplay
-    b'0MPA'   : '.mpa',     # Sprite animation data
-    b'0DTH'   : '.dth',     #
-    b'0CPA'   : '.cpa',     #
-    b'0IPA'   : '.ipa',     #
-    b'0FDC'   : '.fdc',     #
+    b'0MPA'   : '.mpa',
+    b'0DTH'   : '.dth',
+    b'0CPA'   : '.cpa',
+    b'0IPA'   : '.ipa',
+    b'0FDC'   : '.fdc',
     # Unknown / Descriptor
-    b'RCP'    : '.rcp',     # Unknown Table of grouped IDs        | 0%
-    b'RCAD'   : '.rcad',    #
-    (0x89504E47).to_bytes(4, 'big'): ".png", # image
+    b'RCP'    : '.rcp',
+    b'RCAD'   : '.rcad',
+    (0x89504E47).to_bytes(4, 'big'): ".png",
 }
 
 def generate_ext_overrides() -> dict[bytes, str]:

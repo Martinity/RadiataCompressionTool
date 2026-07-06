@@ -44,10 +44,11 @@ class LightTheme:
 
 
 class ThemeManager:
-    current_font_size = 14
+    BASE_FONT_SIZE     = 14
+    current_font_size  = 14
     active_theme: type = DarkTheme
-    _raw_template = None
-    _app = None
+    _raw_template      = None
+    _app               = None
 
     THEMES = {
         # 'Radiata': RadiataTheme,
@@ -59,7 +60,7 @@ class ThemeManager:
     def initialize(cls, app):
         '''Called once at startup'''
         cls._app = app
-        cls.apply_theme('Dark', delta=0)
+        cls.apply_theme('Dark')
 
     @classmethod
     def apply_theme(cls, theme_name: str = 'Dark', delta: int = 0) -> None:
@@ -69,7 +70,7 @@ class ThemeManager:
         if theme_name in cls.THEMES:
             cls.active_theme = cls.THEMES[theme_name]
 
-        cls.current_font_size = max(8, min(32, cls.current_font_size + delta))
+        cls.current_font_size = max(8, min(32, cls.BASE_FONT_SIZE + delta))
         fs = cls.current_font_size
         theme = cls.active_theme
 

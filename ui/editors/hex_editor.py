@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox, QStackedLayout,
     QWidget, QMenu, QApplication, QLineEdit, QFrame
 )
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, pyqtSignal, QItemSelectionModel
+from PyQt6.QtCore import Qt, QModelIndex, pyqtSignal, QItemSelectionModel
 from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction, QUndoCommand, QUndoStack, QClipboard
 
 from core.contracts import BaseEditor
@@ -15,8 +15,8 @@ from core.handlers.generic_binary_leaf import GenericBinaryHandler
 from core.registry import Registry
 from core.node import VfsNode
 from ui.hex_model import (
-    HexTableView, BYTES_PER_ROW, TOTAL_COLUMNS, EDITABLE_COLUMNS, COL_OFFSET, 
-    COL_BYTE_START, COL_BYTE_END, COL_ASCII, HexGridModelBase
+    HexTableView, BYTES_PER_ROW, EDITABLE_COLUMNS, COL_OFFSET, 
+    COL_BYTE_START, COL_ASCII, HexGridModelBase
 )
 
 
@@ -85,21 +85,18 @@ class HexEditorWidget(BaseEditor):
         lay.setContentsMargins(10, 5, 10, 5)
 
         self.search_input = QLineEdit()
+        self.search_input.setObjectName('TextSubtitle')
         self.search_input.setPlaceholderText('Search bytes (e.g. 4A 2F)...')
-        self.search_input.setFixedWidth(250)
-        self.search_input.setFixedHeight(24)
         self.search_input.returnPressed.connect(self._search_next)
 
         self.search_status = QLabel('')
         self.search_status.setFixedWidth(100)
-        self.search_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         btn_prev = QPushButton('◀')
         btn_next = QPushButton('▶')
         btn_prev.clicked.connect(self._search_prev)
         btn_next.clicked.connect(self._search_next)
 
-        lay.addStretch()
         lay.addWidget(QLabel('Find:'))
         lay.addWidget(self.search_input)
         lay.addWidget(btn_prev)

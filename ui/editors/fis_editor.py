@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QFrame, QFileDialog, QListWidget, QListView, QAbstractItemView, QListWidgetItem, QColorDialog,
     QSlider, QButtonGroup
 )
-from PyQt6.QtGui import QPixmap, QImage, QColor, QIcon
+from PyQt6.QtGui import QPixmap, QImage, QColor, QIcon, QTransform
 
 from core.contracts import BaseEditor
 from core.registry import Registry
@@ -48,9 +48,9 @@ class HistoryManager(QObject):
         self.redo_stack.clear()
         self._emit_status()
 
-    def push_change(self, new_state: QImage) -> None:
+    def push_change(self, pre_change_state: QImage) -> None:
         if not self.debounce_timer.isActive():
-            self._baseline_state = new_state.copy()
+            self._baseline_state = pre_change_state.copy()
         self._pending_state = None
         self.debounce_timer.start()
 
@@ -85,7 +85,7 @@ class HistoryManager(QObject):
         return self._current_state.copy()
 
     def sync_current(self, img: QImage) -> None:
-        '''Keep state in sync when rotation is applied'''
+        '''Keep _current_state in sync after an external mutation'''
         self._current_state = img.copy()
 
     def _emit_status(self):
@@ -116,7 +116,7 @@ class InteractiveCanvas(QLabel):
         if not self.image_ref:
             return
         new_size = QSize(
-            int(self.image_ref.width() * self.zoom_factor),
+            int(self.image_ref.width()  * self.zoom_factor),
             int(self.image_ref.height() * self.zoom_factor)
         )
         pixmap = QPixmap.fromImage(self.image_ref).scaled(
@@ -149,7 +149,7 @@ class InteractiveCanvas(QLabel):
         y = int(pos.y() / self.zoom_factor)
         w, h = self.image_ref.width(), self.image_ref.height()
 
-        changed           = False
+        changed      = False
         start_offset = -(self.brush_size // 2) if self.brush_size != 1 else 0
         end_offset   = start_offset + self.brush_size if self.brush_size != 1 else 1
 
@@ -164,7 +164,7 @@ class InteractiveCanvas(QLabel):
             self.update_display()
             self.painted.emit()
 
-    def _flood_fill(self, pos: QPoint):
+    def _flood_fill(self, pos: QPoint) -> None:
         '''Flood fill enforced by palette index'''
         if not self.image_ref or self.selected_color_idx < 0:
             return
@@ -203,8 +203,8 @@ class FisEditorWidget(BaseEditor):
         self.raw_fis: bytes | None = None
 
         self.history = HistoryManager(debounce_ms=400, parent=self)
-        self.history.can_redo_changed.connect(lambda _: self._emit_undo_state())
         self.history.can_undo_changed.connect(lambda _: self._emit_undo_state())
+        self.history.can_redo_changed.connect(lambda _: self._emit_undo_state())
 
         self._zoom_factor: float = 1.0
         self._zoom_step:   float = 1.2
@@ -289,7 +289,7 @@ class FisEditorWidget(BaseEditor):
         ### TOOLS Sections
         lay.addWidget(QLabel('<b>Tools</b>'))
         tools_row = QHBoxLayout()
-        self.btn_brush = QPushButton('Brush')
+        self.btn_brush  = QPushButton('Brush')
         self.btn_bucket = QPushButton('Bucket')
         self.btn_brush.setCheckable(True)
         self.btn_bucket.setCheckable(True)
@@ -316,7 +316,7 @@ class FisEditorWidget(BaseEditor):
 
 
         ### CLUT Section
-        lay.addWidget(QLabel('<b>Palette</b>'))
+        lay.addWidget(QLabel('<b>Palette </b>*right click to edit'))
 
         self._palette_list = QListWidget()
         self._palette_list.setViewMode(QListView.ViewMode.IconMode)
@@ -350,6 +350,7 @@ class FisEditorWidget(BaseEditor):
                 f'Expected FisEditorPayload, got {type(result).__name__}. '
                 f'Ensure FisHandler.prepare_editor_data returns FisEditorPayload.'
             )
+            return
         self.img     = result.image.copy()
         self.info    = result.info
         self.raw_fis = result.raw_bytes
@@ -372,7 +373,7 @@ class FisEditorWidget(BaseEditor):
         self._btn_export.setEnabled(True)
         logger.debug(f'FIS: loaded {self.current_node.name} ({self.info.width}×{self.info.height} {self.info.psm_name})')
 
-    def _show_error(self, message: str) -> None:
+    def show_error(self, message: str) -> None:
         '''Show error in the canvas area'''
         self._image_label.setPixmap(QPixmap())
         self._image_label.setText(f'Error: {message}')

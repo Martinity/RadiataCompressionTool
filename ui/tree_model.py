@@ -53,7 +53,7 @@ class VfsTreeModel(QAbstractItemModel):
             return QModelIndex()
         
         child_node = parent_node.children[row]
-        return self.createIndex(row, column, child_node) if child_node else QModelIndex()
+        return self.createIndex(row, column, child_node) if child_node is not None else QModelIndex()
 
     def parent(self, index: QModelIndex) -> QModelIndex:
         """Finds the parent of a given index."""
