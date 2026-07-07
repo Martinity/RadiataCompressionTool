@@ -267,13 +267,13 @@ class Dispatcher(QObject):
         '''Asynchronously unpack the VFS until the target hid is reached'''
         if not self.vfs or not self.nav:
             return
-        
+
         def _drill_down() -> None:
             node = self.vfs.get_node_by_id(target_hid)
             if node:
                 on_succes(node)
                 return
-            
+
             ancestor = self.vfs.find_nearest_ancestor(target_hid)
             if not ancestor:
                 logger.error(f'Cannot resolve {target_hid}: No ancestor exists.')
@@ -297,7 +297,7 @@ class Dispatcher(QObject):
                     _drill_down()
                 else:
                     logger.error('Failed to drill down to target node...')
-            
+
             handle.log_message.connect(self.workspace_log.emit)
             handle.finished.connect(_on_layer_done)
         _drill_down()
@@ -381,7 +381,7 @@ class Dispatcher(QObject):
         task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
         task_handle.finished.connect(_on_expand_done)
 
-    def _on_iso_loaded(self, success: bool, result: object, task_handle: TaskHandle) -> None:
+    def _on_iso_loaded(self, success: bool, result: object) -> None:
         '''Takes the ISO's root+children nodes and intializes:
         VfsManager -> VfsNavigator -> metadata -> and signals'''
         from core.workers import LoadIsoResult
