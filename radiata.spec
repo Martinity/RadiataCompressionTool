@@ -23,15 +23,41 @@ datas = [
 # Prebuilt native libs (compressor + TAC) -> bundle at native/ (loaders look in _MEIPASS/native)
 binaries = [(p, 'native') for p in glob.glob('native_build/*')]
 
+EXCLUDED_LIBS = {
+    'libavcodec.so', 'libavformat.so', 'libavutil.so', 'libswresample.so', 'libswscale.so',  # FFmpeg
+    'Qt6Quick', 'Qt6Qml', 'Qt6Network' # Remove unused Qt framework bindings
+}
+
 a = Analysis(['main.py'], pathex=[], binaries=binaries, datas=datas,
              hiddenimports=hiddenimports, 
-             hookspath=[], runtime_hooks=[], excludes=[])
+             hookspath=[], runtime_hooks=[], excludes=['tkinter', 'matplotlib', 'numpy', 'unittest', 'PyQt6.QtQml'])
+a.binaries = [x for x in a.binaries if not any(bad in x[0] for bad in EXCLUDED_LIBS)]
              
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='RadiataModdingTool',
-          console=False, disable_windowed_traceback=False)
+
+icon_target = None
+if sys.platform == 'win32':
+    icon_path = os.path.join('ui', 'assets', 'app_icon.ico')
+    if os.path.exists(icon_path):
+        icon_target = icon_path
+elif sys.platform == 'darwin':
+    icon_path = os.path.join('ui', 'assets', 'app_icon.icns')
+    if os.path.exists(icon_path):
+        icon_target = icon_path
+
+exe = EXE(pyz, 
+          a.scripts, 
+          [], 
+          exclude_binaries=True, 
+          name='RadiataModdingTool',
+          icon=icon_target,
+          strip=True,
+          upx=True,
+          console=False, 
+          disable_windowed_traceback=False)
 coll = COLLECT(exe, a.binaries, a.datas, name='RadiataModdingTool')
 
 if sys.platform == 'darwin':
     app = BUNDLE(coll, name='RadiataModdingTool.app',
-                 bundle_identifier='com.radiata.moddingtool')
+                 bundle_identifier='com.radiata.moddingtool',
+                 icon=icon_target)

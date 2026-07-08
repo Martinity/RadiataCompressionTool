@@ -29,11 +29,15 @@ def setup_logging(level: int = logging.INFO) -> QtLogHandler:
     logger.setLevel(level)
     logger.propagate = False
 
-    console = logging.StreamHandler(
-        open(sys.stderr.fileno(), 'w', encoding='utf-8', errors='replace', closefd=False)
-    )
-    console.setFormatter(logging.Formatter('%(levelname)s: %(name)s - %(message)s'))
-    logger.addHandler(console)
+    if sys.stderr is not None and hasattr(sys.stderr, 'fileno'):
+        try:
+            console = logging.StreamHandler(
+                open(sys.stderr.fileno(), 'w', encoding='utf-8', errors='replace', closefd=False)
+            )
+            console.setFormatter(logging.Formatter('%(levelname)s: %(name)s - %(message)s'))
+            logger.addHandler(console)
+        except Exception:
+            pass
 
     qt_handler = QtLogHandler()
     qt_handler.setFormatter(logging.Formatter('%(message)s'))
