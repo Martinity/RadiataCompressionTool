@@ -36,13 +36,18 @@ jobs:
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: bash scripts/package-macos.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
+      - name: Install appimagetool (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo wget -O /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          sudo chmod +x /usr/local/bin/appimagetool
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
       - name: Package (Windows ZIP)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/RadiataModdingTool/* -DestinationPath "RadiataModdingTool-${env:GITHUB_REF_NAME}-windows-x64.zip"
+        run: Compress-Archive -Path dist/RadiataModdingTool -DestinationPath "RadiataModdingTool-${{ github.ref_name}}-windows-x64.zip"
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:

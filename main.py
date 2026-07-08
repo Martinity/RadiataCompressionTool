@@ -20,7 +20,7 @@ if __name__ == '__main__':
     ThemeManager.initialize(app)
     qt_log_handler = setup_logging()
     dispatcher = Dispatcher()
-    window = MainWindow(dispatcher)
+    window = MainWindow(dispatcher, is_test=self_test)
     qt_log_handler.log_signal.connect(window.workspace_page.log_console.append_log)
 
     if self_test:
@@ -28,6 +28,10 @@ if __name__ == '__main__':
         print('Self-test OK.')
         qt_log_handler.close()
         logger.removeHandler(qt_log_handler)
+        # Force cleanup C++ to prevent segfault
+        del window
+        del dispatcher
+        del app
         sys.exit(0)
 
     window.show()

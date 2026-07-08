@@ -79,7 +79,6 @@ class IsoHandler(PhysicalHandler):
             # Real node
             header: bytes = self.handle.read(32)
             ext: str = lookup_extension(header, self._check_pk(header))
-            category: tuple[str, ...] = self.FileCategories.get_category(disk_index)
             semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
 
             node = VfsNode(

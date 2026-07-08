@@ -68,7 +68,7 @@ class AppPage(IntEnum):
 ###---------------------------------------------- Main Window ----------------------------------------###
 
 class MainWindow(QMainWindow):
-    def __init__(self, dispatcher: Dispatcher) -> None:
+    def __init__(self, dispatcher: Dispatcher, is_test: bool = False) -> None:
         super().__init__(parent=None)
         self._main_thread_id = threading.get_ident()
         # Setup App
@@ -102,7 +102,8 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._restore_layout()
         # Start Thread Pool
-        self.dispatcher.task_coordinator.start_task(lambda **kwargs: None)
+        if not is_test:
+            self.dispatcher.task_coordinator.start_task(lambda **kwargs: None)
 
     def _setup_ui(self) -> None:
         self.setCentralWidget(self.stack)
