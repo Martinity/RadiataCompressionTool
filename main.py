@@ -11,28 +11,28 @@ logger = logging.getLogger('radiata')
 
 
 if __name__ == '__main__':
+    self_test = '--self-test' in sys.argv
 
     discover_all()
     Registry.summary()
 
     app = QApplication(sys.argv)
-    print('Application Started.')
-    # Initialize ThemeManager
     ThemeManager.initialize(app)
-    # Initialize logger
     qt_log_handler = setup_logging()
-    # Initialize logic
     dispatcher = Dispatcher()
-    # Initialize window
     window = MainWindow(dispatcher)
-
     qt_log_handler.log_signal.connect(window.workspace_page.log_console.append_log)
+
+    if self_test:
+        # CI smoke: construct everything, do not enter the interactive loop.
+        print('Self-test OK.')
+        qt_log_handler.close()
+        logger.removeHandler(qt_log_handler)
+        sys.exit(0)
 
     window.show()
     exit_code = app.exec()
-
     qt_log_handler.close()
     logger.removeHandler(qt_log_handler)
-
     print('Application Closed Successfully.')
     sys.exit(exit_code)

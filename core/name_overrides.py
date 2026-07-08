@@ -1,4 +1,5 @@
 """Semantic ISO file naming overrides."""
+from functools import lru_cache
 
 
 # System and Streamed files (0–206)
@@ -1507,8 +1508,9 @@ ENCOUNTER_LABELS = {
 }
 
 
+@lru_cache(maxsize=1)
 def generate_name_overrides() -> dict[int, str]:
-    """Build complete index→label map with category prefixes."""
+    """Build complete index→label map with category prefixes. Result is cached; callers must not mutate it."""
     overrides = {}
 
     for idx, name in SYSTEM_LABELS.items():

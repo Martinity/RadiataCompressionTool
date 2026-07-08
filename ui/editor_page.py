@@ -53,10 +53,15 @@ class EditorSession:
             return
         self._transition('saving')
         self.editor.snapshot()
-        self._dispatch_cb(
-            self.node, 
-            self.editor._pending_data,
-        )
+        try:
+            self._dispatch_cb(
+                self.node,
+                self.editor._pending_data,
+            )
+        except Exception:
+            logger.exception(f'EditorSession #{self.session_id}: dispatch raised; reverting to ready')
+            self._transition('ready')
+            raise
 
     def save_then(self, on_success: Callable | None, on_failure: Callable | None) -> None:
         '''Apply changes and fire callback on the next successful save'''
@@ -328,8 +333,11 @@ class EditorPage(QWidget):
                 if reply == QMessageBox.StandardButton.Cancel:
                     return
                 if reply == QMessageBox.StandardButton.Save:
+                    def _on_save_success():
+                        self._deconstruct_old_session()
+                        self.back_requested.emit()
                     session.save_then(
-                        on_success=self.back_requested.emit, 
+                        on_success=_on_save_success,
                         on_failure=lambda reason: QMessageBox.warning(self, 'Save Failed', reason)
                     )
                     return

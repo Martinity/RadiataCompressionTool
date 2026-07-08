@@ -108,6 +108,18 @@ class TaskCoordinator(QObject):
         super().__init__()
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(4)
+        # Retention map: keeps the Python TaskHandle wrapper alive until its
+        # terminal `finished` signal has been delivered, even when call sites
+        # discard the returned handle.  Keyed by id(handle) so the cleanup
+        # lambda captures only an int — no direct reference to the handle —
+        # which avoids a permanent retention cycle.
+        self._active_handles: dict[int, 'TaskHandle'] = {}
+
+    def _retain_handle(self, handle: 'TaskHandle') -> None:
+        '''Store *handle* and schedule its removal when finished fires.'''
+        handle_id = id(handle)
+        self._active_handles[handle_id] = handle
+        handle.finished.connect(lambda *_: self._active_handles.pop(handle_id, None))
 
     def start_task(self, function: Callable, *args, **kwargs) -> TaskHandle:
         '''Spin up thread. Link handle'''
@@ -116,10 +128,45 @@ class TaskCoordinator(QObject):
 
         kwargs['task_handle'] = handle
 
+        self._retain_handle(handle)
         worker = GenericTask(handle, function, *args, **kwargs)
         self.thread_pool.start(worker)
         return handle
-    
+
+    def start_dedicated_task(self, function: Callable, *args, **kwargs) -> TaskHandle:
+        '''Run *function* on a dedicated daemon thread, NOT on the bounded QThreadPool.
+
+        Use this for long-running coordinator tasks (e.g. ISO rebuild) that may
+        block waiting for QThreadPool tasks to finish.  Running such a task on the
+        pool itself risks exhausting all pool threads, causing a deadlock where the
+        blocked pool threads wait for expansion tasks that can never be scheduled.
+
+        The returned TaskHandle behaves identically to one from start_task — its
+        signals are emitted cross-thread and delivered to the main thread via Qt's
+        queued-connection mechanism.
+        '''
+        task_name = function.__name__
+        handle = TaskHandle(task_name)
+        kwargs['task_handle'] = handle
+
+        self._retain_handle(handle)
+
+        def _run() -> None:
+            handle.mark_running()
+            try:
+                result = function(*args, **kwargs)
+                handle.complete(result)
+            except InterruptedError as e:
+                logger.warning(f'Task aborted: {e}')
+                handle.fail('Cancelled by user')
+            except Exception as e:
+                logger.error('Background task failed', exc_info=True)
+                handle.fail(e)
+
+        thread = threading.Thread(target=_run, daemon=True, name=f'dedicated-{task_name}')
+        thread.start()
+        return handle
+
     def shutdown(self):
         logger.info('TaskCoordiantor: Canceling pending tasks...')
         self.thread_pool.clear()
@@ -223,9 +270,11 @@ class Actions:
         Returns EditorPayload(node, data) 
         '''
         task_handle.log_message.emit(f'Preparing editor data for "{node.name}"...')
+        task_handle.checkpoint()
         raw_bytes = node.pending_data or navigator.unwrap_chain(node)
         if not raw_bytes:
             raise ValueError(f'unwrap_chain returned empty bytes for "{node.name}"')
+        task_handle.checkpoint()
         header_bytes = navigator.resolve_data_from_hid(node.target)
         if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
             raise TypeError(
@@ -250,6 +299,7 @@ class Actions:
         converting it back to raw bytes on a background thread
         '''
         task_handle.log_message.emit(f'Decoding data for {node.name}')
+        task_handle.checkpoint()
         if not issubclass(handler_class, (ContainerHandler, LeafHandler)):
             raise TypeError(f'{handler_class.__name__} must be ContainerHandler or LeafHandler.')
         with handler_class(b'', node.parent) as handler:
@@ -356,6 +406,7 @@ class Actions:
         output_path:  Path,
         task_handle:       TaskHandle,
     ) -> ActionResult:
+        from core.navigator import ExpansionTimeoutError
         try:
             task_handle.log_message.emit('Starting ISO build sequence...')
             task_handle.progress.emit(0, 'Starting Pass 1...')
@@ -376,10 +427,15 @@ class Actions:
                 task_handle.log_message.emit('ISO Build Successful.')
                 return ActionResult(
                     action_name='Build ISO',
-                    node=root_node, 
+                    node=root_node,
                     status=ActionStatus.SUCCESS,
                 )
             raise ValueError('handler.rebuild_node returned false')
+        except ExpansionTimeoutError:
+            # Re-raise so the dedicated rebuild thread's exception handler calls
+            # handle.fail(), which emits finished(False, ...) and causes the UI
+            # to show a hard failure rather than silently proceeding with stale data.
+            raise
         except Exception as e:
             logger.error(f'Rebuild failed: {e}', exc_info=True)
             return ActionResult(

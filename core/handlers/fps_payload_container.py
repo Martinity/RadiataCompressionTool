@@ -7,7 +7,7 @@ from core.node import VfsNode
 
 from typing import Any
 
-from core.extension_overrides import generate_ext_overrides
+from core.extension_overrides import lookup_extension
 from core.registry import Registry
 
 import logging
@@ -40,8 +40,6 @@ class FpsPayloadHandler(ContainerHandler):
         root = VfsNode(name='dummy')
         if not self.data[0x10] != 6:
             return root
-        extensions = generate_ext_overrides()
-
         fis_offset = int.from_bytes(self.data[0x18:0x1B], 'little') + 0x40
         fis_payload = self.data[fis_offset:]
 
@@ -50,7 +48,7 @@ class FpsPayloadHandler(ContainerHandler):
             raw_header = bytes(fis_payload[pos:pos+16])
             if len(fis_payload[pos:]) < 0x30 or fis_payload[pos:pos+4] != b'FIS\00':
                 break
-            ext: str = next((match for sig, match in extensions.items() if raw_header.startswith(sig)), '.bin')
+            ext: str = lookup_extension(raw_header)
             size = self.parse_fis(bytes(fis_payload[pos:]))
             node = VfsNode(
                 name=f'FIS texture ({self.handler_parent.hierarchical_id_str}.*)',

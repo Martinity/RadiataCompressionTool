@@ -61,12 +61,16 @@ class VfsNode:
 
         self.expansion_pending: bool = False                 # Threading active bool
         self._expansion_event: threading.Event | None = None # Threading event for active thread
-    
+        self._expansion_task_active: bool = False            # True while a worker task is running (main-thread only)
+
+        self._row: int = 0                                   # Cached row index within parent
+
     def append_child(self, child: VfsNode):
         '''Allow children nodes'''
         self.children.append(child)
         child.parent = self
         child._id_path = self._id_path + (len(self.children) - 1,)
+        child._row = len(self.children) - 1
 
     @property
     def hierarchical_id(self) -> Tuple[int, ...]:
@@ -86,13 +90,14 @@ class VfsNode:
         '''Keep track of the children-parent links for tree view'''
         if self.parent is None:
             return 0
-        try:
-            return self.parent.children.index(self)
-        except (ValueError, AttributeError):
-            return 0    
+        return self._row
         
     def begin_expansion(self) -> threading.Event:
-        '''Mark expansion in progress. Return wait event'''
+        '''Mark expansion in progress. Return wait event.
+        If an expansion is already pending and an event exists, return the existing
+        event so that a second waiter blocks on the same event the running task will set.'''
+        if self.expansion_pending and self._expansion_event is not None:
+            return self._expansion_event
         self._expansion_event = threading.Event()
         self.expansion_pending = True
         return self._expansion_event
@@ -100,6 +105,7 @@ class VfsNode:
     def finish_expansion(self) -> None:
         '''Signal expansion complete'''
         self.expansion_pending = False
+        self._expansion_task_active = False
         if self._expansion_event:
             self._expansion_event.set()
         
@@ -160,6 +166,7 @@ class VfsManager(QObject):
             for i, child in enumerate(new_children): # Add the nodes to the file system / tree
                 child.parent = parent
                 child._id_path = parent._id_path + (base_idx + i,)
+                child._row = base_idx + i
                 child.is_hidden = True if parent.is_hidden or not child.size or child.offset == -1 else False
                 if self.enrich_node:
                     self.enrich_node(child)
@@ -291,6 +298,8 @@ class ModTracker(QObject):
 
     def clear(self) -> None:
         '''Clear state when closing an ISO'''
+        for node in self.modified_nodes | self.rebuild_queue | set(self._originals):
+            node.clear_pending()
         self.modified_nodes.clear()
         self.rebuild_queue.clear()
         self._originals.clear()

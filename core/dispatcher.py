@@ -4,6 +4,7 @@ Functions as a signal proxy
 '''
 from __future__ import annotations
 
+import functools
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -50,6 +51,7 @@ class Dispatcher(QObject):
 
     def __init__(self) -> None:
         super().__init__()
+        self._main_thread_id = threading.get_ident()
         self.vfs:                        VfsManager | None = None
         self.active_handler:            BaseHandler | None = None
         self.nav:                      VfsNavigator | None = None
@@ -168,9 +170,7 @@ class Dispatcher(QObject):
             self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit
         )
         task_handle.finished.connect(
-            lambda success, result: self._on_decode_done(
-                success, result, node, on_success, on_failure
-            )
+            functools.partial(self._on_decode_done, node, on_success, on_failure)
         )
         return task_handle
 
@@ -249,7 +249,11 @@ class Dispatcher(QObject):
         staged_nodes = list(self.tracker.rebuild_queue)
         self.rebuild_log.emit(f'Preparing to build {len(staged_nodes)} staged file(s)...')
 
-        task_handle = self.task_coordinator.start_task(
+        # Use start_dedicated_task (not start_task) so the rebuild runs on a
+        # dedicated thread outside the bounded QThreadPool.  The rebuild blocks
+        # waiting for expansion tasks that must themselves run on the pool; if
+        # the rebuild occupied a pool slot it could exhaust the pool and deadlock.
+        task_handle = self.task_coordinator.start_dedicated_task(
             Actions.rebuild_iso,
             self.active_handler,
             self.vfs.root,
@@ -267,40 +271,71 @@ class Dispatcher(QObject):
         '''Asynchronously unpack the VFS until the target hid is reached'''
         if not self.vfs or not self.nav:
             return
+        self._drill_down_to(target_hid, on_succes)
 
-        def _drill_down() -> None:
-            node = self.vfs.get_node_by_id(target_hid)
-            if node:
-                on_succes(node)
-                return
+    def _drill_down_to(self, target_hid: tuple[int, ...], on_succes: Callable[[VfsNode], None]) -> None:
+        '''Recursively expand the VFS until target_hid becomes reachable.
+        Called on the main thread; each async layer connects back via _on_layer_done.'''
+        if not self.vfs:
+            return
+        node = self.vfs.get_node_by_id(target_hid)
+        if node:
+            on_succes(node)
+            return
 
-            ancestor = self.vfs.find_nearest_ancestor(target_hid)
-            if not ancestor:
-                logger.error(f'Cannot resolve {target_hid}: No ancestor exists.')
-                return
-            profile = Registry.get_handler_profile(ancestor)
-            action_def = profile.primary_expand_action() if profile else None
-            if not action_def:
-                logger.error(f'Cannot expand {ancestor.name}: No TREE_EXPAND action registered')
-                return
-            ancestor.expansion_pending = True
-            logger.debug(f'Drilling down to {ancestor.name} ({ancestor.hierarchical_id_str})')
-            handle = self.task_coordinator.start_task(
-                Actions.dispatch,
-                action_def,
-                ancestor,
-                self.nav
-            )
-            def _on_layer_done(success: bool, result: Any) -> None:
-                self._on_action_complete(success, result)
-                if success:
-                    _drill_down()
-                else:
-                    logger.error('Failed to drill down to target node...')
+        ancestor = self.vfs.find_nearest_ancestor(target_hid)
+        if not ancestor:
+            logger.error(f'Cannot resolve {target_hid}: No ancestor exists.')
+            return
+        profile = Registry.get_handler_profile(ancestor)
+        action_def = profile.primary_expand_action() if profile else None
+        if not action_def:
+            logger.error(f'Cannot expand {ancestor.name}: No TREE_EXPAND action registered')
+            return
+        ancestor.expansion_pending = True
+        logger.debug(f'Drilling down to {ancestor.name} ({ancestor.hierarchical_id_str})')
+        handle = self.task_coordinator.start_task(
+            Actions.dispatch,
+            action_def,
+            ancestor,
+            self.nav,
+        )
+        handle.log_message.connect(self.workspace_log.emit)
+        handle.finished.connect(functools.partial(self._on_layer_done, target_hid, on_succes))
 
-            handle.log_message.connect(self.workspace_log.emit)
-            handle.finished.connect(_on_layer_done)
-        _drill_down()
+    def _on_layer_done(
+        self,
+        target_hid: tuple[int, ...],
+        on_succes: Callable[[VfsNode], None],
+        success: bool,
+        result: Any,
+    ) -> None:
+        '''Promoted slot for resolve_ghost_node layer completion.
+        Context params (target_hid, on_succes) bound by functools.partial;
+        signal params (success, result) appended by Qt.'''
+        if threading.get_ident() != self._main_thread_id:
+            logger.error("_on_layer_done ran off the main thread")
+        self._on_action_complete(success, result)
+        if success:
+            self._drill_down_to(target_hid, on_succes)
+        else:
+            logger.error('Failed to drill down to target node...')
+
+    def _on_expand_done(
+        self,
+        node: VfsNode,
+        wait_event: threading.Event,
+        success: bool,
+        result: Any,
+    ) -> None:
+        '''Promoted slot for _handle_expand_request expansion task.
+        Context params (node, wait_event) bound by functools.partial;
+        signal params (success, result) appended by Qt.'''
+        if threading.get_ident() != self._main_thread_id:
+            logger.error("_on_expand_done ran off the main thread")
+        self._on_action_complete(success, result)
+        node.finish_expansion()
+        wait_event.set()
 
     def close(self) -> None:
         '''For exiting the dispatch'''
@@ -328,7 +363,7 @@ class Dispatcher(QObject):
             path
         )
         task_handle.log_message.connect(self.workspace_log.emit)
-        task_handle.finished.connect(lambda ok, result: self._on_iso_loaded(ok, result))
+        task_handle.finished.connect(self._on_iso_loaded)
         return task_handle
 
     def _migrate_targets_if_needed(self) -> None:
@@ -356,21 +391,24 @@ class Dispatcher(QObject):
         if not node.expansion_pending or node.children:
             wait_event.set()
             return
-        
+
+        # Dedup: a task is already in-flight for this node (set below when we start one).
+        # The running task will call finish_expansion() which sets node._expansion_event
+        # (== wait_event after the begin_expansion fix), so the caller is unblocked without
+        # us starting a duplicate task.
+        if node._expansion_task_active:
+            return
+
         profile = Registry.get_handler_profile(node)
         action_def = profile.primary_expand_action() if profile else None
         if not action_def or not self.nav:
             logger.warning(f'Cannot expand node: {node.hierarchical_id_str}, missing expand actions or navigator.')
             wait_event.set()
             return
-        
-        node.expansion_pending = True
 
-        def _on_expand_done(success: bool, result: Any) -> None:
-            self._on_action_complete(success, result)
-            node.finish_expansion()
-            wait_event.set()
-        
+        node.expansion_pending = True
+        node._expansion_task_active = True  # Guard against duplicate tasks (cleared in finish_expansion)
+
         logger.debug('Starting expansion background task')
         task_handle = self.task_coordinator.start_task(
             Actions.dispatch,
@@ -379,11 +417,13 @@ class Dispatcher(QObject):
             self.nav,
         )
         task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
-        task_handle.finished.connect(_on_expand_done)
+        task_handle.finished.connect(functools.partial(self._on_expand_done, node, wait_event))
 
     def _on_iso_loaded(self, success: bool, result: object) -> None:
         '''Takes the ISO's root+children nodes and intializes:
         VfsManager -> VfsNavigator -> metadata -> and signals'''
+        if threading.get_ident() != self._main_thread_id:
+            logger.error("_on_iso_loaded ran off the main thread")
         from core.workers import LoadIsoResult
         if not isinstance(result, LoadIsoResult) or not success:
             msg = result.error if isinstance(result, LoadIsoResult) else str(result)
@@ -409,12 +449,14 @@ class Dispatcher(QObject):
         
     def _on_rebuild_finished(self, success: bool, result: Any) -> None:
         '''Verify type of result and pack signal'''
-        self._rebuild_active
+        self._rebuild_active = False
         if isinstance(result, ActionResult):
             msg = result.message or ('Rebuild succeeded.' if success else 'Rebuild failed.')
         else:
             msg = str(result)
         self.rebuild_complete.emit(success, msg)
+        if self.nav:
+            self.nav.clear_rollup_pending()
         if success:
             self.tracker.clear()
 
@@ -462,14 +504,18 @@ class Dispatcher(QObject):
         self.action_complete.emit(result)
 
     def _on_decode_done(
-        self, 
-        success: bool, 
-        result: Any, 
-        node: VfsNode, 
+        self,
+        node: VfsNode,
         on_success: Callable[[], None]    | None,
-        on_failure: Callable[[str], None] | None
+        on_failure: Callable[[str], None] | None,
+        success: bool,
+        result: Any,
     ) -> None:
-        '''Callback for when handler finishes decoding'''
+        '''Callback for when handler finishes decoding.
+        Context params (node, on_success, on_failure) are bound via functools.partial;
+        signal params (success, result) are appended by Qt when emitted.'''
+        if threading.get_ident() != self._main_thread_id:
+            logger.error("_on_decode_done ran off the main thread")
         if success and isinstance(result, bytes):
             original = self.get_node_data(node) if node not in self.tracker._originals else b''
             self.tracker.mark_modified(node, result, original)

@@ -209,3 +209,15 @@ __marimo__/
 
 # Generated TAC decoder build output
 core/tac/.tac_build/
+
+# Generated native SLZ/SLE compressor build output
+core/native/.compressor_build/
+
+# Build pipeline
+!radiata.spec
+native_build/
+core/_version.py
+*.dmg
+*.AppImage
+RadiataModdingTool-*.zip
+RadiataModdingTool-*.tar.gz

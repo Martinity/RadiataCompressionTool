@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from core.name_overrides import generate_name_overrides
-from core.extension_overrides import generate_ext_overrides
+from core.extension_overrides import lookup_extension
 from core.node import VfsNode
 from core.contracts import PhysicalHandler 
 from core.registry import Registry
@@ -60,7 +60,6 @@ class IsoHandler(PhysicalHandler):
         root = VfsNode(name='Radiata Stories ISO')
 
         semantic_names: dict[int, str] = generate_name_overrides()
-        extension_dict: dict[bytes, str] = generate_ext_overrides()
 
         for entry in self.toc:
             disk_index = entry['id']
@@ -79,7 +78,8 @@ class IsoHandler(PhysicalHandler):
 
             # Real node
             header: bytes = self.handle.read(32)
-            ext: str = next((match for sig, match in extension_dict.items() if header.startswith(sig)), self._check_pk(header))
+            ext: str = lookup_extension(header, self._check_pk(header))
+            category: tuple[str, ...] = self.FileCategories.get_category(disk_index)
             semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
 
             node = VfsNode(
@@ -180,7 +180,7 @@ class IsoHandler(PhysicalHandler):
                         new_lba_map[child] = toc_lba
                         continue
                     # NULL entries
-                    if child.size == 0 and not (child in staged_set and child.pending_data):
+                    if child.size == 0 and not (child in staged_set and child.pending_data is not None):
                         new_lba_map[child] = 0
                         continue
                     # Sentinel entries
@@ -188,8 +188,8 @@ class IsoHandler(PhysicalHandler):
                         new_lba_map[child] = orig_lba
                     # Entries with data
                     data = (
-                        child.pending_data 
-                        if child in staged_set and child.pending_data
+                        child.pending_data
+                        if child in staged_set and child.pending_data is not None
                         else self._read_node_from(src, child)
                     )
                     if not data:

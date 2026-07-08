@@ -1,0 +1,58 @@
+name: Release
+# MAINTAINER-GATED: triggers only on v* tags. Confirm versioning/branching before tagging.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,       label: macos-arm64,  arch: arm64 }
+          - { os: macos-13,       label: macos-x86_64, arch: x86_64 }
+          - { os: windows-latest, label: windows-x64,  arch: x64 }
+          - { os: ubuntu-22.04,   label: linux-x86_64, arch: x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Inject version from tag
+        shell: bash
+        run: echo "__version__ = \"${GITHUB_REF_NAME}\"" > core/_version.py
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build native libs
+        run: python scripts/build_native.py
+      - name: Build bundle
+        run: pyinstaller radiata.spec --noconfirm
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/package-macos.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
+      - name: Package (Windows ZIP)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/RadiataModdingTool/* -DestinationPath "RadiataModdingTool-${env:GITHUB_REF_NAME}-windows-x64.zip"
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.dmg
+            *.AppImage
+            *.tar.gz
+            *.zip
+          body: |
+            Unsigned builds. First-run:
+            - macOS: right-click the app → Open (or `xattr -d com.apple.quarantine` the .app).
+            - Windows: SmartScreen → More info → Run anyway.
+            - Linux: `chmod +x` the AppImage and run.

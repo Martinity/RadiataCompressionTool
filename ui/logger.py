@@ -8,6 +8,7 @@ from PyQt6.QtGui import QTextCursor, QColor
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
 import logging
+import sys
 
 class QtLogHandler(logging.Handler, QObject):
     '''Python logs routed to Qt signals'''
@@ -28,7 +29,9 @@ def setup_logging(level: int = logging.INFO) -> QtLogHandler:
     logger.setLevel(level)
     logger.propagate = False
 
-    console = logging.StreamHandler()
+    console = logging.StreamHandler(
+        open(sys.stderr.fileno(), 'w', encoding='utf-8', errors='replace', closefd=False)
+    )
     console.setFormatter(logging.Formatter('%(levelname)s: %(name)s - %(message)s'))
     logger.addHandler(console)
 

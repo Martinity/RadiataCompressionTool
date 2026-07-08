@@ -1,0 +1,46 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,       label: macos-arm64 }
+          - { os: macos-13,       label: macos-x86_64 }
+          - { os: windows-latest, label: windows-x64 }
+          - { os: ubuntu-22.04,   label: linux-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pytest pytest-qt
+      - name: Build native libs
+        run: python scripts/build_native.py
+      - name: Install Qt system libs (Linux offscreen)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libegl1 libxkbcommon0 libgl1
+      - name: Run tests (headless)
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: pytest -q
+      - name: Build bundle
+        run: pyinstaller radiata.spec --noconfirm
+      - name: Smoke (headless self-test)
+        env: { QT_QPA_PLATFORM: offscreen }
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./dist/RadiataModdingTool/RadiataModdingTool.exe --self-test
+          else
+            ./dist/RadiataModdingTool/RadiataModdingTool --self-test
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.label }}
+          path: dist/RadiataModdingTool
