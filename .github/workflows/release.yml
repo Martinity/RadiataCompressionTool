@@ -13,8 +13,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,       label: macos-arm64,  arch: arm64 }
-          - { os: macos-13,       label: macos-x86_64, arch: x86_64 }
+          # - { os: macos-14,       label: macos-arm64,  arch: arm64 }
+          # - { os: macos-13,       label: macos-x86_64, arch: x86_64 }
           - { os: windows-latest, label: windows-x64,  arch: x64 }
           - { os: ubuntu-22.04,   label: linux-x86_64, arch: x86_64 }
     steps:
@@ -43,11 +43,19 @@ jobs:
           sudo chmod +x /usr/local/bin/appimagetool
       - name: Package (Linux)
         if: runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
         run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
       - name: Package (Windows ZIP)
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path dist/RadiataModdingTool -DestinationPath "RadiataModdingTool-${{ github.ref_name}}-windows-x64.zip"
+      - name: Generate SHA-256 Checksums
+        shell: bash
+        run: |
+          echo "--- Generating Integrity Hashes ---"
+          sha256sum *.AppImage *.zip > SHA256SUMS
+          cat SHA256SUMS
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
@@ -56,7 +64,26 @@ jobs:
             *.AppImage
             *.tar.gz
             *.zip
+            SHA256SUMS
           body: |
+            ### Installation Instructions
+            
+            **Windows User Note:**
+            This build is unsigned. Windows SmartScreen will show a warning alert.
+            Click **More info** → **Run anyway** to launch the tool.
+            
+            **Linux User Note:**
+            Make the AppImage executable before launching:
+            ```bash
+            chmod +x RadiataModdingTool-*.AppImage
+            ./RadiataModdingTool-*.AppImage
+            ```
+            
+            ### Integrity Verification (Optional)
+            Verify your downloads match the compile-time binary fingerprints:
+            - **Linux:** `sha256sum -c SHA256SUMS`
+            - **Windows (PowerShell):** `Get-FileHash .\RadiataModdingTool-*.zip`
+            
             Unsigned builds. First-run:
             - macOS: right-click the app → Open (or `xattr -d com.apple.quarantine` the .app).
             - Windows: SmartScreen → More info → Run anyway.

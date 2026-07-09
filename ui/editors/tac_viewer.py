@@ -83,15 +83,11 @@ class TacAudioEditor(BaseViewer):
         lay.setContentsMargins(10, 5, 10, 5)
  
         self._btn_export  = QPushButton("Export WAV")
-        self._btn_rebuild = QPushButton("Rebuild Decoder")
         self._btn_export.setEnabled(False)
-        self._btn_rebuild.setEnabled(False)
         self._btn_export.clicked.connect(self._export_wav)
-        self._btn_rebuild.clicked.connect(lambda: self._redecode(force_rebuild=True))
  
         lay.addStretch()
         lay.addWidget(self._btn_export)
-        lay.addWidget(self._btn_rebuild)
         return bar
  
     def _build_info_panel(self) -> QFrame:
@@ -223,7 +219,6 @@ class TacAudioEditor(BaseViewer):
     
     def _set_controls_enabled(self, enabled: bool) -> None:
         self._btn_export.setEnabled(enabled)
-        self._btn_rebuild.setEnabled(enabled)
         self._btn_play_pause.setEnabled(enabled)
 
     def _populate_info(self, info: TacInfo) -> None:
@@ -236,26 +231,6 @@ class TacAudioEditor(BaseViewer):
         self._info_rows["Loop"].setText(loop)
         self._info_rows["Huffman offset"].setText(hex(info.huffman_offset))
         self._info_rows["Joint stereo"].setText(str(info.joint_stereo))
-
-    def _redecode(self, *, force_rebuild: bool = False) -> None:
-        '''Re-decode the raw TAC bytes (e.g. after rebuilding the native decoder).'''
-        if not self._raw:
-            return
-        try:
-            self._wav, info = decode_tac_to_wav(self._raw, force_rebuild=force_rebuild)
-            self._info      = info
-            self._load_pcm_from_wav(self._wav)
-            self._populate_info(info)
-            has_loop = info.loop_sample is not None
-            self._loop_checkbox.setEnabled(has_loop)
-            self._loop_checkbox.setVisible(has_loop)
-            self._seek_slider.setRange(0, self._duration_ms())
-            self._seek_slider.set_loop_position(self._loop_position_ms())
-            self._update_time_label(0, self._duration_ms())
-            self._set_controls_enabled(True)
-        except Exception as e:
-            QMessageBox.warning(self, "TAC decode failed", str(e))
-            logger.error(f"TAC redecode failed: {e}", exc_info=True)
 
     def _export_wav(self) -> None:
         node_name = self.current_node.name if self.current_node else "audio"

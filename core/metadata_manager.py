@@ -371,10 +371,10 @@ importing happens through iter_entries()
 class PhysicalFileCategories:
     _CATEGORIES = {
         range(8, 17):       ('FMV',),
-        range(3, 4):        ('Audio',),
-        range(42, 176):     ('TAC Audio',),
-        range(176, 181):    ('Audio',),
-        range(188, 189):    ('Audio',),
+        range(3, 4):        ('TAC', 'Audio',),
+        range(42, 176):     ('TAC', 'Audio',),
+        range(176, 181):    ('TAC', 'Audio',),
+        range(188, 189):    ('TAC', 'Audio',),
         range(184, 188):    ('Script',),
         range(204, 205):    ('Script',),
         range(206, 207):    ('Script',),

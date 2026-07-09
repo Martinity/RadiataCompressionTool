@@ -1,4 +1,4 @@
-import sys, os
+import sys
 from pathlib import Path
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
@@ -22,15 +22,16 @@ if __name__ == '__main__':
     self_test = '--self-test' in sys.argv
 
     discover_all()
-
     app = QApplication(sys.argv)
+
     base_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
-    icon_path = base_dir / 'ui' / 'assests' / 'app_icon.ico'
+    icon_path = base_dir / 'ui' / 'assets' / 'app_icon.ico'
     if icon_path.exists():
         app_icon = QIcon(str(icon_path))
         app.setWindowIcon(app_icon)
     else:
         print(f'DEBUG Runtime graphic asset missing at: {icon_path}')
+
     ThemeManager.initialize(app)
     qt_log_handler = setup_logging()
     dispatcher = Dispatcher()
