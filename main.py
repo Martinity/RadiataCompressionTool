@@ -1,7 +1,9 @@
-import sys
+import sys, os
+from pathlib import Path
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QIcon
 from core.dispatcher import Dispatcher
-from core.registry import discover_all, Registry
+from core.registry import discover_all
 from ui.theme_manager import ThemeManager
 from ui.ui_core import MainWindow
 
@@ -9,14 +11,26 @@ from ui.logger import setup_logging
 import logging
 logger = logging.getLogger('radiata')
 
+if sys.platform == 'win32':
+    import ctypes
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.radiata.moddingtool')
+    except Exception:
+        pass
 
 if __name__ == '__main__':
     self_test = '--self-test' in sys.argv
 
     discover_all()
-    Registry.summary()
 
     app = QApplication(sys.argv)
+    base_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
+    icon_path = base_dir / 'ui' / 'assests' / 'app_icon.ico'
+    if icon_path.exists():
+        app_icon = QIcon(str(icon_path))
+        app.setWindowIcon(app_icon)
+    else:
+        print(f'DEBUG Runtime graphic asset missing at: {icon_path}')
     ThemeManager.initialize(app)
     qt_log_handler = setup_logging()
     dispatcher = Dispatcher()
