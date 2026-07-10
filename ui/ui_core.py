@@ -244,6 +244,8 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, 'Task Error', msg)
 
+    ###------------------------------------- Lifecycle --------------------------------------###
+
     def closeEvent(self, a0: QCloseEvent | None) -> None:
         s = self.app_settings
         s.geometry = self.saveGeometry()
@@ -327,13 +329,13 @@ class WorkspaceController(QObject):
     '''Handles all signals and logic for the workspace'''
     def __init__(
             self, 
-            workspace:        WorkspaceWidget, 
-            editor_page:      EditorPage, 
-            dispatcher:       Dispatcher, 
+            workspace:      WorkspaceWidget, 
+            editor_page:    EditorPage, 
+            dispatcher:     Dispatcher, 
             metadata_store: NodeMetadataStore,
     ) -> None:
         super().__init__(parent=workspace)
-        self._main_thread_id = threading.get_ident()
+        self._main_thread_id  = threading.get_ident()
         self.view             = workspace
         self.editor_page      = editor_page
         self.dispatcher       = dispatcher
@@ -357,6 +359,21 @@ class WorkspaceController(QObject):
 
         self.view.metadata_panel.metadata_changed.connect(self._on_metadata_changed)
 
+        # Setup all event signals at startup to prevent duplications on soft resets
+        self.view.search_results_view.clicked.connect(self._on_search_result_clicked)
+        self.view.search_results_view.doubleClicked.connect(self._on_search_double_click)
+        self.view.search_results_view.customContextMenuRequested.connect(self.on_search_context_menu)
+
+        self.view.tree_view.customContextMenuRequested.connect(self.on_tree_context_menu)
+        self.view.tree_view.doubleClicked.connect(self.handle_tree_double_click)
+
+        self.view.metadata_panel.tagClicked.connect(self.on_tag_clicked)
+
+        # Install event filters at startup to prevent duplications on soft resets
+        self.view.installEventFilter(self)
+        self.view.tree_view.installEventFilter(self)
+        self.view.search_results_view.installEventFilter(self)
+
     def init_workspace(self, root_node: VfsNode) -> None:
         if not self.dispatcher.vfs:
             raise TypeError('No filesystem currenlty loaded - cant initialize workspace')
@@ -378,29 +395,13 @@ class WorkspaceController(QObject):
         ### Search / Filter
         self.search_model = FlatSearchModel(self.dispatcher.vfs, self.metadata_store)
         self.view.search_results_view.setModel(self.search_model)
-        self.view.search_results_view.clicked.connect(self._on_search_result_clicked)
-        self.view.search_results_view.doubleClicked.connect(self._on_search_double_click)
-        self.view.search_results_view.customContextMenuRequested.connect(self.on_search_context_menu)
 
         self.search_overlay = SearchOverlay(self.view.window())
-
-        self.view.installEventFilter(self)
-        self.view.tree_view.installEventFilter(self)
-        self.view.search_results_view.installEventFilter(self)
-        self.view.metadata_panel.tagClicked.connect(self.on_tag_clicked)
-
-        try:
-            self.view.tree_view.customContextMenuRequested.disconnect()
-        except TypeError:
-            pass
-
-        self.view.tree_view.customContextMenuRequested.connect(self.on_tree_context_menu)
 
         ### Tree Interactions
         tree_selection = self.view.tree_view.selectionModel()
         if tree_selection:
             tree_selection.currentChanged.connect(self.handle_tree_select)
-        self.view.tree_view.doubleClicked.connect(self.handle_tree_double_click)
 
         ### Tree headers
         header = self.view.tree_view.header()
@@ -601,7 +602,7 @@ class WorkspaceController(QObject):
             if qt_action is None:
                 continue
             qt_action.triggered.connect(lambda checked=False, d=action_def, n=node: self.route_action(n, d))
-        
+
         if self.view.sidebar_stack.currentIndex() == 1: # Add go to in tree view in search view
             search_action = menu.addAction('Go to in Tree View')
             if search_action is not None:
@@ -674,10 +675,8 @@ class WorkspaceController(QObject):
                     message=f'Successfully exported: {result.message if result.message else result.node.name}',
                     is_success=True
                 )
-                logger.info(f'Exported: {result.message}')
             case ActionType.IMPORT:
                 pass # Modification bar will change for user feedback
-            # tree is refreshed via signal
 
     def _on_expand_complete(self, result: ActionResult) -> None:
         if result.status != ActionStatus.SUCCESS or not self.tree_model or not self.proxy_model:
@@ -790,7 +789,7 @@ class WorkspaceController(QObject):
                 return True
 
             text = key_event.text()
-            if text and text.isprintable(): # Ensure Printable
+            if len(text) > 0 and text.isprintable(): # Ensure Printable
                 self.search_buffer += text
                 self.on_search_updated(self.search_buffer)
                 self.search_overlay.show_text(self.search_buffer)

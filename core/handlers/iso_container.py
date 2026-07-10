@@ -161,6 +161,7 @@ class IsoHandler(PhysicalHandler):
         try:
             with open(self.path, 'rb') as src, open(output_path, 'wb') as dst: # open private handle
                 task_handle.progress.emit(0, 'Initialized ISO rebuild...')
+                task_handle.log_message.emit('Initialized ISO rebuild...')
                 toc_lba = self.params.toc_offset // self.params.sector_size
                 toc_size = self.params.total_entries * 3 * 4
                 # Copy pre-TOC

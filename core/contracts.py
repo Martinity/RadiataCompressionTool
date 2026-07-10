@@ -61,12 +61,12 @@ class BaseHandler(abc.ABC):
         if self.owns_handle and self.handle and not self.handle.closed:
             try:
                 self.handle.close()
-                logger.debug('Closed handler resources successfully.')
             except Exception as e:
                 logger.error(f'Error while closing handler: {e}')
             finally:
                 self.owns_handle = False
                 self.handle = None
+                logger.debug('Closed handler resources successfully.')
 
     def execute_action(
         self, 

@@ -11,6 +11,7 @@ Contains all background task defining logic.
 from __future__ import annotations
 
 import threading
+import itertools
 from pathlib import Path
 from enum import auto, Enum
 from dataclasses import dataclass
@@ -92,15 +93,26 @@ class GenericTask(QRunnable):
     @pyqtSlot()
     def run(self) -> None:
         '''Execute the function, catch errors, and advance the state machine'''
+        current_thread = threading.current_thread()
+        logger.debug(
+            f'<Thread: {current_thread.name} (ID: {current_thread.ident})> '
+            f'Started execution of GenericTask for Task #{self.handle.task_id} ({self.handle.task_name})'
+        )
         self.handle.mark_running()
         try:
             result = self.fn(*self.args, **self.kwargs)
             self.handle.complete(result)
         except InterruptedError as e:
-            logger.warning(f'Task aborted: {e}')
+            logger.warning(
+                f'<Thread: {current_thread.name} Task #{self.handle.task_id}> '
+                f'({self.handle.task_name}) aborted: {e}'
+            )
             self.handle.fail('Cancelled by user')
         except Exception as e:
-            logger.error('Background task failed', exc_info=True)
+            logger.error(
+                f'<Thread: {current_thread.name} Background Task #{self.handle.task_id}> '
+                f'({self.handle.task_name}) failed', exc_info=True
+            )
             self.handle.fail(e)
 
 class TaskCoordinator(QObject):
@@ -126,6 +138,11 @@ class TaskCoordinator(QObject):
         task_name = function.__name__
         handle = TaskHandle(task_name)
 
+        logger.debug(
+            f'<TaskCoordinator: Queuing ThreadPool Task #{handle.task_id} '
+            f'({task_name}) | Total Active Handles: {len(self._active_handles) + 1}'
+        )
+
         kwargs['task_handle'] = handle
 
         self._retain_handle(handle)
@@ -149,11 +166,20 @@ class TaskCoordinator(QObject):
         handle = TaskHandle(task_name)
         kwargs['task_handle'] = handle
 
+        logger.info(
+            f'<TaskCoordinator: Allocation Dedicated Thread for Task #{handle.task_id} ({task_name})>'
+        )
         self._retain_handle(handle)
 
         def _run() -> None:
             # Handle tasks cancelled during spin-up
+            current_thread = threading.current_thread()
+            logger.debug(
+                f'<Thread: {current_thread.name} (ID: {current_thread.ident}) '
+                f'Spawned dedicated worker for Task #{handle.task_id} ({task_name})'
+            )
             if handle.is_cancelling():
+                logger.warning(f'<Thread: {current_thread.name} Task #{handle.task_id}> cancelled before starting')
                 handle.finished.emit(False, 'Task cancelled before starting.')
                 return
             # Run the task
@@ -163,10 +189,14 @@ class TaskCoordinator(QObject):
                 handle.complete(result)
             except InterruptedError as e:
                 # Route cancelling to cancelled
-                logger.warning(f'Task aborted: {e}')
+                logger.warning(
+                    f'<Thread: {current_thread.name} Task #{handle.task_id}> aborted at checkpoint: {e}'
+                )
                 handle.complete('Cancelled by user')
             except Exception as e:
-                logger.error('Background task failed', exc_info=True)
+                logger.error(
+                    f'<Thread: {current_thread.name} Task #{handle.task_id}> failed', exc_info=True
+                )
                 handle.fail(e)
 
         thread = threading.Thread(target=_run, daemon=True, name=f'dedicated-{task_name}')
@@ -174,13 +204,22 @@ class TaskCoordinator(QObject):
         return handle
 
     def shutdown(self):
-        logger.info('TaskCoordiantor: Canceling pending tasks...')
+        active_ids = [h.task_id for h in self._active_handles.values()]
+        logger.info(
+            'TaskCoordinator: Canceling pending tasks...'
+            f'Unfinished Active Task IDs still in memory: {active_ids}'
+        )
+        for handle_id, handle in list(self._active_handles.items()):
+            logger.debug(f'TaskCoordinator Force-Cancelling: Task #{handle.task_id}')
+            handle.cancel
         self.thread_pool.clear()
         if not self.thread_pool.waitForDone(2000):
             logger.warning('TaskCoordinator: Some threads did not finish in time.')
 
 class TaskHandle(QObject):
     '''State machine and handle for background tasks, thread-safe'''
+    _id_generator = itertools.count(1)
+
     state_changed = pyqtSignal(str)           # State name
     progress      = pyqtSignal(int, str)      # (percentage, message)
     finished      = pyqtSignal(bool, object)  # (success, payload)
@@ -197,6 +236,7 @@ class TaskHandle(QObject):
 
     def __init__(self, task_name: str):
         super().__init__()
+        self.task_id    = next(self._id_generator)
         self.task_name  = task_name
         self._state     = 'pending'
         self._lock      = threading.Lock()
@@ -208,26 +248,39 @@ class TaskHandle(QObject):
             return self._state
 
     def _transition(self, target: str) -> None:
+        current_thread = threading.current_thread()
         with self._lock:
             valid = self._VALID_TRANSITIONS.get(self._state, set())
             if target not in valid:
-                logger.warning(f'Task {self.task_name}: invalid transition {self._state}->{target}')
+                logger.warning(
+                    f'<Task #{self.task_id} ({self.task_name})> '
+                    f'Invalid transition attempted {self._state}->{target}'
+                )
                 return
             self._state = target
         self.state_changed.emit(target)
-        logger.debug(f'Task [{self.task_name}]: -> {target}')
+        logger.debug(
+            f'<Task #{self.task_id} ({self.task_name}) Thread: "{current_thread.name}"> -> {target}'
+        )
 
     ### from main thread
     def cancel(self) -> None:
         '''Cancel the current task from the main thread'''
+        current_thread = threading.current_thread()
         with self._lock:
             if self._state not in ('pending', 'running'):
+                logger.debug(
+                    f'<Task #{self.task_id}> Cancel skipped. Already in terminal state "{self._state}"'
+                )
                 return
             target = 'cancelled' if self._state == 'pending' else 'cancelling'
             self._cancel_token.set()
             self._state = target
         self.state_changed.emit(target)
-        logger.debug(f'Task [{self.task_name}]: -> {target}')
+        logger.debug(
+            f'<Task #{self.task_id} ({self.task_name})> '
+            f'CANCEL requested view Thread "{current_thread.name}" -> {target}'
+        )
 
     ### from background thread
     def is_cancelling(self) -> bool:
@@ -235,7 +288,10 @@ class TaskHandle(QObject):
 
     def checkpoint(self) -> None:
         if self.is_cancelling():
-            raise InterruptedError(f'Task [{self.task_name}] cancelled at checkpoint.')
+            logger.debug(f'<Task #{self.task_id} ({self.task_name}) caught cancel flag at a checkpoint.')
+            raise InterruptedError(
+                f'<Task #{self.task_id} ({self.task_name})> cancelled at checkpoint.'
+            )
 
     def mark_running(self) -> None:
         self._transition('running')
@@ -440,7 +496,7 @@ class Actions:
                     node=root_node,
                     status=ActionStatus.SUCCESS,
                 )
-            raise ValueError('handler.rebuild_node returned false')
+            raise ValueError('iso_container.rebuild_node returned false')
         except ExpansionTimeoutError:
             # Re-raise so the dedicated rebuild thread's exception handler calls
             # handle.fail(), which emits finished(False, ...) and causes the UI

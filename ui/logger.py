@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from PyQt6.QtWidgets import QPushButton, QPlainTextEdit
 from PyQt6.QtGui import QTextCursor, QColor
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 
 import logging
 import sys
@@ -98,6 +98,7 @@ class LoggingWindow(QPlainTextEdit):
 
         if at_bottom:
             self.moveCursor(QTextCursor.MoveOperation.End)
+            QTimer.singleShot(0, lambda: scrollbar.setValue(scrollbar.maximum()))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -96,11 +96,11 @@ class VfsNavigator:
             for parent, modified_children in parent_map.items(): # build the parents
                 if parent.pending_data and parent not in modified_children:
                     current_queue.add(parent)
-                    task_handle.log_message.emit(f'{parent.name} has pre-computed payload - skipping rebuild')
+                    task_handle.log_message.emit(f'{parent.hierarchical_id} has pre-computed payload - skipping rebuild')
                     continue
                 handler_class = Registry.get_handler(parent)
                 if not handler_class:
-                    task_handle.log_message.emit(f'No handler found for {parent.name}')
+                    task_handle.log_message.emit(f'No handler found for {parent.hierarchical_id}')
                     continue
                 if not issubclass(handler_class, ContainerHandler):
                     logger.error(f'Subcontract {handler_class.__name__} must be ContainerHandler for virtual tree navigation.')
@@ -145,15 +145,17 @@ class VfsNavigator:
     def precompute_datacenter(self, staged_nodes: list[VfsNode], task_handle: 'TaskHandle') -> list[VfsNode]:
         '''Cache payload/headers that are not located sequentially on disk'''
         nonseq_nodes: set[VfsNode] = set()
-        for node in staged_nodes:
+        staged_sorted = sorted(staged_nodes, key=lambda node: node.hierarchical_id)
+        task_handle.log_message.emit(f'{staged_sorted}')
+        for node in staged_sorted:
             current_node = node
-            while current_node and not current_node.is_physical:
-                task_handle.log_message.emit(f'Node {current_node.name} has target:{current_node.target}')
+            while current_node is not None:
+                task_handle.log_message.emit(f'{current_node.hierarchical_id} has target:{current_node.target}')
                 if current_node.target and current_node.parent:
                     task_handle.log_message.emit(f'Sending {node.hierarchical_id} to cached roll-up')
                     nonseq_nodes.add(node)
                     break
-                current_node = current_node.parent
+                current_node = current_node.parent if current_node.is_physical is False else None
 
         if not nonseq_nodes:
             task_handle.log_message.emit('No nonsequential files. Nothing to precompute.')

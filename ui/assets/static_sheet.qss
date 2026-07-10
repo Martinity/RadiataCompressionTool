@@ -189,7 +189,7 @@ QToolTip {
 }
 
 /* ====================== Custom Objects ====================== */
-/* ============== Buttons ============== */
+
 /* ============== Text ============== */
 #TextTitle {
     font-weight: bold;
@@ -227,6 +227,12 @@ QToolTip {
     color: {TEXT};
     font-weight: bold;
     font-size: 42px;
+}
+
+#Popup {
+    background-color: {BG_WINDOW};
+    color: {TEXT};
+    border-radius: 10px;
 }
 
 /* ============== Surfaces ============== */

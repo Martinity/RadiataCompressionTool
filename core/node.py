@@ -54,9 +54,6 @@ class VfsNode:
 
         # Flags; Useful for rebuild and UI
         self.is_physical   = False                          # Has physical address
-        self.is_compressed = False                          # SLZ
-        self.is_banked     = False
-        self.is_unpacked   = False                          # Static Kods
         self.is_hidden     = False                          # Hide node in UI (file system related or null nodes by default)
 
         self.expansion_pending: bool = False                 # Threading active bool

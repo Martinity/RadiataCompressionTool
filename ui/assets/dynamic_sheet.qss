@@ -8,7 +8,7 @@ QHeaderView::section, QPushButton, QLabel, QTextEdit, QLineEdit,
     font-size: {FONT_SIZE};
 }
 
-#BtnLarge {
+#BtnLarge, #Popup {
     padding: {BTN_PADDING_LARGE};
     font-size: {FONT_SIZE_LARGE};
 }

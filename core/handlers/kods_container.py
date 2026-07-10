@@ -80,7 +80,6 @@ class KodsHandler(ContainerHandler):
         return root
 
     def get_raw_node(self, node: VfsNode) -> bytes:
-        logger.debug(f'Read {node.size} bytes from offset {node.offset}')
         return self.payload_view[node.offset : node.offset + node.size].tobytes()
 
     ###------------------------------------- Rebuild ---------------------------------------------------###
@@ -134,11 +133,14 @@ class KodsHandler(ContainerHandler):
         else:
             new_header.write(self.payload_view[:self.header_obj.header_size])
         for offset in offsets: # Offsets
-            new_header.write(
-                offset.to_bytes(self.header_obj.stride, 'little')
-                if offset != -1
-                else self.header_obj.sentinel.to_bytes(self.header_obj.stride, 'little')
-            )
+            try:
+                new_header.write(
+                    offset.to_bytes(self.header_obj.stride, 'little')
+                    if offset != -1
+                    else self.header_obj.sentinel.to_bytes(self.header_obj.stride, 'little')
+                )
+            except Exception as e:
+                raise ValueError(f'Child container could not fit in the alloted size. {e}')
         if self.header_obj.has_second_table: # Secondary table
             second_table_start = self.header_obj.header_size + (self.header_obj.num_entries * self.header_obj.stride)
             if self.datacenter_header and not self.header_obj.is_internal:

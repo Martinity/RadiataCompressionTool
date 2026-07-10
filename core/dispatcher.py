@@ -52,9 +52,9 @@ class Dispatcher(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._main_thread_id = threading.get_ident()
-        self.vfs:                        VfsManager | None = None
-        self.active_handler:            BaseHandler | None = None
-        self.nav:                      VfsNavigator | None = None
+        self.vfs:                    VfsManager | None = None
+        self.active_handler:        BaseHandler | None = None
+        self.nav:                  VfsNavigator | None = None
         self._metadata_store: NodeMetadataStore | None = None
         self.tracker          = ModTracker()
         self.task_coordinator = TaskCoordinator()
@@ -103,7 +103,7 @@ class Dispatcher(QObject):
         if not action_def:
             logger.debug(f'{source.name} has no TREE_EXPAND action')
             return []
-        
+
         source.expansion_pending = True
         task_handle = self.task_coordinator.start_task(
             Actions.dispatch,

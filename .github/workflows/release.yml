@@ -90,5 +90,5 @@ jobs:
             
             ### Integrity Verification (Optional)
             Verify your downloads match the compile-time binary fingerprints:
-            - **Linux:** `sha256sum -c SHA256SUM-linux-x86_64` 
-            - **Windows (PowerShell):** `Get-FileHash .\RadiataModdingTool-*.zip` compare to `SHA256SUM-windows-x64`
+            - **Linux:** `sha256sum -c SHA256SUM-linux-x86_64.txt` 
+            - **Windows (PowerShell):** `Get-FileHash .\RadiataModdingTool-*.zip` compare to `SHA256SUM-windows-x64.txt`

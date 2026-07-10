@@ -81,7 +81,6 @@ class CompressorHandler(ContainerHandler):
                 bcb_size = header_obj.compressed_size + len(header)
                 aligned_size = (bcb_size + sector_size - 1) & ~(sector_size - 1)
                 current_offset += aligned_size
-                node.is_banked = True
             else:
                 current_offset += header_obj.next_file_offset if header_obj.next_file_offset > 0 else (header_obj.compressed_size + 16)
             
@@ -270,21 +269,11 @@ class RadiCompressor():
         self.is_encrypted = target_is_encrypted
         self.is_final_payload = is_final_payload
 
-        # Auto-detection.
-        # TODO in this section is for rebuilding. 
-        # Flags may need implementation depending on rebuild strategy
+        # Auto-detected.
         if self.data[:3] == b'SLZ' or self.data[:3] == b'SLE': # Decompress
             self.mode = self.MODES.get(self.data[3], self.MODES[0])
-            self.is_compressed = True
-            self.is_chained: bool = False #TODO
-            self.is_packed: bool = False #TODO
         else: # Compress
             self.mode = self.MODES.get(target_mode, self.MODES[1])
-            self.is_compressed = False
-            self.is_chained: bool = False #TODO
-            self.is_banked: bool = False #TODO
-            self.is_packed: bool = False #TODO
-            self.is_encrypted: bool = False #TODO
 
     ###------------------------- Compress ---------------------------###
 
@@ -600,7 +589,7 @@ class RadiCompressor():
 
         decompressed = decompressed[:expected_size]
         if len(decompressed) != expected_size and not get_header:
-            logger.warning(f"Size mismatch! Header uncompressed={hex(expected_size)}, "
+            logger.warning(f"Size mismatch not all compressed payloads support size changes! Header uncompressed={hex(expected_size)}, "
                 f"produced={hex(len(decompressed))}")
         return bytes(decompressed)
 
