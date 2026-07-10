@@ -18,12 +18,15 @@ from pathlib import Path
 from enum import IntEnum
 from typing import Any
 
-from PyQt6.QtCore import Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer, QEvent
+from PyQt6.QtCore import (
+    Qt, pyqtSignal, QModelIndex, QSettings, QObject, QTimer, QEvent, QPoint, QPropertyAnimation,
+    QEasingCurve
+)
 from PyQt6.QtWidgets import (
     QMainWindow, QStackedWidget, QMessageBox, QWidget, QMenu, QVBoxLayout, QSplitter, 
     QFileDialog, QApplication, QLabel, QPushButton, QTreeView, QListView, QSizePolicy,
-    QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QStatusBar,
-    QScrollArea, QFrame, QAbstractItemView, QLineEdit, QMenuBar
+    QHBoxLayout, QProgressBar, QTextEdit, QHeaderView, QDialog, QStatusBar, 
+    QScrollArea, QFrame, QAbstractItemView, QLineEdit, QMenuBar, QGraphicsDropShadowEffect
 )
 from PyQt6.QtGui import QAction, QCloseEvent, QKeyEvent, QMouseEvent, QStandardItem, QStandardItemModel, QColor
 from PyQt6 import sip
@@ -470,11 +473,21 @@ class WorkspaceController(QObject):
             self.view.metadata_panel.set_properties_text('-')
 
     def handle_tree_double_click(self, index: QModelIndex) -> None:
+        '''Route double click to primary expansion actions if applicable else to best editor'''
         if not self.proxy_model:
             return
         node: VfsNode | None = self.proxy_model.mapToSource(index).data(Qt.ItemDataRole.UserRole)
         if not node:
             return
+        # Primary expansion Branch
+        profiles = Registry.get_handler_profiles(node)
+        if profiles:
+            for profile in profiles:
+                for action_def in profile.actions:
+                    if action_def.name in ('Decompress', 'Unpack'):
+                        self.route_action(node, action_def)
+                        return
+        # Best editor branch
         editor_classes = Registry.get_editors(node)
         if editor_classes:
             self.launch_editor(node, editor_classes[0])
@@ -656,11 +669,15 @@ class WorkspaceController(QObject):
                     if editor_classes:
                         self.launch_editor(result.node, editor_classes[0])
             case ActionType.EXPORT:
-                QMessageBox.information(self.view, 'Export Action Result', result.message)
+                ToastNotification(
+                    parent=self.view,
+                    message=f'Successfully exported: {result.message if result.message else result.node.name}',
+                    is_success=True
+                )
                 logger.info(f'Exported: {result.message}')
             case ActionType.IMPORT:
-                QMessageBox.information(self.view, 'Import Action Result', result.message)
-                # tree is refreshed via signal
+                pass # Modification bar will change for user feedback
+            # tree is refreshed via signal
 
     def _on_expand_complete(self, result: ActionResult) -> None:
         if result.status != ActionStatus.SUCCESS or not self.tree_model or not self.proxy_model:
@@ -1377,6 +1394,70 @@ class SearchOverlay(QLabel):
         self.fade_timer.stop()
         self.idle_timer.stop()
         self.hide()
+
+###------------------------------------------- Toast Notification ------------------------------------###
+
+class ToastNotification(QLabel):
+    '''Bottom right pop-up'''
+    def __init__(self, parent, message: str, is_success: bool = True, duration_ms: int = 3000):
+        super().__init__(parent)
+        self.setText(message)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.setWindowFlags(Qt.WindowType.SubWindow | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setObjectName('Popup')
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(10)
+        shadow.setColor(Qt.GlobalColor.black)
+        shadow.setOffset(0, 3)
+        self.setGraphicsEffect(shadow)
+
+        self.adjustSize()
+        self.target_pos, self.hidden_pos = self._calculate_positions()
+        self.move(self.hidden_pos)
+        self.show()
+
+        self._slide_up(duration_ms)
+
+    def _calculate_positions(self) -> tuple[QPoint, QPoint]:
+        parent = self.parentWidget()
+        if not parent:
+            return QPoint(0, 0), QPoint(0, 0)
+
+        parent_rect = parent.rect()
+        margin_right = 25
+        margin_bottom = 50
+        x = parent_rect.width() - self.width() - margin_right
+        y = parent_rect.height() - self.height() - margin_bottom
+        target_pos = QPoint(x, y)
+        hidden_pos = QPoint(x, parent_rect.height())
+        return target_pos, hidden_pos
+
+    def _slide_up(self, display_duration: int) -> None:
+        '''Animates the toast upward with a smooth deceleration curve'''
+        self.anim = QPropertyAnimation(self, b'pos')
+        self.anim.setDuration(350)
+        self.anim.setStartValue(self.hidden_pos)
+        self.anim.setEndValue(self.target_pos)
+        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.start()
+
+        self.dismiss_timer = QTimer(self)
+        self.dismiss_timer.setSingleShot(True)
+        self.dismiss_timer.timeout.connect(self._slide_down)
+        self.dismiss_timer.start(display_duration)
+
+    def _slide_down(self) -> None:
+        '''Animates the toast downward and cleans up the object'''
+        self.anim = QPropertyAnimation(self, b'pos')
+        self.anim.setDuration(300)
+        self.anim.setStartValue(self.target_pos)
+        self.anim.setEndValue(self.hidden_pos)
+        self.anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        self.anim.finished.connect(self.close)
+        self.anim.start()
 
 ###------------------------------------------- File Legend ------------------------------------------###
 

@@ -1078,4 +1078,7 @@ class TextureBanks:
         (cls._RANGE10, cls._BANK10)
         disk_idx = cls._RANGE10
         for child_idx, data in cls._BANK10.items():
-            yield f'{disk_idx}.{child_idx}', {'title': data.get('title'), 'description': data.get('description')}
+            yield f'{disk_idx}.{child_idx}', {
+                'title': data.get('title'), 
+                'description': data.get('description'), 
+                'tags': ('Texture', 'FIS')}

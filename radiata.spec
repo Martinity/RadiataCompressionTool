@@ -1,4 +1,6 @@
-# radiata.spec — PyInstaller onedir bundle
+# radiata.spec — PyInstaller split build 
+# Windows onefile
+# Linux/MacOS onedir
 import glob, sys, os
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
@@ -49,37 +51,52 @@ elif sys.platform == 'darwin':
     if os.path.exists(icon_path):
         icon_target = icon_path
 
-exe = EXE(
-    pyz, 
-    a.scripts, 
-    [], 
-    exclude_binaries=True, 
-    name='RadiataModdingTool',
-    debug=False,
-    bootloader_ignore_signals=False,
-    icon=icon_target,
-    strip=True,
-    upx=True,
-    console=False, 
-    disable_windowed_traceback=False,
-    agrv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-)
-coll = COLLECT(
-    exe, 
-    a.binaries, 
-    a.datas, 
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='RadiataModdingTool'
-)
+exe_args = {
+    'name': 'RadiataModdingTool',
+    'debug': False,
+    'bootloader_ignore_signals': False,
+    'icon': icon_target,
+    'strip': True,
+    'upx': True,
+    'console': False,
+    'disable_windowed_traceback': False,
+    'agrv_emulation': False,
+    'target_arch': None,
+    'codesign_identity': None,
+}
 
-if sys.platform == 'darwin':
-    app = BUNDLE(
-        coll, 
-        name='RadiataModdingTool.app',
-        bundle_identifier='com.radiata.moddingtool',
-        icon=icon_target
+if sys.platform == 'win32':
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        exclude_binaries=False,
+        **exe_args
     )
+else:
+    exe = EXE(
+        pyz, 
+        a.scripts, 
+        [], 
+        exclude_binaries=True, 
+        **exe_args
+    )
+    coll = COLLECT(
+        exe, 
+        a.binaries, 
+        a.datas, 
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name='RadiataModdingTool'
+    )
+
+    if sys.platform == 'darwin':
+        app = BUNDLE(
+            coll, 
+            name='RadiataModdingTool.app',
+            bundle_identifier='com.radiata.moddingtool',
+            icon=icon_target
+        )

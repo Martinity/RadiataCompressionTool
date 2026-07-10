@@ -267,25 +267,31 @@ class Dispatcher(QObject):
 
         return task_handle
 
-    def resolve_ghost_node(self, target_hid: tuple[int, ...], on_succes: Callable[[VfsNode], None]) -> None:
+    def resolve_ghost_node(self, target_hid: tuple[int, ...], on_success: Callable[[VfsNode], None]) -> None:
         '''Asynchronously unpack the VFS until the target hid is reached'''
         if not self.vfs or not self.nav:
             return
-        self._drill_down_to(target_hid, on_succes)
+        self._drill_down_to(target_hid, on_success)
 
-    def _drill_down_to(self, target_hid: tuple[int, ...], on_succes: Callable[[VfsNode], None]) -> None:
+    def _drill_down_to(self, target_hid: tuple[int, ...], on_success: Callable[[VfsNode], None]) -> None:
         '''Recursively expand the VFS until target_hid becomes reachable.
         Called on the main thread; each async layer connects back via _on_layer_done.'''
         if not self.vfs:
             return
         node = self.vfs.get_node_by_id(target_hid)
         if node:
-            on_succes(node)
+            on_success(node)
             return
 
         ancestor = self.vfs.find_nearest_ancestor(target_hid)
         if not ancestor:
             logger.error(f'Cannot resolve {target_hid}: No ancestor exists.')
+            return
+        if not hasattr(self, '_pending_drills'):
+            self._pending_drills: dict[tuple[int, ...], list[tuple[tuple[int, ...], Callable]]] = {}
+        if getattr(ancestor, 'expansion_pending', False):
+            logger.debug(f'Expansion already running for {ancestor.name}. Queuing {target_hid}')
+            self._pending_drills[ancestor.hierarchical_id].append((target_hid, on_success))
             return
         profile = Registry.get_handler_profile(ancestor)
         action_def = profile.primary_expand_action() if profile else None
@@ -293,6 +299,7 @@ class Dispatcher(QObject):
             logger.error(f'Cannot expand {ancestor.name}: No TREE_EXPAND action registered')
             return
         ancestor.expansion_pending = True
+        self._pending_drills[ancestor.hierarchical_id] = [(target_hid, on_success)]
         logger.debug(f'Drilling down to {ancestor.name} ({ancestor.hierarchical_id_str})')
         handle = self.task_coordinator.start_task(
             Actions.dispatch,
@@ -301,23 +308,29 @@ class Dispatcher(QObject):
             self.nav,
         )
         handle.log_message.connect(self.workspace_log.emit)
-        handle.finished.connect(functools.partial(self._on_layer_done, target_hid, on_succes))
+        handle.finished.connect(functools.partial(self._on_layer_done, ancestor.hierarchical_id))
 
     def _on_layer_done(
         self,
-        target_hid: tuple[int, ...],
-        on_succes: Callable[[VfsNode], None],
+        ancestor_hid: tuple[int, ...],
         success: bool,
         result: Any,
     ) -> None:
         '''Promoted slot for resolve_ghost_node layer completion.
-        Context params (target_hid, on_succes) bound by functools.partial;
+        Context params (target_hid, on_success) bound by functools.partial;
         signal params (success, result) appended by Qt.'''
         if threading.get_ident() != self._main_thread_id:
             logger.error("_on_layer_done ran off the main thread")
         self._on_action_complete(success, result)
+        if not self.vfs:
+            return
+        ancestor = self.vfs.get_node_by_id(ancestor_hid)
+        if ancestor:
+            ancestor.expansion_pending = False
+        queued_expansions = self._pending_drills.pop(ancestor_hid, [])
         if success:
-            self._drill_down_to(target_hid, on_succes)
+            for target_hid, on_success in queued_expansions:
+                self._drill_down_to(target_hid, on_success)
         else:
             logger.error('Failed to drill down to target node...')
 

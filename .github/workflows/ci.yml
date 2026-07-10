@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            ./dist/RadiataModdingTool/RadiataModdingTool.exe --self-test
+            ./dist/RadiataModdingTool.exe --self-test
           else
             ./dist/RadiataModdingTool/RadiataModdingTool --self-test
           fi

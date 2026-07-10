@@ -152,13 +152,19 @@ class TaskCoordinator(QObject):
         self._retain_handle(handle)
 
         def _run() -> None:
+            # Handle tasks cancelled during spin-up
+            if handle.is_cancelling():
+                handle.finished.emit(False, 'Task cancelled before starting.')
+                return
+            # Run the task
             handle.mark_running()
             try:
                 result = function(*args, **kwargs)
                 handle.complete(result)
             except InterruptedError as e:
+                # Route cancelling to cancelled
                 logger.warning(f'Task aborted: {e}')
-                handle.fail('Cancelled by user')
+                handle.complete('Cancelled by user')
             except Exception as e:
                 logger.error('Background task failed', exc_info=True)
                 handle.fail(e)
@@ -243,8 +249,12 @@ class TaskHandle(QObject):
             self.finished.emit(True, result)
     
     def fail(self, error: Exception | str) -> None:
-        self._transition('failed')
-        self.finished.emit(False, str(error))
+        if self.is_cancelling():
+            self._transition('cancelled')
+            self.finished.emit(False, 'Task cancelled by user during failure')
+        else:
+            self._transition('failed')
+            self.finished.emit(False, str(error))
 
 ###---------------------------------------- Actions --------------------------------------###
 
@@ -316,7 +326,7 @@ class Actions:
         action_def: 'ActionDef',
         node:       'VfsNode',
         navigator:  'VfsNavigator',
-        task_handle:       TaskHandle,
+        task_handle: TaskHandle,
         **kwargs,
     ) -> ActionResult:
         '''
@@ -359,7 +369,7 @@ class Actions:
                     )
                 # Fallback - Raw Bytes
                 return Actions.export_node(
-                    node, file_path, navigator, task_handle
+                    node, file_path, navigator, task_handle, action_name=action_def.name
                 )
             case ActionType.IMPORT:
                 file_path = kwargs.get('file_path')
@@ -369,7 +379,7 @@ class Actions:
                         status=ActionStatus.FAILURE, message='No import path provided'
                     )
                 return Actions.import_node(
-                    node, file_path, task_handle
+                    node, file_path, task_handle, action_name=action_def.name
                 )
             case _:
                 return ActionResult(
@@ -462,6 +472,7 @@ class Actions:
         output_path:  Path, 
         navigator:   'VfsNavigator',
         task_handle:  TaskHandle,
+        action_name:  str = 'Export'
     ) -> ActionResult:
         try:
             task_handle.log_message.emit(f'Resolving data chain for {node.hierarchical_id_str}')
@@ -476,15 +487,15 @@ class Actions:
                     f.write(data[i : i + chunk_size])
 
             return ActionResult(
-                action_name='Export',
+                action_name=action_name,
                 node=node,
                 status=ActionStatus.SUCCESS,
-                message=f'Sucuessfully exported to {output_path.name}'
+                message=f'Successfully exported to {output_path.name}'
             )
         except Exception as e:
             logger.error(f'Export failed: {e}', exc_info=True)
             return ActionResult(
-                action_name='Export',
+                action_name=action_name,
                 node=node,
                 status=ActionStatus.FAILURE,
                 message=str(e)
@@ -494,14 +505,15 @@ class Actions:
     def import_node(
             node:       'VfsNode',
             import_path: Path,
-            task_handle:       TaskHandle
+            task_handle: TaskHandle,
+            action_name: str = 'Import'
     ) -> ActionResult:
         try:
             task_handle.log_message.emit(f'Importing {import_path.name}...')
             data = import_path.read_bytes()
             task_handle.log_message.emit(f'Loaded {len(data)} bytes from {import_path.name}')
             return ActionResult(
-                action_name='Import and Replace',
+                action_name=action_name,
                 node=node,
                 status=ActionStatus.SUCCESS,
                 payload=data
@@ -509,7 +521,7 @@ class Actions:
         except Exception as e:
             logger.error(f'Import failed: {e}', exc_info=True)
             return ActionResult(
-                action_name='Import and Replace',
+                action_name=action_name,
                 node=node,
                 status=ActionStatus.FAILURE, message=str(e)
             )

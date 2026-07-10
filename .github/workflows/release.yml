@@ -33,9 +33,9 @@ jobs:
         run: python scripts/build_native.py
       - name: Build bundle
         run: pyinstaller radiata.spec --noconfirm
-      - name: Package (macOS)
-        if: runner.os == 'macOS'
-        run: bash scripts/package-macos.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
+      # - name: Package (macOS)
+      #   if: runner.os == 'macOS'
+      #   run: bash scripts/package-macos.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
       - name: Install appimagetool (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -49,17 +49,17 @@ jobs:
       - name: Package (Windows ZIP)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/RadiataModdingTool -DestinationPath "RadiataModdingTool-${{ github.ref_name}}-windows-x64.zip"
+        run: Compress-Archive -Path dist/RadiataModdingTool.exe -DestinationPath "RadiataModdingTool-${{ github.ref_name}}-windows-x64.zip"
       - name: Generate SHA-256 Checksums
         shell: bash
         run: |
           echo "--- Generating Integrity Hashes ---"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            sha256sum *.zip > SHA256SUMS-windows-x64
-            cat SHA256SUMS-windows-x64
+            sha256sum *.zip > SHA256SUM-windows-x64
+            cat SHA256SUM-windows-x64
           else
-            sha256sum *.AppImage > SHA256SUMS-linux-x86_64
-            cat SHA256SUMS-linux-x86_64
+            sha256sum *.AppImage > SHA256SUM-linux-x86_64
+            cat SHA256SUM-linux-x86_64
           fi
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
@@ -69,7 +69,7 @@ jobs:
             *.AppImage
             *.tar.gz
             *.zip
-            SHA256SUMS-*
+            SHA256SUM-*
           body: |
             ### Installation Instructions
             
@@ -86,9 +86,9 @@ jobs:
             
             ### Integrity Verification (Optional)
             Verify your downloads match the compile-time binary fingerprints:
-            - **Linux:** `sha256sum -c SHA256SUMS-linux-x86_64` 
-            - **Windows (PowerShell):** `Get-FileHash .\RadiataModdingTool-*.zip` compare to `SHA256SUMS-windows-x64`
-
+            - **Linux:** `sha256sum -c SHA256SUM-linux-x86_64` 
+            - **Windows (PowerShell):** `Get-FileHash .\RadiataModdingTool-*.zip` compare to `SHA256SUM-windows-x64`
+            __________________________
             Unsigned builds. First-run:
             - macOS: right-click the app → Open (or `xattr -d com.apple.quarantine` the .app).
             - Windows: SmartScreen → More info → Run anyway.

@@ -262,7 +262,7 @@ class FlatSearchModel(QAbstractListModel):
 
         metadata_store.entry_registered.connect(self._on_entry_registered)
         metadata_store.entry_updated.connect(self._on_entry_updated)
-        self._pending_insert: tuple[VfsNode, int, int] | None = None
+        self._pending_inserts: list[tuple[VfsNode, int, int]] = []
         vfs.insert_start.connect(self._on_insert_start)
         vfs.insert_finished.connect(self._on_insert_finished)
 
@@ -352,7 +352,7 @@ class FlatSearchModel(QAbstractListModel):
                 key=lambda r: -r.score,
             )
         self.endResetModel()
-    
+
     ### Index Population
     def _build_from_store(self) -> None:
         '''Index every descriptor entry. Skips entries already in _hid_to_idx
@@ -369,7 +369,7 @@ class FlatSearchModel(QAbstractListModel):
         logger.debug(f'FlatSearchModel: _build_from_store added {added} entries (total {len(self._index)})')
 
     def _upgrade_from_vfs(self, node: VfsNode) -> None:
-        '''Match metadata entries to VFS entries to mark current instantiation'''
+        '''Match metadata entries to VFS entries to mark current instance'''
         for child in node.children:
             if child.is_hidden:
                 continue
@@ -378,13 +378,12 @@ class FlatSearchModel(QAbstractListModel):
                 self._upgrade_from_vfs(child)
 
     def _on_insert_start(self, parent: VfsNode, first: int, last: int) -> None:
-        self._pending_insert = (parent, first, last)
+        self._pending_inserts.append((parent, first, last))
 
     def _on_insert_finished(self) -> None:
-        if not self._pending_insert:
+        if not self._pending_inserts:
             return
-        parent, first, last = self._pending_insert
-        self._pending_insert = None
+        parent, first, last = self._pending_inserts.pop()
         self._on_vfs_nodes_inserted(parent, first, last)
 
     def _on_vfs_nodes_inserted(self, parent: VfsNode, first: int, last: int) -> None:
