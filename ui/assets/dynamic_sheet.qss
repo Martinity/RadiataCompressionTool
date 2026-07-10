@@ -1,0 +1,31 @@
+/* Only font-related rules
+When the zoom level changes it will reload only this. 
+*/
+
+QMainWindow, QWidget, QTreeView, QListView, QTableView, QListWidget,
+QHeaderView::section, QPushButton, QLabel, QTextEdit, QLineEdit, 
+#TextMono, #BtnSurface, #BtnDanger, #BtnImportant {
+    font-size: {FONT_SIZE};
+}
+
+#BtnLarge, #Popup {
+    padding: {BTN_PADDING_LARGE};
+    font-size: {FONT_SIZE_LARGE};
+}
+
+#TextTitle {
+    font-size: {FONT_SIZE_LARGE};
+}
+
+#TextSubtitle {
+    font-size: {FONT_SIZE_SMALL};
+}
+
+QPushButton, #BtnImportant, #BtnSurface, #BtnDanger {
+    padding: {BTN_PADDING};
+    min-width: {BTN_MIN_WIDTH};
+}
+
+#TextOverlay {
+    font-size: 42px;
+}

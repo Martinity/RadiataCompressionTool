@@ -1,0 +1,246 @@
+/* ====================== Base ====================== */
+QMainWindow, QWidget {
+    background-color: {BG_WINDOW};
+    color: {TEXT};
+    font-family: {FONT_SANS};
+    font-weight: {BASE_FONT_WEIGHT};
+    border: none;
+}  
+
+QTreeView, QListView, QTableView, QListWidget, QTreeWidget {
+    background-color: {BG_SURFACE};
+    border: 1px solid {BORDER};
+    selection-background-color: {ACCENT};
+    gridline-color: {BORDER};
+}
+QTreeView::item:hover, QListView::item:hover,
+QTableView::item:hover, QListWidget::item:hover {
+    background-color: {BG_HOVER};
+}
+QTreeView:focus, QListView:focus, QTableView:focus {
+    outline: none;
+}
+QTreeView::item:selected:hover, QListView::item:selected:hover,
+QTableView::item:selected:hover, QListWidget::item:selected:hover {
+    background-color: {ACCENT_HOVER};
+}
+
+QFrame#HLine {
+    border: none;
+    background-color: {BORDER};
+    min-height: 1px;
+    max-height: 1px;
+}
+
+QFrame#VLine {
+    border: none;
+    background-color: {BORDER};
+    min-width: 1px;
+    max-width: 1px;
+}
+
+/* Headers */
+QHeaderView::section {
+    background-color: {BG_SURFACE};
+    color: {TEXT};
+    font-weight: bold;
+    padding: 4px;
+    border: none;
+}
+QHeaderView::section:hover {
+    background-color: {BG_HOVER};
+}
+
+/* Scrollbars */
+QScrollBar:vertical {
+    background: {BG_SURFACE};
+    width: 12px;
+    margin: 0px;
+}
+QScrollBar::handle:vertical {
+    background: {INTERACTIVE};
+    min-height: 20px;
+    border-radius: 5px;
+}
+QScrollBar:horizontal {
+    background: {BG_SURFACE};
+    height: 12px;
+    margin: 0px;
+}
+QScrollBar::handle:horizontal {
+    background: {INTERACTIVE};
+    min-width: 20px;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background: {SCROLL_HOVER};
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    height: 0px;
+    width: 0px;
+    background: none;
+    border: none;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+QScrollBar::add-page:horizontal, QScrollBar::add-page:horizontal {
+    background: none;
+}
+
+/* Buttons */
+QPushButton, #BtnSurface {
+    background-color: {INTERACTIVE};
+    color: {TEXT};
+    border: none;
+    border-radius: 4px;
+}
+QPushButton:hover, #BtnSurface:hover {
+    background-color: {INTERACTIVE_HOVER};
+}
+QPushButton:pressed, #BtnSurface:pressed {
+    background-color: {ACCENT};
+}
+QPushButton:disabled, #BtnSurface:disabled {
+    color: {TEXT_MUTED};
+}
+
+#BtnLarge {
+    border-radius: 8px;
+}
+#BtnLarge:hover {
+    background-color: {ACCENT_HOVER};
+}
+
+#BtnImportant {
+    background-color: {ACCENT};
+    font-weight: bold;
+}
+#BtnImportant:hover {
+    background-color: {ACCENT_HOVER};
+}
+#BtnImportant:disabled {
+    background-color: {INTERACTIVE};
+    color: {TEXT_MUTED};
+}
+
+QMenuBar {
+    background-color: {BORDER};
+    color: {TEXT};
+}
+QMenuBar::item:selected {
+    background-color: {BORDER};
+}
+
+QMenu {
+    background-color {BG_SURFACE};
+    border: 1px solid {BORDER};
+}
+QMenu::item:selected {
+    background-color: {ACCENT};
+}
+QMenu:enabled {
+    color: {TEXT};
+}
+QMenu:disabled {
+    color: {TEXT_MUTED};
+}
+
+/* Inputs */
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background-color: {BG_SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    padding: 4px;
+}
+
+QSplitter::handle {
+    background-color: {BORDER};
+}
+
+/* Progress Bar */
+QProgressBar {
+    border: 1px solid {BORDER};
+    background-color: {BG_SURFACE};
+    text-align: center;
+    border-radius: 4px;
+    color: {TEXT};
+}
+QProgressBar::chunk {
+    background-color: {ACCENT};
+    border-radius: 3px;
+}
+
+QLabel {
+    color: {TEXT};
+}
+
+QComboBox {
+    background-color: {BG_SURFACE};
+    border: 1px solid {BORDER};
+    padding: 4px;
+}
+QComboBox::drop-down {
+    border: none;
+}
+
+QToolTip {
+    background-color: {BG_WINDOW};
+    color: {TEXT_MUTED};
+}
+
+/* ====================== Custom Objects ====================== */
+
+/* ============== Text ============== */
+#TextTitle {
+    font-weight: bold;
+}
+
+#TextHeader {
+    font-weight: bold;
+}
+
+#TextSubtitle {
+    color: {TEXT_MUTED};
+    margin-bottom: 4px;
+}
+
+#TextMono {
+    background-color: {BG_SURFACE};
+    font-family: {FONT_MONO};
+}
+#TextMono::item:hover {
+    background-color: {BG_HOVER};
+}
+#TextMono::item:selected {
+    background-color: {ACCENT};
+}
+#TextMono::item:selected:hover {
+    background-color: {ACCENT_HOVER};
+}
+
+#TextMuted {
+    color: {TEXT_MUTED};
+}
+
+#TextOverlay {
+    background-color: rgba(0, 0, 0, 0);
+    color: {TEXT};
+    font-weight: bold;
+    font-size: 42px;
+}
+
+#Popup {
+    background-color: {BG_WINDOW};
+    color: {TEXT};
+    border-radius: 10px;
+}
+
+/* ============== Surfaces ============== */
+#SurfaceToolbar {
+    background-color: {BG_WINDOW};
+    border-bottom: 1px solid {BORDER};
+}
+
+#SurfacePanel {
+    background-color: {BG_SURFACE};
+}
