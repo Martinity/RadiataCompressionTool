@@ -240,7 +240,7 @@ class NodeMetadataStore(QObject):
                 json.dumps(sorted_ss, indent=2, ensure_ascii=False),
                 encoding='utf-8'
             )
-            logger.info(f'Metadata updated - {len(snapshot)} total entries -> {self._path.name}')
+            logger.debug(f'Metadata updated - {len(snapshot)} total entries -> {self._path.name}')
         except Exception as e:
             logger. error(f'Failed to save metadata: {e}', exc_info=True)
             with self._lock:

@@ -56,7 +56,7 @@ exe_kargs = {
     'icon': icon_target,
     'strip': False,
     'upx': False,
-    'console': True,
+    'console': False,
     'disable_windowed_traceback': False,
 }
 
