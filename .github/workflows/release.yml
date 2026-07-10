@@ -20,7 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
+        with: 
+          python-version: '3.12'
       - name: Inject version from tag
         shell: bash
         run: echo "__version__ = \"${GITHUB_REF_NAME#v}\"" > core/_version.py
@@ -45,7 +46,8 @@ jobs:
           sudo chmod +x /usr/local/bin/appimagetool
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        env: { APPIMAGE_EXTRACT_AND_RUN: 1 }
+        env: 
+          APPIMAGE_EXTRACT_AND_RUN: 1
         run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
 
       - name: Package (Windows)
