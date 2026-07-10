@@ -116,7 +116,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.rebuild_page)
         self.stack.addWidget(self.editor_page)
 
-        self.setWindowTitle(f'Radiata Modding Tool 2.0 Alpha {__version__}')
+        self.setWindowTitle(f'Radiata Modding Tool {__version__}')
         self.resize(1400, 900)
 
     @property
