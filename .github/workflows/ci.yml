@@ -41,6 +41,8 @@ jobs:
       - name: Smoke (headless self-test) (Linux)
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: ./dist/RadiataModdingTool/RadiataModdingTool --self-test
 
       - uses: actions/upload-artifact@v4
