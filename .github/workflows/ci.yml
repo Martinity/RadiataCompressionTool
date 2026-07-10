@@ -25,7 +25,7 @@ jobs:
         run: python scripts/build_native.py
       - name: Install Qt system libs (Linux offscreen)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libegl1 libxkbcommon0 libgl1
+        run: sudo apt-get install -y libegl1 libxkbcommon0 libgl1 libxcb-cursor0
       - name: Run tests (headless)
         env: { QT_QPA_PLATFORM: offscreen }
         run: pytest -q
@@ -40,7 +40,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: ./dist/RadiataModdingTool/RadiataModdingTool --self-test
-        
+
       - uses: actions/upload-artifact@v4
         with:
           name: bundle-${{ matrix.label }}
