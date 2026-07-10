@@ -1,6 +1,4 @@
-# radiata.spec — PyInstaller split build 
-# Windows onefile
-# Linux/MacOS onedir
+# radiata.spec - Windows: onefile | Linux: onedir (for AppImage) - MacOS not yet implemented
 import glob, sys, os
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
@@ -18,7 +16,7 @@ datas = [
     ('ui/assets/static_sheet.qss', 'ui/assets'),
     ('ui/assets/dynamic_sheet.qss', 'ui/assets'),
     ('ui/assets/radi_metadata.json', 'ui/assets'),
-    ('ui/assets/app_icon.png', 'ui/assets/'),
+    ('ui/assets/app_icon.png', 'ui/assets'),
 ]
 datas.extend(collect_data_files('core'))
 datas.extend(collect_data_files('ui'))
@@ -51,7 +49,7 @@ elif sys.platform == 'darwin':
     if os.path.exists(icon_path):
         icon_target = icon_path
 
-exe_args = {
+exe_kargs = {
     'name': 'RadiataModdingTool',
     'debug': False,
     'bootloader_ignore_signals': False,
@@ -60,28 +58,25 @@ exe_args = {
     'upx': True,
     'console': False,
     'disable_windowed_traceback': False,
-    'agrv_emulation': False,
-    'target_arch': None,
-    'codesign_identity': None,
 }
 
-if sys.platform == 'win32':
+if sys.platform == 'win32': # Windows: Onefile 
     exe = EXE(
         pyz,
         a.scripts,
         a.binaries,
         a.zipfiles,
         a.datas,
-        exclude_binaries=False,
-        **exe_args
+        **exe_kargs,
+        onefile=True
     )
-else:
+else: # Linux & todo MacOS: Onedir
     exe = EXE(
         pyz, 
         a.scripts, 
         [], 
         exclude_binaries=True, 
-        **exe_args
+        **exe_kargs
     )
     coll = COLLECT(
         exe, 

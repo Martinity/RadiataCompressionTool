@@ -23,7 +23,7 @@ jobs:
         with: { python-version: '3.12' }
       - name: Inject version from tag
         shell: bash
-        run: echo "__version__ = \"${GITHUB_REF_NAME}\"" > core/_version.py
+        run: echo "__version__ = \"${GITHUB_REF_NAME#v}\"" > core/_version.py
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
@@ -33,9 +33,11 @@ jobs:
         run: python scripts/build_native.py
       - name: Build bundle
         run: pyinstaller radiata.spec --noconfirm
+
       # - name: Package (macOS)
       #   if: runner.os == 'macOS'
       #   run: bash scripts/package-macos.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
+
       - name: Install appimagetool (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -43,35 +45,35 @@ jobs:
           sudo chmod +x /usr/local/bin/appimagetool
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: 1
+        env: { APPIMAGE_EXTRACT_AND_RUN: 1 }
         run: bash scripts/package-linux.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
-      - name: Package (Windows ZIP)
+
+      - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/RadiataModdingTool.exe -DestinationPath "RadiataModdingTool-${{ github.ref_name}}-windows-x64.zip"
-      - name: Generate SHA-256 Checksums
-        shell: bash
+        run: Compress-Archive -Path dist/RadiataModdingTool.exe -DestinationPath "RadiataModdingTool-${{ github.ref_name }}-windows-x64.zip"
+
+      - name: Generate SHA-256 Checksums (Windows)
+        if: runner.os  == 'Windows'
+        shell: pwsh
         run: |
-          echo "--- Generating Integrity Hashes ---"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            sha256sum *.zip > SHA256SUM-windows-x64
-            cat SHA256SUM-windows-x64
-          else
-            sha256sum *.AppImage > SHA256SUM-linux-x86_64
-            cat SHA256SUM-linux-x86_64
-          fi
+          Get-ChildItem *.zip | ForEach-Object { 
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            "$hash  $($_.Name)" | Out-File -FilePath SHA256SUM-windows-x64.txt -Append
+          }
+      - name: Generate SHA-256 Checksums (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sha256sum *.AppImage > SHA256SUM-linux-x86_64.txt
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            *.dmg
             *.AppImage
-            *.tar.gz
             *.zip
             SHA256SUM-*
           body: |
-            ### Installation Instructions
+            ### Installation Instructions - ${{ github.ref_name }}
             
             **Windows User Note:**
             This build is unsigned. Windows SmartScreen will show a warning alert.
@@ -88,8 +90,3 @@ jobs:
             Verify your downloads match the compile-time binary fingerprints:
             - **Linux:** `sha256sum -c SHA256SUM-linux-x86_64` 
             - **Windows (PowerShell):** `Get-FileHash .\RadiataModdingTool-*.zip` compare to `SHA256SUM-windows-x64`
-            __________________________
-            Unsigned builds. First-run:
-            - macOS: right-click the app → Open (or `xattr -d com.apple.quarantine` the .app).
-            - Windows: SmartScreen → More info → Run anyway.
-            - Linux: `chmod +x` the AppImage and run.

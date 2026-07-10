@@ -31,15 +31,16 @@ jobs:
         run: pytest -q
       - name: Build bundle
         run: pyinstaller radiata.spec --noconfirm
-      - name: Smoke (headless self-test)
-        env: { QT_QPA_PLATFORM: offscreen }
+
+      - name: Smoke (headless self-test) (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./dist/RadiataModdingTool.exe --self-test
+      - name: Smoke (headless self-test) (Linux)
+        if: runner.os == 'Linux'
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            ./dist/RadiataModdingTool.exe --self-test
-          else
-            ./dist/RadiataModdingTool/RadiataModdingTool --self-test
-          fi
+        run: ./dist/RadiataModdingTool/RadiataModdingTool --self-test
+        
       - uses: actions/upload-artifact@v4
         with:
           name: bundle-${{ matrix.label }}
