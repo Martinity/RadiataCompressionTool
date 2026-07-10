@@ -54,9 +54,9 @@ exe_kargs = {
     'debug': False,
     'bootloader_ignore_signals': False,
     'icon': icon_target,
-    'strip': True,
-    'upx': True,
-    'console': False,
+    'strip': False,
+    'upx': False,
+    'console': True,
     'disable_windowed_traceback': False,
 }
 
