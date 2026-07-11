@@ -32,3 +32,9 @@ It is built with a plugin system, allowing developers to support new file format
 
 Special thanks to project contributors and CUE.
 Unofficial and not associated with Square Enix or tri-Ace
+
+## Screenshots
+<img width="620" height="480" alt="image" src="https://github.com/user-attachments/assets/1a2e7d3e-5570-445a-ae9c-cdbf0a4fb7bd" />
+<img width="620" height="480" alt="image" src="https://github.com/user-attachments/assets/b2f334ca-a1ec-4edc-bd46-edcd6a7abf90" />
+
+
