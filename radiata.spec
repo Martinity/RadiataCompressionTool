@@ -17,6 +17,8 @@ datas = [
     ('ui/assets/dynamic_sheet.qss', 'ui/assets'),
     ('ui/assets/radi_metadata.json', 'ui/assets'),
     ('ui/assets/app_icon.png', 'ui/assets'),
+    ('ui/assets/app_icon.ico', 'ui/assets'),
+    ('ui/assets/app_icon.icns', 'ui/assets'),
 ]
 datas.extend(collect_data_files('core'))
 datas.extend(collect_data_files('ui'))
@@ -25,18 +27,18 @@ datas.extend(collect_data_files('ui'))
 binaries = [(p, 'native') for p in glob.glob('native_build/*')]
 
 a = Analysis(
-    ['main.py'], 
-    pathex=[], 
-    binaries=binaries, 
+    ['main.py'],
+    pathex=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=hiddenimports, 
-    hookspath=[], 
-    runtime_hooks=[], 
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    runtime_hooks=[],
     excludes=[],
     noarchive=False,
     optimize=0
 )
-             
+
 pyz = PYZ(a.pure)
 
 icon_target = None
@@ -60,7 +62,7 @@ exe_kargs = {
     'disable_windowed_traceback': False,
 }
 
-if sys.platform == 'win32': # Windows: Onefile 
+if sys.platform == 'win32': # Windows: Onefile
     exe = EXE(
         pyz,
         a.scripts,
@@ -70,28 +72,32 @@ if sys.platform == 'win32': # Windows: Onefile
         **exe_kargs,
         onefile=True
     )
-else: # Linux & todo MacOS: Onedir
+else: # Linux & MacOS: Onedir
     exe = EXE(
-        pyz, 
-        a.scripts, 
-        [], 
-        exclude_binaries=True, 
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
         **exe_kargs
     )
     coll = COLLECT(
-        exe, 
-        a.binaries, 
-        a.datas, 
+        exe,
+        a.binaries,
+        a.datas,
         strip=False,
-        upx=True,
+        upx=(sys.platform != 'darwin'),
         upx_exclude=[],
         name='RadiataModdingTool'
     )
 
     if sys.platform == 'darwin':
         app = BUNDLE(
-            coll, 
+            coll,
             name='RadiataModdingTool.app',
             bundle_identifier='com.radiata.moddingtool',
-            icon=icon_target
+            icon=icon_target,
+            info_plist=[
+                ('CFBundleDisplayName', 'Radiata Modding Tool'),
+                ('CFBundleName', 'Radiata Modding Tool'),
+            ]
         )

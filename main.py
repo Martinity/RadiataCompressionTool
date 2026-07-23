@@ -5,18 +5,12 @@ from PyQt6.QtGui import QIcon
 from core.dispatcher import Dispatcher
 from core.registry import discover_all
 from ui.theme_manager import ThemeManager
-from ui.ui_core import MainWindow
+from ui.main_window import MainWindow
 
 from ui.logger import setup_logging
 import logging
 logger = logging.getLogger('radiata')
 
-if sys.platform == 'win32':
-    import ctypes
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.radiata.moddingtool')
-    except Exception:
-        pass
 
 if __name__ == '__main__':
     self_test = '--self-test' in sys.argv
@@ -24,13 +18,33 @@ if __name__ == '__main__':
     discover_all()
     app = QApplication(sys.argv)
 
+    if sys.platform == 'win32':
+        # Set the Windows AppUserModelID so the application is identified
+        # independently of python.exe. This ensures the correct taskbar icon.
+        import ctypes
+
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                'com.radiata.moddingtool'
+            )
+        except Exception:
+            pass
+
+    elif sys.platform == 'darwin':
+        app.setApplicationName('Radiata Modding Tool')
+        app.setOrganizationName('RadiataModding')
+
+    # Icon cross-platform setup
     base_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
-    icon_path = base_dir / 'ui' / 'assets' / 'app_icon.ico'
+    icon_file = 'app_icon.icns' if sys.platform == 'darwin' else 'app_icon.ico'
+    icon_path = base_dir / 'ui' / 'assets' / icon_file
+    if not icon_path.exists(): # PNG fallback for unresolvable icon file
+        icon_path = base_dir / 'ui' / 'assets' / 'app_icon.png'
     if icon_path.exists():
         app_icon = QIcon(str(icon_path))
         app.setWindowIcon(app_icon)
     else:
-        print(f'DEBUG Runtime graphic asset missing at: {icon_path}')
+        print(f'    Runtime icon asset missing at: {icon_path}')
 
     ThemeManager.initialize(app)
     qt_log_handler = setup_logging()

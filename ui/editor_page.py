@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, TYPE_CHECKING
 from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget, QMessageBox
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget, QMessageBox, QApplication
 from PyQt6.QtGui import QShortcut, QKeySequence
 from PyQt6 import sip
 
@@ -98,15 +98,15 @@ class EditorSession:
     @property
     def state(self) -> str:
         return self._state
-    
+
     def is_active(self) -> bool:
         '''True until _populate_ui aka background thread finishes'''
         return self._state == 'loading'
-    
+
     def is_done(self) -> bool:
         '''True after the session has reached a final state'''
         return self._state in ('ready', 'error', 'cancelled')
-    
+
     def _transition(self, target: str) -> None:
         valid = self._VALID_TRANSITIONS.get(self._state, set())
         if target not in valid:
@@ -219,7 +219,7 @@ class EditorPage(QWidget):
 
         self.undo_shortcut = QShortcut(QKeySequence('Ctrl+Z'), self)
         self.undo_shortcut.activated.connect(self._on_undo)
-        
+
         self.redo_shortcut = QShortcut(QKeySequence('Ctrl+Y'), self)
         self.redo_shortcut.activated.connect(self._on_redo)
 
@@ -348,9 +348,14 @@ class EditorPage(QWidget):
             return
         self._deconstruct_old_session()
         self.back_requested.emit()
-    
+
     def _on_save(self) -> None:
+        """Explicitly clear the focus before saving to prevent soft-lock"""
         if self._current_session and self._current_session.state == 'ready':
+            focus_widget = QApplication.focusWidget()
+            if focus_widget:
+                logger.debug('Focus cleared before saving.')
+                focus_widget.clearFocus()
             self._current_session.apply_changes()
 
     def _on_revert(self) -> None:

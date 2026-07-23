@@ -1,27 +1,37 @@
-'''StagingPage contents including; hexdiff, stats, staging queue files.'''
+"""StagingPage contents including; hexdiff, stats, staging queue files."""
+
 from __future__ import annotations
 
+from core.node import ModTracker, VfsNode
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget, QListWidgetItem, 
-    QSplitter, QTableView
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QSplitter,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtGui import QBrush, QColor, QShortcut, QKeySequence
-from core.node import VfsNode, ModTracker
-from utilities import human_size, hline, vline
-from ui.hex_model import HexTableView, HexGridModelBase, EDITABLE_COLUMNS
+from ui.hex_model import EDITABLE_COLUMNS, HexGridModelBase, HexTableView
+from utilities import hline, human_size, vline
 
 _COL_CHANGED_FG = QColor('#E2A96B')
 _COL_CHANGED_BG = QColor('#2A2218')
-_COL_ADDED_FG   = QColor('#7EC8A0')
-_COL_ADDED_BG   = QColor("#345342")
+_COL_ADDED_FG = QColor('#7EC8A0')
+_COL_ADDED_BG = QColor('#345342')
 _COL_REMOVED_FG = QColor('#E06C75')
 _COL_REMOVED_BG = QColor('#2A1A1C')
 
 ###--------------------------------------- Hex Model ----------------------------------------------###
 
+
 class HexDiffModel(HexGridModelBase):
-    '''Read-only hex model with diff-based byte coloring'''
+    """Read-only hex model with diff-based byte coloring"""
+
     def __init__(self, data: bytes, diff_mask: list[str], parent=None) -> None:
         super().__init__(data, parent)
         self._mask = diff_mask
@@ -31,30 +41,30 @@ class HexDiffModel(HexGridModelBase):
             return None
         kind = self._mask[pos]
         pair = {
-            'changed' : (_COL_CHANGED_FG, _COL_CHANGED_BG),
-            'added'   : (_COL_ADDED_FG,   _COL_ADDED_BG),
-            'removed' : (_COL_REMOVED_FG, _COL_REMOVED_BG)
+            'changed': (_COL_CHANGED_FG, _COL_CHANGED_BG),
+            'added': (_COL_ADDED_FG, _COL_ADDED_BG),
+            'removed': (_COL_REMOVED_FG, _COL_REMOVED_BG),
         }.get(kind)
         if not pair:
             return None
         fg, bg = pair
         return QBrush(fg if role == Qt.ItemDataRole.ForegroundRole else bg)
-    
+
     ###--------------------------------- Diff Mask -------------------------------------------------###
 
     @staticmethod
     def build_masks(new_data: bytes, orig_data: bytes) -> tuple[list[str], list[str]]:
-        '''Produce diffs per byte'''
-        n, o       = len(new_data), len(orig_data)
-        common          = min(n, o)
-        new_mask  = ['same'] * n
+        """Produce diffs per byte"""
+        n, o = len(new_data), len(orig_data)
+        common = min(n, o)
+        new_mask = ['same'] * n
         orig_mask = ['same'] * o
 
         for i in range(common):
             if new_data[i] != orig_data[i]:
-                new_mask[i]  = 'changed'
+                new_mask[i] = 'changed'
                 orig_mask[i] = 'changed'
-        
+
         for i in range(common, n):
             new_mask[i] = 'added'
 
@@ -62,12 +72,14 @@ class HexDiffModel(HexGridModelBase):
             orig_mask[i] = 'removed'
 
         return new_mask, orig_mask
-    
+
+
 def _make_hex_view(model: HexDiffModel) -> QTableView:
     view = HexTableView()
     view.setModel(model)
     view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
     return view
+
 
 class HexDiffPanel(QWidget):
     def __init__(self, parent=None) -> None:
@@ -94,8 +106,8 @@ class HexDiffPanel(QWidget):
         legend.setSpacing(4)
         for colour, text in (
             (_COL_CHANGED_FG, 'Changed'),
-            (_COL_ADDED_FG,   'Added'),
-            (_COL_REMOVED_FG, 'Removed')
+            (_COL_ADDED_FG, 'Added'),
+            (_COL_REMOVED_FG, 'Removed'),
         ):
             dot = QLabel('■')
             dot.setStyleSheet(f'color: {colour.name()}')
@@ -109,7 +121,7 @@ class HexDiffPanel(QWidget):
         stats_layout.addWidget(self._stats_label)
         stats_layout.addStretch(12)
         stats_layout.addLayout(legend)
-        stats_layout.setContentsMargins(6 ,6 , 6, 6)
+        stats_layout.setContentsMargins(6, 6, 6, 6)
         stats_layout.setVerticalSizeConstraint(QHBoxLayout.SizeConstraint.SetFixedSize)
         root.addWidget(stats_bar)
 
@@ -133,10 +145,10 @@ class HexDiffPanel(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(2)
 
-        self._new_model  = HexDiffModel(b'', [])
+        self._new_model = HexDiffModel(b'', [])
         self._orig_model = HexDiffModel(b'', [])
-        self._new_view   = _make_hex_view(self._new_model)
-        self._orig_view  = _make_hex_view(self._orig_model)
+        self._new_view = _make_hex_view(self._new_model)
+        self._orig_view = _make_hex_view(self._orig_model)
 
         splitter.addWidget(self._new_view)
         splitter.addWidget(self._orig_view)
@@ -144,20 +156,16 @@ class HexDiffPanel(QWidget):
         splitter.setStretchFactor(1, 1)
         root.addWidget(splitter)
 
-        self._new_view.verticalScrollBar().valueChanged.connect(
-            self._orig_view.verticalScrollBar().setValue
-        )
-        self._orig_view.verticalScrollBar().valueChanged.connect(
-            self._new_view.verticalScrollBar().setValue
-        )
+        self._new_view.verticalScrollBar().valueChanged.connect(self._orig_view.verticalScrollBar().setValue)
+        self._orig_view.verticalScrollBar().valueChanged.connect(self._new_view.verticalScrollBar().setValue)
 
     ###-------------------------------- Public -------------------------------------###
 
     def load_diff(self, node_name: str, new_data: bytes, orig_data: bytes) -> None:
         new_mask, orig_mask = HexDiffModel.build_masks(new_data, orig_data)
 
-        changed = sum(1 for m in new_mask  if m == 'changed')
-        added   = sum(1 for m in new_mask  if m == 'added')
+        changed = sum(1 for m in new_mask if m == 'changed')
+        added = sum(1 for m in new_mask if m == 'added')
         removed = sum(1 for m in orig_mask if m == 'removed')
 
         self._new_model = HexDiffModel(new_data, new_mask)
@@ -170,9 +178,12 @@ class HexDiffPanel(QWidget):
         self._orig_header.setText(f'Original ({human_size(len(orig_data))})')
 
         parts = []
-        if changed: parts.append(f'{changed} byte(s) changed')
-        if added:   parts.append(f'{added} byte(s) added')
-        if removed: parts.append(f'{removed} byte(s) removed')
+        if changed:
+            parts.append(f'{changed} byte(s) changed')
+        if added:
+            parts.append(f'{added} byte(s) added')
+        if removed:
+            parts.append(f'{removed} byte(s) removed')
         self._stats_label.setText(', '.join(parts) if parts else 'No differences')
 
     def clear(self) -> None:
@@ -185,10 +196,13 @@ class HexDiffPanel(QWidget):
         self._orig_header.setText('Original')
         self._stats_label.setText('')
 
+
 ###------------------------------------- Staging Page --------------------------------------###
 
+
 class StagingPage(QWidget):
-    '''UI for managing the filesystem vs Staging Area'''
+    """UI for managing the filesystem vs Staging Area"""
+
     request_workspace = pyqtSignal()
 
     def __init__(self, dispatcher, parent=None) -> None:
@@ -227,15 +241,21 @@ class StagingPage(QWidget):
         btn_col = QVBoxLayout()
         btn_col.setAlignment(Qt.AlignmentFlag.AlignCenter)
         btn_col.setSpacing(6)
-        
-        self.btn_stage       = QPushButton('Stage >')
-        self.btn_stage_all   = QPushButton('Stage All >>')
-        self.btn_unstage     = QPushButton('< Unstage')
+
+        self.btn_stage = QPushButton('Stage >')
+        self.btn_stage_all = QPushButton('Stage All >>')
+        self.btn_unstage = QPushButton('< Unstage')
         self.btn_unstage_all = QPushButton('<< Unstage All')
-        self.btn_revert      = QPushButton('Revert')
-        self.btn_revert_all  = QPushButton('Revert All')
-        for btn in (self.btn_stage, self.btn_stage_all, self.btn_unstage, 
-                    self.btn_unstage_all, self.btn_revert, self.btn_revert_all):
+        self.btn_revert = QPushButton('Revert')
+        self.btn_revert_all = QPushButton('Revert All')
+        for btn in (
+            self.btn_stage,
+            self.btn_stage_all,
+            self.btn_unstage,
+            self.btn_unstage_all,
+            self.btn_revert,
+            self.btn_revert_all,
+        ):
             btn.setFixedWidth(140)
         btn_col.addWidget(self.btn_stage)
         btn_col.addWidget(self.btn_stage_all)
@@ -262,11 +282,17 @@ class StagingPage(QWidget):
         action_bar = QHBoxLayout()
         action_bar.setContentsMargins(6, 6, 6, 6)
         self.btn_back = QPushButton('< Back')
+        self.slim_toggle = QPushButton('Slimmed Rebuild')
+        self.slim_toggle.setCheckable(True)
+        self.slim_toggle.setToolTip(
+            'Removes padding from empty disk sectors.\nMeant for digital only rebuilds.'
+        )
         self.btn_confirm = QPushButton('Build New ISO')
         self.btn_confirm.setObjectName('BtnImportant')
         self.btn_confirm.setEnabled(False)
         action_bar.addWidget(self.btn_back)
         action_bar.addStretch()
+        action_bar.addWidget(self.slim_toggle)
         action_bar.addWidget(self.btn_confirm)
         top_layout.addLayout(action_bar)
 
@@ -295,13 +321,10 @@ class StagingPage(QWidget):
 
     def _setup_shortcuts(self) -> None:
         QShortcut(QKeySequence('Esc'), self).activated.connect(self.request_workspace.emit)
-        
+
     def refresh_lists(self) -> None:
-        '''Modifies the list of modified nodes'''
-        selected_hid = (
-            self._selected_node.hierarchical_id_str
-            if self._selected_node else None
-        )
+        """Modifies the list of modified nodes"""
+        selected_hid = self._selected_node.hierarchical_id_str if self._selected_node else None
         self.unstaged_list.clear()
         self.staged_list.clear()
         for node in sorted(self.tracker.modified_nodes, key=lambda n: n.name):
@@ -329,11 +352,7 @@ class StagingPage(QWidget):
         self._selected_node = node
         new_data = node.pending_data or b''
         orig_data = self.tracker.get_original(node)
-        self.diff_panel.load_diff(
-            f'{node.name}  ({node.hierarchical_id_str})',
-            new_data,
-            orig_data
-        )
+        self.diff_panel.load_diff(f'{node.name}  ({node.hierarchical_id_str})', new_data, orig_data)
 
     def _on_stage(self) -> None:
         for item in self.unstaged_list.selectedItems():
@@ -352,10 +371,7 @@ class StagingPage(QWidget):
             self.tracker.unstage_node(node)
 
     def _on_revert(self) -> None:
-        items = (
-            self.unstaged_list.selectedItems()
-            + self.staged_list.selectedItems()
-        )
+        items = self.unstaged_list.selectedItems() + self.staged_list.selectedItems()
         for item in items:
             node = item.data(Qt.ItemDataRole.UserRole)
             self.tracker.revert_node(node)
@@ -367,9 +383,10 @@ class StagingPage(QWidget):
         all_nodes = list(self.tracker.modified_nodes) + list(self.tracker.rebuild_queue)
         for node in all_nodes:
             self.tracker.revert_node(node)
-            
+
         self._selected_node = None
         self.diff_panel.clear()
+
 
 def _make_item(node: VfsNode) -> QListWidgetItem:
     item = QListWidgetItem(node.name)

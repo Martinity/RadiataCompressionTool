@@ -1,5 +1,5 @@
 '''
-Contains all background task defining logic. 
+Contains all background task defining logic.
 
 - ActionType and ActionDef are used when registering profiles as well as for routing logic to distinct UI outcomes
 
@@ -66,7 +66,7 @@ class ActionResult:
     payload:     Any = None  # result of the action (bytes, str... etc) depending on ActionType
     message:     str = ''
 
-@dataclass 
+@dataclass
 class EditorPayload:
     '''Result structured for editors. Carries node, data'''
     node: 'VfsNode'
@@ -211,7 +211,7 @@ class TaskCoordinator(QObject):
         )
         for handle_id, handle in list(self._active_handles.items()):
             logger.debug(f'TaskCoordinator Force-Cancelling: Task #{handle.task_id}')
-            handle.cancel
+            handle.cancel()
         self.thread_pool.clear()
         if not self.thread_pool.waitForDone(2000):
             logger.warning('TaskCoordinator: Some threads did not finish in time.')
@@ -303,7 +303,7 @@ class TaskHandle(QObject):
         else:
             self._transition('completed')
             self.finished.emit(True, result)
-    
+
     def fail(self, error: Exception | str) -> None:
         if self.is_cancelling():
             self._transition('cancelled')
@@ -314,13 +314,14 @@ class TaskHandle(QObject):
 
 ###---------------------------------------- Actions --------------------------------------###
 
-class Actions:
-    '''All background task logic in one place
 
-    log_callback: user-facing messages (LoggingWindow)
+class Actions:
+    """All background task logic in one place
+
+    log_callback: context dependent. Currently: LoggingWindow and rebuild page log
     logger.*:     system/debug messages (LoggingWindow w/ Log Level Filtering)
     progress_callback(%, label): progress bar
-    '''
+    """
 
     ### Editor
     @staticmethod
@@ -333,7 +334,7 @@ class Actions:
         '''
         Unwraps the node and calls handler.prepare_editor_data() on a background thread.
 
-        Returns EditorPayload(node, data) 
+        Returns EditorPayload(node, data)
         '''
         task_handle.log_message.emit(f'Preparing editor data for "{node.name}"...')
         task_handle.checkpoint()
@@ -352,7 +353,7 @@ class Actions:
             result = handler.prepare_editor_data(node, raw_bytes)
         logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__} from {handler_class.__name__}')
         return EditorPayload(node=node, data=result)
-    
+
     @staticmethod
     def decode_editor_data(
         handler_class:     type['BaseHandler'],
@@ -395,26 +396,36 @@ class Actions:
                 handler_class = Registry.get_handler(node)
                 if not handler_class:
                     return ActionResult(
-                        action_name=action_def.name, 
-                        node=node, 
-                        status=ActionStatus.FAILURE, 
+                        action_name=action_def.name,
+                        node=node,
+                        status=ActionStatus.FAILURE,
                         message=f'No handler registered for {node.name}'
                     )
                 return Actions.run_handler_action(
-                    handler_class, node, action_def.name, navigator, 
-                    task_handle, **kwargs
+                    handler_class,
+                    node,
+                    action_def.name,
+                    navigator,
+                    task_handle,
+                    **kwargs,
                 )
             case ActionType.EXPORT:
                 file_path: Path | None = kwargs.get('file_path')
                 if not file_path:
                     return ActionResult(
-                        action_name=action_def.name, node=node,
-                        status=ActionStatus.FAILURE, message='No output path provided'
+                        action_name=action_def.name,
+                        node=node,
+                        status=ActionStatus.FAILURE,
+                        message='No output path provided',
                     )
                 handler_class = Registry.get_handler(node)
                 profile = Registry.get_handler_profile(node)
-                has_custom_export = (handler_class and profile and profile.get_action(action_def.name) is not None)
-                if has_custom_export: # Custom Export - PNG, WAV... etc
+                has_custom_export = (
+                    handler_class
+                    and profile
+                    and profile.get_action(action_def.name) is not None
+                )
+                if has_custom_export:  # Custom Export - PNG, WAV... etc
                     return Actions.run_handler_action(
                         handler_class,
                         node,
@@ -431,8 +442,10 @@ class Actions:
                 file_path = kwargs.get('file_path')
                 if not file_path:
                     return ActionResult(
-                        action_name=action_def.name, node=node,
-                        status=ActionStatus.FAILURE, message='No import path provided'
+                        action_name=action_def.name,
+                        node=node,
+                        status=ActionStatus.FAILURE,
+                        message='No import path provided',
                     )
                 return Actions.import_node(
                     node, file_path, task_handle, action_name=action_def.name
@@ -443,7 +456,7 @@ class Actions:
                     status=ActionStatus.FAILURE,
                     message=f'Unknown ActionType: {action_def.action_type}'
                 )
-            
+
     ### ISO Specific actions
     @staticmethod
     def load_iso(
@@ -470,7 +483,7 @@ class Actions:
         navigator:    'VfsNavigator',
         staged_nodes: list['VfsNode'],
         output_path:  Path,
-        task_handle:       TaskHandle,
+        task_handle:  TaskHandle,
     ) -> ActionResult:
         from core.navigator import ExpansionTimeoutError
         try:
@@ -510,22 +523,22 @@ class Actions:
                 status=ActionStatus.FAILURE,
                 message=str(e)
             )
-        
+
     @staticmethod
     def verify_iso(
-        handler: IsoHandler,
-        task_handle:       TaskHandle,
+        handler:      IsoHandler,
+        task_handle:  TaskHandle,
     ) -> str:
         task_handle.log_message.emit('Verifying ISO...')
         result = handler.verify_iso_integrity(task_handle)
         task_handle.log_message.emit(f'ISO verified, build: {result}')
         return result
-    
+
     ### IO specific actions
     @staticmethod
     def export_node(
         node:        'VfsNode',
-        output_path:  Path, 
+        output_path:  Path,
         navigator:   'VfsNavigator',
         task_handle:  TaskHandle,
         action_name:  str = 'Export'
@@ -556,7 +569,7 @@ class Actions:
                 status=ActionStatus.FAILURE,
                 message=str(e)
             )
-        
+
     @staticmethod
     def import_node(
             node:       'VfsNode',
@@ -579,9 +592,10 @@ class Actions:
             return ActionResult(
                 action_name=action_name,
                 node=node,
-                status=ActionStatus.FAILURE, message=str(e)
+                status=ActionStatus.FAILURE,
+                message=str(e),
             )
-    
+
     ### Handler actions
     @staticmethod
     def run_handler_action(
@@ -589,13 +603,13 @@ class Actions:
         node:          VfsNode,
         action_name:   str,
         navigator:     VfsNavigator,
-        task_handle:       TaskHandle,
+        task_handle:   TaskHandle,
         **kwargs,
     ) -> ActionResult:
         '''
-        Find requested data, 
-        open a handle, 
-        inject handle with dependencies, 
+        Find requested data,
+        open a handle,
+        inject handle with dependencies,
         execute action with handle
         '''
         if action_name != 'Properties':
@@ -612,16 +626,16 @@ class Actions:
             if action_name != 'Properties':
                 task_handle.log_message.emit(f'Finished "{action_name}" on node: {node.name}.')
             return ActionResult(
-                action_name=action_name, 
-                node=node, 
-                status=ActionStatus.SUCCESS, 
+                action_name=action_name,
+                node=node,
+                status=ActionStatus.SUCCESS,
                 payload=payload
             )
         except Exception as e:
             logger.error(f'Action "{action_name}" failed on {node.name}: {e}', exc_info=True)
             return ActionResult(
-                action_name=action_name, 
-                node=node, 
-                status=ActionStatus.FAILURE, 
+                action_name=action_name,
+                node=node,
+                status=ActionStatus.FAILURE,
                 message=str(e)
             )

@@ -1,5 +1,5 @@
 name: CI
-on: [pull_request, workflow_dispatch]
+on: [push, pull_request, workflow_dispatch]
 jobs:
   build:
     name: ${{ matrix.label }}
@@ -8,14 +8,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # - { os: macos-14,       label: macos-arm64 }
+          - { os: macos-14,       label: macos-arm64 }
           # - { os: macos-13,       label: macos-x86_64 }
           - { os: windows-latest, label: windows-x64 }
           - { os: ubuntu-22.04,   label: linux-x86_64 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: 
+        with:
           python-version: '3.12'
       - name: Install deps
         run: |
@@ -45,7 +45,22 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: ./dist/RadiataModdingTool/RadiataModdingTool --self-test
 
+      - name: Smoke (headless self-test) (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          if [ -d "dist/RadiataModdingTool.app" ]; then
+            ./dist/RadiataModdingTool.app/Contents/MacOS/RadiataModdingTool --self-test
+          else
+            ./dist/RadiataModdingTool/RadiataModdingTool --self-test
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: bundle-${{ matrix.label }}
-          path: dist/RadiataModdingTool
+          path: |
+            dist/RadiataModdingTool.app
+            dist/RadiataModdingTool
+          if-no-files-found: error
