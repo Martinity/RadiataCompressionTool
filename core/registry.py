@@ -69,7 +69,7 @@ class HandlerProfile:
 
     def get_action(self, name: str) -> ActionDef | None:
         return self._action_map.get(name)
-    
+
     def primary_expand_action(self) -> ActionDef | None:
         return next(
             (a for a in self.actions if a.action_type == ActionType.TREE_EXPAND),
@@ -85,7 +85,7 @@ class EditorProfile:
     extensions:    tuple[str, ...] = ()
     categories:    tuple[str, ...] = ()
     is_fallback:   bool = False
-    
+
 ###------------------------------------------ Registry --------------------------------------------###
 
 class Registry:
@@ -384,8 +384,8 @@ def discover_all() -> None:
     Import all handlers/editors and lock the registry.
     Catches all import errors and raises a RuntimeError if any are encountered.
     '''
-    handler_errors = discover_handlers()
-    editor_errors = discover_editors()
+    handler_errors = discover_handlers(Registry)
+    editor_errors = discover_editors(Registry)
     all_errors = handler_errors + editor_errors
 
     if all_errors:

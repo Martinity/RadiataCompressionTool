@@ -1,5 +1,7 @@
-"""Thourough testing for the registration process as it is the most fragile and critical part of the application"""
-
+"""
+Thorough testing for the registration process as it is one of the most fragile
+and critical part of the application
+"""
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,23 +31,18 @@ class DummyGlobalEditor(BaseEditor):
 
 class InvalidHandlerPlugin:
     """A class that does not inherit from BaseEditor"""
-
     pass
+
+
+class DummyRegistry:
+    _handler_profiles: list = []
+    _editor_profiles: list = []
 
 
 @dataclass
 class MockVfsNode:
     extension: str = ''
     category: tuple[str, ...] = ()
-
-
-def test_discovery_mismatch_only_catches_import_failures_not_missing_registration():
-    '''
-    A .py file that imports successfully but never calls @Registry.register is NOT detected by
-    discover_handlers()'s count check.
-    This test is currently only for documenting that gap.
-    '''
-    ...
 
 
 ###----- Fixtures ------###
@@ -128,6 +125,25 @@ def test_handler_registration_invalid_type():
     with pytest.raises(TypeError, match='is for BaseHandler subclasses only'):
         Registry.register('BadHandler')(InvalidHandlerPlugin)
 
+def test_discover_handlers_flags_modules_that_registers_nothing(monkeypatch):
+    from core.handlers import discover_handlers
+    class MockModuleInfo:
+        ispkg = False
+        name = 'dummy_handler'
+
+    monkeypatch.setattr('pkgutil.iter_modules', lambda path: [MockModuleInfo()])
+    monkeypatch.setattr('importlib.import_module', lambda name: None)
+    errors = discover_handlers(DummyRegistry)
+    assert len(errors) == 1
+    assert errors[0][0] == 'core.handlers.dummy_handler'
+    assert 'found no profile to register' in str(errors[0][1])
+
+def test_discover_handler_empty_path_is_a_clear_error(monkeypatch):
+    from core.handlers import discover_handlers
+    monkeypatch.setattr('pkgutil.iter_modules', lambda path: [])
+    errors = discover_handlers(DummyRegistry)
+    assert len(errors) == 1
+    assert 'found no handler modules to import' in str(errors[0][1])
 
 ###----- Editor registration ------###
 
@@ -158,6 +174,26 @@ def test_editor_registration_invalid_type():
 def test_editor_registration_invalid_handler_binding():
     with pytest.raises(TypeError, match='handler must be a BaseHandler subclass'):
         Registry.register_editor(name='BadEditor', handler=InvalidHandlerPlugin, extensions=('.txt',))
+
+def test_discover_editors_flags_modules_that_registers_nothing(monkeypatch):
+    from ui.editors import discover_editors
+    class MockModuleInfo:
+        ispkg = False
+        name = 'dummy_editor'
+
+    monkeypatch.setattr('pkgutil.iter_modules', lambda path: [MockModuleInfo()])
+    monkeypatch.setattr('importlib.import_module', lambda name: None)
+    errors = discover_editors(DummyRegistry)
+    assert len(errors) == 1
+    assert errors[0][0] == 'ui.editors.dummy_editor'
+    assert 'found no profile to register' in str(errors[0][1])
+
+def test_discover_editor_empty_path_is_a_clear_error(monkeypatch):
+    from ui.editors import discover_editors
+    monkeypatch.setattr('pkgutil.iter_modules', lambda path: [])
+    errors = discover_editors(DummyRegistry)
+    assert len(errors) == 1
+    assert 'found no editor modules to import' in str(errors[0][1])
 
 
 ###----- Resolution and Lookups -----###
