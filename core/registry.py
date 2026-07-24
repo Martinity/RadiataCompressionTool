@@ -1,9 +1,13 @@
 '''
-Registry; the global lookup for all handlers and editors, and their purposes
-Registration happens at startup catching errors before runtime and locks preventing runtime mutations
+Registry; the global lookup for all handlers and editors, and their purposes.
+Registration happens at startup catching errors before runtime and locks preventing runtime mutations.
 
-HandlerProfile, EditorProfile are created for @Registry.register, @Registry.register_editor respectively
+HandlerProfile, EditorProfile are created for @Registry.register, @Registry.register_editor respectively.
 FormatResolver features the lookup API
+
+The registry supports multiple handlers or editors for the same category/extension. However the current codebase uses
+get_handler_profile as a default. In the future if the tool grows and there is an interest in multiple handlers/editors
+per category/extension, the codebase will need to be updated to get_handler_profiles.
 '''
 from __future__ import annotations
 
@@ -36,7 +40,7 @@ _GLOBAL_ACTIONS_BY_NAME: dict[str, ActionDef] = {a.name: a for a in GLOBAL_ACTIO
 class FormatResolver(Protocol):
     '''Inject FormatResolver rather than importing Registry directly to decouple subsystems.'''
     def get_handler_profile(self, node: 'VfsNode') -> 'HandlerProfile | None': ...
-    def get_handler_profiles(self, node: 'VfsNode') -> 'list[HandlerProfile] | None': ...
+    def get_handler_profiles(self, node: 'VfsNode') -> 'list[HandlerProfile]': ...
     def get_editor_profile(self, editor_class: 'type[BaseEditor]') -> 'type[EditorProfile] | None': ...
     def get_handler(self, source: 'VfsNode | Path') -> 'type[BaseHandler] | None': ...
     def get_editors(self, node: 'VfsNode') -> 'list[type[BaseHandler]]': ...
@@ -65,7 +69,7 @@ class HandlerProfile:
 
     def get_action(self, name: str) -> ActionDef | None:
         return self._action_map.get(name)
-    
+
     def primary_expand_action(self) -> ActionDef | None:
         return next(
             (a for a in self.actions if a.action_type == ActionType.TREE_EXPAND),
@@ -81,7 +85,7 @@ class EditorProfile:
     extensions:    tuple[str, ...] = ()
     categories:    tuple[str, ...] = ()
     is_fallback:   bool = False
-    
+
 ###------------------------------------------ Registry --------------------------------------------###
 
 class Registry:
@@ -103,6 +107,15 @@ class Registry:
     def lock(cls) -> None:
         '''freeze the registry. called after all plugins are loaded'''
         cls._locked = True
+        registered_handlers = {p.handler_class for p in cls._handler_profiles}
+        for editor_profile in cls._editor_profiles:
+            if editor_profile.handler_class not in registered_handlers:
+                raise ValueError(
+                    f'EditorProfile {editor_profile.name!r} references handler '
+                    f'{editor_profile.handler_class.__name__!r}, which has no '
+                    f'@Registry.register profile of its own. prepare_editor_data '
+                    f'will use BaseHandler defaults instead of this handler\'s overrides.'
+                )
         logger.info(
             f'Locked -- {len(cls._handler_profiles)} handler(s), {len(cls._editor_profiles)} editor(s)'
             f'{len(cls._global_editors)} global editor(s)'
@@ -124,16 +137,16 @@ class Registry:
     ###----------------------------------- register ------------------------------------------###
     @classmethod
     def register(
-        cls, 
-        name:              str, 
-        extensions:        tuple[str, ...] = (), 
-        categories:        tuple[str, ...] = (), 
+        cls,
+        name:              str,
+        extensions:        tuple[str, ...] = (),
+        categories:        tuple[str, ...] = (),
         supported_actions: tuple[ActionDef, ...] | dict[str, ActionType] | None = None,
         is_fallback:       bool = False,
     ):
         '''
-        Decorator for BaseHandler subclasses. 
-        
+        Decorator for BaseHandler subclasses.
+
         supported_actions accepts:
             tuple[ActionDef, ...]   preferred ActionDef
             dict[str, ActionType]   shorthand get converted to ActionDef tuple
@@ -151,7 +164,7 @@ class Registry:
                     f'{cls_or_func.__name__!r} is not a BaseHandler.'
                 )
             actions = _normalise_actions(supported_actions)
-            cls_or_func._plugin_name = name # type: ignore BaseHandler checks _plugin_name for get_identity checks
+            cls_or_func._plugin_name = name
 
             profile = HandlerProfile(
                 name=name,
@@ -172,7 +185,7 @@ class Registry:
 
             return cls_or_func
         return decorator
-    
+
     @classmethod
     def register_editor(
             cls,
@@ -184,9 +197,14 @@ class Registry:
     ):
         '''
         Decorator for BaseEditor subclasses
-        
+
         handler= is required and is the actual handler class
         '''
+        if not (isinstance(handler, type) and issubclass(handler, BaseHandler)):
+            raise TypeError(
+                f'register_editor "{name}": handler must be a BaseHandler subclass, got {handler!r}.'
+            )
+
         def decorator(cls_or_func):
             if cls._locked:
                 raise RuntimeError(
@@ -195,15 +213,11 @@ class Registry:
             if not issubclass(cls_or_func, BaseEditor):
                 raise TypeError(
                     f'@Registry.register_editor is for BaseEditor subclasses only. '
-                    f'{cls_or_func.__name__!r} is not a BaseEdtor.'
+                    f'{cls_or_func.__name__!r} is not a BaseEditor.'
                 )
-            if not (isinstance(handler, type) and issubclass(handler, BaseHandler)):
-                raise TypeError(
-                    f'register_editor "{name}": handler= must be a BaseHandler subclass, got {handler!r}.'
-                )
-            cls_or_func._plugin_name = name # type: ignore BaseHandler checks _plugin_name for get_identity checks
+            cls_or_func._plugin_name = name
             profile = EditorProfile(
-                name=name, 
+                name=name,
                 handler_class=handler,
                 editor_class=cls_or_func,
                 extensions=extensions,
@@ -226,13 +240,20 @@ class Registry:
     ###------------------------------- Lookups ----------------------------------###
     @classmethod
     def get_handler_profile(cls, node: VfsNode) -> HandlerProfile | None:
-        '''Returns best handler profile for a node'''
+        '''
+        Returns best handler profile for a node.
+        This should be only used for handlers that are uniquely registered to an extension.
+        If used on an extension with multiple handlers, the first match is returned.
+        '''
         profiles = cls.get_handler_profiles(node)
         return profiles[0] if profiles else None
 
     @classmethod
-    def get_handler_profiles(cls, node: VfsNode) -> list[HandlerProfile] | None:
-        '''Return list of valid handler profiles for a node'''
+    def get_handler_profiles(cls, node: VfsNode) -> list[HandlerProfile]:
+        '''
+        Returns list of valid handler profiles for a node.
+        Most of the time this will be the best way to get a handler profile for a node.
+        '''
         matches: list[HandlerProfile] = []
         seen_names: set[str] = set()
 
@@ -240,27 +261,17 @@ class Registry:
             if profile.name not in seen_names:
                 matches.append(profile)
                 seen_names.add(profile.name)
-        
+
         if node.extension: # Gather extension matches
-            profiles = cls._handler_by_ext.get(node.extension)
-            if profiles:
-                if isinstance(profiles, list):
-                    for p in profiles:
-                        _add(p)
-                else:
-                    _add(profiles)
+            for p in cls._handler_by_ext.get(node.extension, []):
+                _add(p)
         if node.category: # Gather category matches
             for cat in node.category:
                 if cat == 'Unknown':
                     continue
-                profiles = cls._handler_by_cat.get(cat)
-                if profiles:
-                    if isinstance(profiles, list):
-                        for p in profiles:
-                            _add(p)
-                    else:
-                        _add(profiles)
-        
+                for p in cls._handler_by_cat.get(cat, []):
+                    _add(p)
+
         return matches
 
     @classmethod
@@ -295,27 +306,28 @@ class Registry:
         for p in cls._global_editors:
             _add(p)
         return editors
-    
+
     @classmethod
-    def get_editor_profile(cls, editor_class: type[BaseEditor]) -> EditorProfile | None:
+    def get_editor_profile(cls, editor_class: type[BaseEditor] | type) -> EditorProfile | None:
         '''Return the EditorProfile associated with a specific editor'''
         return next(
             (p for p in cls._editor_profiles if p.editor_class is editor_class),
             None,
         )
-    
+
     @classmethod
     def get_handler_for_editor(cls, editor: 'BaseEditor') -> type[BaseHandler] | None:
         '''Return the handler declared by an editor's profile'''
-        profile = cls.get_editor_profile(editor.__class__)
+        editor_cls = editor if isinstance(editor, type) else editor.__class__
+        profile = cls.get_editor_profile(editor_cls)
         if not profile:
             logger.warning(f'{editor.__class__.__name__} has no EditorProfile - falling back to node handler')
             return None
         return profile.handler_class
-    
+
     @classmethod
     def get_action(cls, node: 'VfsNode', action_name: str) -> ActionDef | None:
-        '''Resolve ActionDef from action_name for a given node. 
+        '''Resolve ActionDef from action_name for a given node.
         Checks node's HandlerProfile first falling back to global actions.'''
         profile = cls.get_handler_profile(node)
         if profile:
@@ -323,7 +335,7 @@ class Registry:
             if action:
                 return action
         return _GLOBAL_ACTIONS_BY_NAME.get(action_name)
-    
+
     ###----------------------------------- Diagnostics ---------------------------------------###
     @classmethod
     def summary(cls) -> str:
@@ -368,8 +380,19 @@ def _normalise_actions(actions: tuple[ActionDef, ...] | dict[str, ActionType] | 
 
 
 def discover_all() -> None:
-    '''Import all handlers/editors and lock the registry'''
-    discover_handlers()
-    discover_editors()
+    '''
+    Import all handlers/editors and lock the registry.
+    Catches all import errors and raises a RuntimeError if any are encountered.
+    '''
+    handler_errors = discover_handlers(Registry)
+    editor_errors = discover_editors(Registry)
+    all_errors = handler_errors + editor_errors
+
+    if all_errors:
+        error_count = len(all_errors)
+        error_details = '\n'.join(f'    {mod}: {err}' for mod, err in all_errors)
+        fatal_msg = f'Application startup failed at discovery. Discovered {error_count} plugin errors:\n{error_details}'
+        logger.critical(fatal_msg)
+        raise RuntimeError(fatal_msg)
     Registry.lock()
     logger.info('Registry filled and locked.')

@@ -51,7 +51,7 @@ class VfsTreeModel(QAbstractItemModel):
         parent_node = self.get_node(parent)
         if row >= len(parent_node.children):
             return QModelIndex()
-        
+
         child_node = parent_node.children[row]
         return self.createIndex(row, column, child_node) if child_node is not None else QModelIndex()
 
@@ -90,22 +90,22 @@ class VfsTreeModel(QAbstractItemModel):
             col = index.column()
             if col == 0:
                 return node.hierarchical_id_str
-            if col == 1: 
+            if col == 1:
                 return node.name + node.extension
-            if col == 2: 
+            if col == 2:
                 return human_size(node.size)
-            
+
         if role == Qt.ItemDataRole.UserRole:
             return node
 
         return None
-    
+
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         '''Enable selection and interaction with tree'''
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-    
+
     def headerData(self, section: int, orientation: Qt.Orientation, role: Qt.ItemDataRole):
         """Draws the column headers at the top of the TreeView."""
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
@@ -156,7 +156,6 @@ class TreeProxyModel(QSortFilterProxyModel):
 
     def set_show_hidden(self, show: bool):
         '''refreshes view with the hidden toggle'''
-        logger.debug(f'hidden toggle from proxy model:{show}')
         self.show_hidden = show
         self.invalidateFilter()
 
@@ -176,7 +175,7 @@ class TreeProxyModel(QSortFilterProxyModel):
         return source_model
 
 ### -------------------------------------- Flat Search Model -------------------------------------------###
-    
+
 _RANK_EXACT_NAME  = 100
 _RANK_HID         = 90
 _RANK_NAME_PREFIX = 80
@@ -275,7 +274,7 @@ class FlatSearchModel(QAbstractListModel):
     ### Qt API
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._results)
-    
+
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
         '''Returns different type of data depending on requested Role'''
         if not index.isValid() or index.row() >= len(self._results):

@@ -24,7 +24,8 @@ logger = logging.getLogger(f'radiata.{__name__}')
 ###----------------------------------------------------- Dispatch -------------------------------------------------###
 
 class Dispatcher(QObject):
-    '''Bridge between UI and logic
+    '''
+    Bridge between UI and logic
 
     Node actions pass to Actions.dispatch which routes by ActionDef.action_type.
     Dispatcher does not need to now what an action needs to execute.
@@ -43,9 +44,9 @@ class Dispatcher(QObject):
     # ISO verification
     iso_verified = pyqtSignal(str)                   # Build string
     # Generic node actions
-    action_complete = pyqtSignal(object)             # ActionResult 
-    workspace_log   = pyqtSignal(str)                # Testing usefulness of log signalling
-    # IO 
+    action_complete  = pyqtSignal(object)            # ActionResult
+    file_browser_log = pyqtSignal(str)               # Testing usefulness of log signalling
+    # IO
     io_progress = pyqtSignal(int, str)               # completion %
     io_complete = pyqtSignal(bool, object)           # (success, result)
 
@@ -69,7 +70,7 @@ class Dispatcher(QObject):
         self.tracker.rebuild_initiated.connect(self.rebuild_requested.emit)
         self.tracker.state_changed.connect(self._relay_tracking_state)
 
-        self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection) # pyrefly: ignore this is valid despite stub
+        self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection) # type: ignore this is valid
 
     def set_metadata_store(self, store: NodeMetadataStore) -> None:
         self._metadata_store = store
@@ -90,7 +91,7 @@ class Dispatcher(QObject):
                 logger.warning(f'No handler for {source.name}')
                 return []
             return self._load_physical(handler_class, source)
-        
+
         if source.children or source.expansion_pending:
             return source.children or []
 
@@ -98,7 +99,7 @@ class Dispatcher(QObject):
         if not profile:
             logger.warning(f'No profile or {source.name}, cannot expand.')
             return []
-        
+
         action_def = profile.primary_expand_action()
         if not action_def:
             logger.debug(f'{source.name} has no TREE_EXPAND action')
@@ -111,10 +112,10 @@ class Dispatcher(QObject):
             source,
             self.nav,
         )
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         task_handle.finished.connect(self._on_action_complete)
-        return [] # signal populates the tree ^^^
-    
+        return []  # signal populates the tree ^^^
+
     def get_node_data(self, node: VfsNode) -> bytes:
         '''Return the raw bytes of the requested node, unwrapping virtual to the physical source'''
         pending = node.pending_data
@@ -131,9 +132,9 @@ class Dispatcher(QObject):
         return self.nav.unwrap_chain(node)
 
     def apply_edit(
-        self, 
-        node: VfsNode, 
-        data: Any, 
+        self,
+        node: VfsNode,
+        data: Any,
         editor: BaseEditor | None = None,
         on_success: Callable[[], None]    | None = None,
         on_failure: Callable[[str], None] | None = None,
@@ -167,7 +168,7 @@ class Dispatcher(QObject):
             data
         )
         task_handle.log_message.connect(
-            self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit
+            self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit
         )
         task_handle.finished.connect(
             functools.partial(self._on_decode_done, node, on_success, on_failure)
@@ -177,7 +178,7 @@ class Dispatcher(QObject):
     def open_editor(self, node: VfsNode, editor: BaseEditor) -> TaskHandle | None:
         '''
         Start background data preparation for an editor
-        
+
         Returns a TaskSignal of either:
             Success   - EditorPayload(node, data)
             Exception - (False, str)
@@ -205,7 +206,7 @@ class Dispatcher(QObject):
             self.nav,
         )
         # Connect signals
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         return task_handle
 
     def execute_node_action(self, node: VfsNode, action_name: str, **kwargs) -> None:
@@ -233,11 +234,11 @@ class Dispatcher(QObject):
         task_handle = self.task_coordinator.start_task(
             Actions.dispatch,
             action_def,
-            node, 
+            node,
             self.nav,
             **kwargs
             )
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         task_handle.finished.connect(self._on_action_complete)
 
     def start_iso_rebuild(self, output_path: Path) -> TaskHandle | None:
@@ -245,7 +246,7 @@ class Dispatcher(QObject):
             self.rebuild_complete.emit(False, 'No ISO Loaded.')
             return
         self._rebuild_active = True
-        
+
         staged_nodes = list(self.tracker.rebuild_queue)
         self.rebuild_log.emit(f'Preparing to build {len(staged_nodes)} staged file(s)...')
 
@@ -307,7 +308,7 @@ class Dispatcher(QObject):
             ancestor,
             self.nav,
         )
-        handle.log_message.connect(self.workspace_log.emit)
+        handle.log_message.connect(self.file_browser_log.emit)
         handle.finished.connect(functools.partial(self._on_layer_done, ancestor.hierarchical_id))
 
     def _on_layer_done(
@@ -375,7 +376,7 @@ class Dispatcher(QObject):
             handler_class,
             path
         )
-        task_handle.log_message.connect(self.workspace_log.emit)
+        task_handle.log_message.connect(self.file_browser_log.emit)
         task_handle.finished.connect(self._on_iso_loaded)
         return task_handle
 
@@ -429,7 +430,7 @@ class Dispatcher(QObject):
             node,
             self.nav,
         )
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         task_handle.finished.connect(functools.partial(self._on_expand_done, node, wait_event))
 
     def _on_iso_loaded(self, success: bool, result: object) -> None:
@@ -456,10 +457,10 @@ class Dispatcher(QObject):
         self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
         # self._migrate_targets_if_needed()   #Uncomment for building metadata from scratch
         verify_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
-        verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.workspace_log.emit)
+        verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         verify_handle.finished.connect(self._on_iso_verified)
         self.iso_loaded.emit([root])
-        
+
     def _on_rebuild_finished(self, success: bool, result: Any) -> None:
         '''Verify type of result and pack signal'''
         self._rebuild_active = False
@@ -482,17 +483,17 @@ class Dispatcher(QObject):
         if not success or not isinstance(result, ActionResult):
             logger.error(f'Action task failed unexpectedly: {result}')
             return
-        
+
         if result.status == ActionStatus.FAILURE:
             logger.error(f'Action "{result.action_name}" failed: {result.message}')
             self.action_complete.emit(result)
             return
-        
+
         action_def = Registry.get_action(result.node, result.action_name)
         if not action_def:
             self.action_complete.emit(result)
             return
-        
+
         match action_def.action_type:
             case ActionType.IMPORT:
                 # edits get applied via fallback handler, prevents silent failing
