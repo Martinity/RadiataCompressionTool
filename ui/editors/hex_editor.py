@@ -15,7 +15,7 @@ from core.handlers.generic_binary_leaf import GenericBinaryHandler
 from core.registry import Registry
 from core.node import VfsNode
 from ui.hex_model import (
-    HexTableView, BYTES_PER_ROW, EDITABLE_COLUMNS, COL_OFFSET, 
+    HexTableView, BYTES_PER_ROW, EDITABLE_COLUMNS, COL_OFFSET,
     COL_BYTE_START, COL_ASCII, HexGridModelBase
 )
 
@@ -124,8 +124,8 @@ class HexEditorWidget(BaseEditor):
         return frame
 
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence('Ctrl+C'), self).activated.connect(lambda: self._copy('hex'))
-        QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self.search_input.setFocus)
+        QShortcut(QKeySequence.StandardKey.Copy, self).activated.connect(lambda: self._copy('hex'))
+        QShortcut(QKeySequence.StandardKey.Find, self).activated.connect(self.search_input.setFocus)
 
     def show_error(self, message: str) -> None:
         '''Swap to the editor page in the stack and display error.'''
@@ -178,8 +178,9 @@ class HexEditorWidget(BaseEditor):
         '''Revert the editor to the last saved state.'''
         if not self.is_dirty() or not self.current_node:
             return
-        self._pending_data = None
-        self._populate_ui(self._original_payload)
+        clean_idx = self.undo_stack.cleanIndex()
+        if clean_idx >= 0:
+            self.undo_stack.setIndex(clean_idx)
 
     def undo(self) -> None:
         self.undo_stack.undo()
@@ -449,7 +450,7 @@ class HexTableModel(HexGridModelBase):
                 self._modified.add(pos)
             else:
                 self._modified.discard(pos)
-            
+
             row = pos // BYTES_PER_ROW
             col = (pos % BYTES_PER_ROW) + COL_BYTE_START
             idx: QModelIndex = self.index(row, col)

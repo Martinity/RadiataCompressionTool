@@ -182,10 +182,9 @@ class EditorPage(QWidget):
         self.btn_save   = QPushButton('Save')
         self.btn_save.setObjectName('BtnImportant')
 
-        self.btn_undo.setToolTip('Ctrl+Z')
-        self.btn_redo.setToolTip('Ctrl+Y')
-        self.btn_revert.setToolTip('Ctrl+R')
-        self.btn_save.setToolTip('Ctrl+S')
+        self.btn_undo.setToolTip(QKeySequence(QKeySequence.StandardKey.Undo).toString())
+        self.btn_redo.setToolTip(QKeySequence(QKeySequence.StandardKey.Redo).toString())
+        self.btn_save.setToolTip(QKeySequence(QKeySequence.StandardKey.Save).toString())
 
         self.btn_undo.clicked.connect(self._on_undo)
         self.btn_redo.clicked.connect(self._on_redo)
@@ -208,19 +207,16 @@ class EditorPage(QWidget):
         self._set_toolbar_enabled(False)
 
     def _setup_shortcuts(self) -> None:
-        self._back_shortcut = QShortcut(QKeySequence('Esc'), self)
+        self._back_shortcut = QShortcut(QKeySequence.StandardKey.Cancel, self)
         self._back_shortcut.activated.connect(self._back_btn.click)
 
-        self.save_shortcut = QShortcut(QKeySequence('Ctrl+S'), self)
+        self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self.save_shortcut.activated.connect(self._on_save)
 
-        self.revert_shortcut = QShortcut(QKeySequence('Ctrl+R'), self)
-        self.revert_shortcut.activated.connect(self._on_revert)
-
-        self.undo_shortcut = QShortcut(QKeySequence('Ctrl+Z'), self)
+        self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self.undo_shortcut.activated.connect(self._on_undo)
 
-        self.redo_shortcut = QShortcut(QKeySequence('Ctrl+Y'), self)
+        self.redo_shortcut = QShortcut(QKeySequence.StandardKey.Redo, self)
         self.redo_shortcut.activated.connect(self._on_redo)
 
     def load_editor(self, session: EditorSession) -> None:

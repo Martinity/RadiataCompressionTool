@@ -49,7 +49,7 @@ from core.node import VfsNode
 from core.version import __version__
 from core.workers import TaskHandle
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardItemModel
+from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardItemModel, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenuBar,
     QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QTextEdit,
@@ -447,12 +447,12 @@ class MainMenuBar:
         file_menu.addSeparator()
 
         self.open_action = QAction('Open ISO', self.window)
-        self.open_action.setShortcut('Ctrl+O')
+        self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_action.triggered.connect(self._handle_open)
         file_menu.addAction(self.open_action)
 
         self.close_action = QAction('Close ISO', self.window)
-        self.close_action.setShortcut('Ctrl+W')
+        self.close_action.setShortcut(QKeySequence.StandardKey.Close)
         self.close_action.setEnabled(False)
         self.close_action.triggered.connect(self._handle_close)
         file_menu.addAction(self.close_action)
@@ -460,7 +460,7 @@ class MainMenuBar:
         file_menu.addSeparator()
 
         exit_action = QAction('Exit', self.window)
-        exit_action.setShortcut('Ctrl+Q')
+        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
         exit_action.triggered.connect(self._handle_exit)
         file_menu.addAction(exit_action)
 
@@ -485,8 +485,8 @@ class MainMenuBar:
         zoom_in  = QAction('Zoom In', self.window)
         zoom_out = QAction('Zoom out', self.window)
         zoom_rst = QAction('Reset Zoom', self.window)
-        zoom_in.setShortcut('Ctrl+=')
-        zoom_out.setShortcut('Ctrl+-')
+        zoom_in.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        zoom_out.setShortcut(QKeySequence.StandardKey.ZoomOut)
         zoom_rst.setShortcut('Ctrl+0')
         zoom_in.triggered.connect(lambda: self.window.adjust_zoom(+1))
         zoom_out.triggered.connect(lambda: self.window.adjust_zoom(-1))
@@ -495,6 +495,7 @@ class MainMenuBar:
             view_menu.addAction(act)
 
         # Toggles
+        view_menu.addSeparator()
         toggle_log = QAction('Show Log Console', self.window)
         toggle_log.setCheckable(True)
         toggle_log.setChecked(self.settings.show_log_console)

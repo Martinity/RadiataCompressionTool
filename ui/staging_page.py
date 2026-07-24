@@ -320,7 +320,7 @@ class StagingPage(QWidget):
         self.staged_list.currentItemChanged.connect(self._on_item_changed)
 
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence('Esc'), self).activated.connect(self.request_workspace.emit)
+        QShortcut(QKeySequence.StandardKey.Cancel, self).activated.connect(self.request_workspace.emit)
 
     def refresh_lists(self) -> None:
         """Modifies the list of modified nodes"""
