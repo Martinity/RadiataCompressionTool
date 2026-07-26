@@ -1,6 +1,8 @@
 """PhysicalHandler ISO related processing. Extraction, rebuilding, TOC parsing, disk verification"""
 
 from __future__ import annotations
+from inspect import Signature
+from ast import main
 
 import logging
 import struct
@@ -29,30 +31,30 @@ _KNOWN_BUILDS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class RootDirectoryStructure:
-    entry_length: int
-    extended_attribute: int
-    lba: int
-    file_size: int
-    date: bytes
-    flag: int
-    interleave_gap: int
+    entry_length:           int
+    extended_attribute:     int
+    lba:                    int
+    file_size:              int
+    date:                   bytes
+    flag:                   int
+    interleave_gap:         int
     volume_sequence_number: int
-    filename_length: int
-    file_name: str
+    filename_length:        int
+    file_name:              str
 
     @classmethod
     def from_bytes(cls, record_data: bytes) -> RootDirectoryStructure:
         # Unpack the entry
         entry_length = record_data[0]
-        ext_attr = record_data[1]
-        lba = struct.unpack('<I', record_data[2:6])[0] * 0x800
-        file_size = struct.unpack('<I', record_data[10:14])[0]
-        date_bytes = record_data[18:25]
-        flags = record_data[25]
-        gap_size = record_data[27]
-        vol_seq = struct.unpack('<H', record_data[28:30])[0]
-        name_len = record_data[32]
-        raw_name = record_data[33 : 33 + name_len]
+        ext_attr     = record_data[1]
+        lba          = struct.unpack('<I', record_data[2:6])[0] * 0x800
+        file_size    = struct.unpack('<I', record_data[10:14])[0]
+        date_bytes   = record_data[18:25]
+        flags        = record_data[25]
+        gap_size     = record_data[27]
+        vol_seq      = struct.unpack('<H', record_data[28:30])[0]
+        name_len     = record_data[32]
+        raw_name     = record_data[33 : 33 + name_len]
         if raw_name == b'\x00':
             file_name = '.'
         elif raw_name == b'\x01':
@@ -74,6 +76,7 @@ class RootDirectoryStructure:
 
     @classmethod
     def to_bytes(cls, record: RootDirectoryStructure) -> bytes:
+        # Pack the entry
 
         return bytes()
 
@@ -88,32 +91,52 @@ class IsoHandler(PhysicalHandler):
     @dataclass(slots=True)
     class IsoParameters:
         """Hardcoded disk parameters"""
-
-        seed: int = 0x13578642
-        signature: int = 0x27D51556  # raw scrambled TOC self-reference
-        toc_offset: int = 0x3C6C1800
-        total_entries: int = 0x1200
-        sector_size: int = 0x800
-        iso_9660_pvd: int = 16
+        seed:                   int = 0x13578642
+        signature:              int = 0x27D51556  # raw scrambled TOC self-reference
+        toc_offset:             int = -1
+        total_entries:          int = 0x1200
+        sector_size:            int = 0x800
+        iso_9660_pvd:           int = 16
         root_dir_record_offset: int = 0x9C
 
     def __init__(self, iso_path: Path, parent=None):
         """Initialize iso properties"""
         super().__init__(iso_path)
         logger.info(f'IsoHandler initialized for {iso_path.name}')
-        self.source = iso_path
-        self.params = self.IsoParameters()
-        self.status = 'Unverified'
-        self.toc = self._process_toc(self._load_toc())
-        logger.debug(f'TOC loaded: {self.params.total_entries} entries')
+        self.source: Path = iso_path
+        self.params       = self.IsoParameters()
+        self.toc: list    = []
+        self.toc_location = -1
+        self.cnf: tuple[int, int] | None = None
 
-    def __repr__(self) -> str:
-        return f'Build:{self.status}'
+    def get_raw_node(self, node: VfsNode) -> bytes:
+        """Called for the raw data of a physical node with a private handle"""
+        with open(self.path, 'rb') as fh:
+            fh.seek(node.offset)
+            data = fh.read(node.size)
+
+        logger.debug(
+            f'Read {len(data) // self.params.sector_size} sectors from offset {hex(node.offset)}'
+        )
+        return data
 
     ###------------------------------------ Extract ISO ------------------------------------###
 
-    def get_iso_dir(self) -> VfsNode:
-        root = VfsNode(name='dummy')
+    def _get_iso_dir(self) -> VfsNode:
+        '''
+        Returns the root node of the ISO directory tree containing all files.
+        '''
+        SIGNATURE        = b'RADIATA'
+        SIGNATURE_OFFSET = 0x28
+        SIGNATURE_LENGTH = 7
+        self.handle.seek((self.params.iso_9660_pvd * self.params.sector_size) + SIGNATURE_OFFSET)
+        title = bytes(self.handle.read(SIGNATURE_LENGTH))
+        if title != SIGNATURE:
+            raise ValueError(
+                f'Not a Radiata Stories disk. Found {title}, expected {SIGNATURE}'
+            )
+
+        root = VfsNode(name='root')
         # Read descriptor volume for root dir location
         self.handle.seek(
             (self.params.iso_9660_pvd * self.params.sector_size)
@@ -126,14 +149,11 @@ class IsoHandler(PhysicalHandler):
         # Read root dir for files
         bytes_read = 0
         self.handle.seek(pvd.lba)
-        root_dir_mm = memoryview(self.handle.read(pvd.file_size))
-        if root_dir_mm[0x2E : 0x2E + 7] != b'RADIATA':
-            raise ValueError(
-                f'Not a Radiata Stories disk. Found {root_dir_mm[0x2E : 0x2E + 7]}, expected {b"RADIATA"}'
-            )
+        root_dir_view = memoryview(self.handle.read(pvd.file_size))
+
         while bytes_read < pvd.file_size:
-            entry_length = root_dir_mm[bytes_read]
-            bytes_read += 1
+            entry_length = root_dir_view[bytes_read]
+            bytes_read  += 1
             if not entry_length:
                 break
             # Check for sector padding between entries (probably pointless...)
@@ -142,10 +162,10 @@ class IsoHandler(PhysicalHandler):
                 if padding_to_skip < self.params.sector_size:
                     bytes_read += padding_to_skip
                 continue
-            record_slice = root_dir_mm[bytes_read - 1 : bytes_read - 1 + entry_length]
+            record_slice = root_dir_view[bytes_read - 1 : bytes_read - 1 + entry_length]
             bytes_read += entry_length - 1
             record = RootDirectoryStructure.from_bytes(record_slice.tobytes())
-            if record.file_name in ('.', '..'):
+            if record.file_name in ('.', '..'): # Skip self-references
                 continue
             name, sep, ext = record.file_name.rpartition('.')
             node = VfsNode(
@@ -159,7 +179,10 @@ class IsoHandler(PhysicalHandler):
             )
             node.is_physical = True
             root.append_child(node)
+            if ext == 'CNF':
+                self.cnf = (record.lba * self.params.sector_size, record.file_size)
 
+        # ISO Integrity Check
         found_names = {child.name for child in root.children}
         required_files = {'IOPRP300', 'SYSTEM'}
         has_system_files = required_files.issubset(found_names)
@@ -171,81 +194,121 @@ class IsoHandler(PhysicalHandler):
 
         return root
 
-    def get_file_tree(self) -> VfsNode:
-        """Returns the root node of the VFS (the disk)"""
+    def _get_vfs_dir(self, toc: list[dict[str, Any]]) -> VfsNode:
+        '''
+        Returns the root node of the VFS (the toc/gameassets)
+        '''
         logger.debug('Building VFS tree from TOC')
-        root = VfsNode(name='Radiata Stories ISO')
+        root = VfsNode(name='VFS Mount-point', size=-1, offset=-1)
+        root.is_hidden   = False
+        root.is_boundary = True
 
-        semantic_names: dict[int, str] = generate_name_overrides()
+        # semantic_names: dict[int, str] = generate_name_overrides()
 
-        for entry in self.toc:
+        for entry in toc:
             disk_index = entry['id']
-            offset = entry['offset'] if disk_index != 0 else self.params.toc_offset
-            self.handle.seek(offset)
-            if entry['size'] == 0:  # Dummy node
-                dummy_node = VfsNode(
-                    name=f'sentinel_{disk_index:04d}',
-                    offset=offset,
-                    size=0,
+            if entry['size'] == 0:  # null entries
+                self_reference_node = VfsNode(
+                    name=f'sentinel {disk_index}',
+                    offset=self.params.toc_offset,
+                    size=self.params.total_entries * self.params.sector_size,
                     parent=root,
                 )
-                dummy_node.is_hidden = True
-                root.append_child(dummy_node)
+                self_reference_node.is_hidden = True
+                root.append_child(self_reference_node)
                 continue
 
             # Real node
-            header: bytes = self.handle.read(32)
-            ext: str = lookup_extension(header, self._check_pk(header))
-            semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
+            # header: bytes = self.handle.read(32)
+            # ext: str = lookup_extension(header, self._check_pk(header))
+            # semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
 
             node = VfsNode(
-                name=semantic_name or 'Unknown',
+                name='Unknown',
                 category=('',),
-                offset=offset,
+                offset=entry['offset'],
                 size=(entry['size'] * self.params.sector_size),
                 parent=root,
-                header=header,
-                extension=ext,
+                # header=header,
+                # extension=ext,
                 target=None,
             )
             node.is_physical = True  # Set as reference node for all file processes
             root.append_child(node)
             if disk_index in [0, 5]:  # Hide file system nodes
                 node.is_hidden = True
-        logger.info(f'Tree built — {len(root.children)} valid files')
+        logger.info(f'Tree built - {len(root.children)} total files - {sum(1 for valid in root.children if valid.is_hidden is True)} hidden files')
         return root
 
-    def get_raw_node(self, node: VfsNode) -> bytes:
-        """Called for the raw data of a physical node with a private handle"""
-        with open(self.path, 'rb') as fh:
-            fh.seek(node.offset)
-            data = fh.read(node.size)
+    def get_file_tree(self) -> VfsNode:
+        """
+        Return the entire ISO file tree required for runtime.
 
-        logger.debug(
-            f'Read {len(data) // self.params.sector_size} sectors from offset {hex(node.offset)}'
-        )
-        return data
+        The final iso_root entry is always the vfs_root node.
+        This is crucial to ensure the VfsManager tracks relational data correctly.
 
-    def _read_node_from(self, file_handle, node: VfsNode) -> None:
-        """Called for raw data of a physical node with an already open handle"""
-        file_handle.seek(node.offset)
-        return file_handle.read(node.size)
+        Dynamically locate the TOC offset and process the TOC data.
+        """
+        iso_root = self._get_iso_dir()
+        self._locate_toc_offset(iso_root)
+        structured_toc = self._process_toc(self._load_toc())
+        iso_root.append_child(self._get_vfs_dir(structured_toc))
+        return iso_root
 
     ###----------------------------- TOC Parsing ---------------------------------###
+    #
+    def _locate_toc_offset(self, root: VfsNode) -> None:
+        """
+        Locate the TOC offset and update the IsoParameters.
+        To locate the TOC offset we scan the main ELF for a masked signature.
+        """
+        elf_bytes: bytes | None = None
+        for child in root.children:
+            if child.name.startswith('SLUS') or child.name.startswith('SLPM'):
+                self.handle.seek(child.offset)
+                elf_bytes = bytes(self.handle.read(child.size))
+                break
+        if elf_bytes is None:
+            raise ValueError('No main ELF found.')
 
-    def _load_toc(self) -> bytes:
+        separator  = b'\x2D\x20\x20\x02'
+        static_lui = b'\x02\x3C'
+        static_ori = b'\x42\x34'
+        toc_offset = 0
+        pos = 0
+        while pos < (len(elf_bytes) - 8):
+            pos = elf_bytes.find(separator, pos)
+            if pos == -1:
+                break
+            if pos % 4 != 0: # Alignement
+                pos += 1
+                continue
+            # Check for LUI/ORI mask signature in the previous and subsequent words' low nibbles
+            if (elf_bytes[pos - 2 : pos] == static_lui and
+                elf_bytes[pos + 6 : pos + 8] == static_ori
+            ):
+                hi_val = int.from_bytes(elf_bytes[pos - 4 : pos - 2], 'little')
+                lo_val = int.from_bytes(elf_bytes[pos + 4 : pos + 6], 'little')
+                toc_offset = (hi_val << 16) | lo_val
+                break
+            pos += 4
+        if toc_offset == 0:
+            raise ValueError('Failed to locate TOC offset in main ELF.')
+        self.toc_location = pos # To be reused for ISO rebuilding to change the TOC offset
+        self.params.toc_offset = toc_offset
+
+    def _load_toc(self) -> memoryview:
         """Locate the TOC."""
         # Check for radiata ISO
-        self.handle.seek(self.params.toc_offset)
-        signature = struct.unpack('<I', self.handle.read(4))[0]
-        if self.params.signature != signature:
+        self.handle.seek(self.params.toc_offset * self.params.sector_size)
+        toc_view = memoryview(self.handle.read(self.params.total_entries * 3 * 4))
+        if self.params.signature != int.from_bytes(toc_view[:4], 'little'):
             raise ValueError(
-                f'Not a Radiata Stories Iso. Bad signature at TOC offset: {hex(signature)}'
+                f'Not a Radiata Stories TOC. Got TOC signature: {int.from_bytes(toc_view[:4], 'little')} Expected: {hex(self.params.signature)}'
             )
-        self.handle.seek(self.params.toc_offset)
-        return self.handle.read(self.params.total_entries * 3 * 4)
+        return toc_view
 
-    def _process_toc(self, scrambled_toc: bytes) -> list[dict[str, Any]]:
+    def _process_toc(self, scrambled_toc: memoryview) -> list[dict[str, Any]]:
         """Unscramble and structure the TOC data"""
         total = self.params.total_entries
         toc = list(struct.unpack(f'<{total * 3}I', scrambled_toc))
@@ -359,6 +422,11 @@ class IsoHandler(PhysicalHandler):
                     logger.error(f'Could not remove partial output: {err}')
             return False
 
+    def _read_node_from(self, file_handle, node: VfsNode) -> None:
+        """Called for raw data of a physical node with an already open handle"""
+        file_handle.seek(node.offset)
+        return file_handle.read(node.size)
+
     def _stream_copy(self, source_handle, output_obj, length, chunk_size=1024 * 1024):
         """Helper for writing out one segment or node at a time"""
         bytes_left = length
@@ -420,7 +488,7 @@ class IsoHandler(PhysicalHandler):
         return 'Unknown'
 
     def verify_iso_integrity(self, task_handle: TaskHandle) -> str:
-        """Verify radiata iso. Check what version of the disk is running."""
+        '''Read SYSTEM.CNF for the release version'''
         # Check hash against known hashes
         with open(self.path, 'rb') as fh:
             hasher = xxhash.xxh128()

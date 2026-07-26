@@ -342,7 +342,7 @@ class FileBrowserBehavior(QObject):
             hid = tuple(map(int, entry.hid_str.split('.')))
             ancestor = self.dispatcher.vfs.find_nearest_ancestor(hid)
             if ancestor is not None:
-                node = self.dispatcher.vfs.get_node_by_id(hid)
+                node = self.dispatcher.vfs.get_vfs_node_by_id(hid)
         if node is None:
             logger.warning(f'No node found for id:({entry.hid_str})')
             return
@@ -385,7 +385,7 @@ class FileBrowserBehavior(QObject):
         hid   = tuple(map(int, entry.hid_str.split('.')))
         if not node and self.dispatcher.vfs:
             self.dispatcher.resolve_ghost_node(hid, self._handle_goto)
-            node = self.dispatcher.vfs.get_node_by_id(hid)
+            node = self.dispatcher.vfs.get_vfs_node_by_id(hid)
         if not node:
             logger.error(f'No node found for ({hid})')
             return

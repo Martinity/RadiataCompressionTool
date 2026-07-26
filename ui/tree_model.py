@@ -405,7 +405,7 @@ class FlatSearchModel(QAbstractListModel):
         if hid_str in self._hid_to_idx:
             self._on_entry_updated(hid_str)
             return
-        node = self._vfs.get_node_by_id(tuple(map(int, hid_str.split('.'))))
+        node = self._vfs.get_vfs_node_by_id(tuple(map(int, hid_str.split('.'))))
         entry = (
             self._build_entry(node)
             if node and not node.is_hidden

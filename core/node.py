@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 from enum import Enum, auto
-from typing import Tuple, NamedTuple, Callable, TYPE_CHECKING
+from typing import NamedTuple, Callable, TYPE_CHECKING
 from PyQt6.QtCore import pyqtSignal, QObject
 if TYPE_CHECKING:
     from core.handlers.compression_container import CompressorHandler
@@ -23,16 +23,16 @@ class NodeStatus(Enum):
 class VfsNode:
     '''Pure Data Container. All files whether iso, kods, or raw are all nodes. '''
     def __init__(
-        self, 
-        name:      str = 'Undefined', 
-        category:  Tuple[str, ...] = ('Unknown',), 
-        offset:    int = 0, 
-        size:      int = 0, 
-        header:    bytes = b'', 
-        extension: str = '.bin', 
+        self,
+        name:      str = 'Undefined',
+        category:  tuple[str, ...] = ('Unknown',),
+        offset:    int = 0,
+        size:      int = 0,
+        header:    bytes = b'',
+        extension: str = '.bin',
         parent:    VfsNode | None = None,
-        hid:       Tuple[int, ...] = (),
-        target:    Tuple[int, ...] | None = None,
+        hid:       tuple[int, ...] = (),
+        target:    tuple[int, ...] | None = None,
     ):
         self.name     = name                                # semantic name from overrides
         self.category = category                            # semantic category derived from disk index
@@ -41,20 +41,20 @@ class VfsNode:
 
         self.offset = offset                                # Relative offset into parent
         self.size   = size                                  # Size of node in bytes (VirtualFile=disk[offset:offset+size])
-        self.target: Tuple[int,...] | None = target         # Header HID for unpacking datacenter
+        self.target: tuple[int,...] | None = target         # Header HID for unpacking datacenter
 
         self.header    = header                             # raw header
         self.extension = extension                          # extension from override
         self.compressed_header: CompressorHandler.SlzHeader | None = None        # SLZ source header
 
-        self._id_path: Tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
+        self._id_path: tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
 
         self.status = NodeStatus.UNMODIFIED                 # node state
         self.pending_data: bytes | None = None              # cached data
 
-        # Flags; Useful for rebuild and UI
         self.is_physical   = False                          # Has physical address
         self.is_hidden     = False                          # Hide node in UI (file system related or null nodes by default)
+        self.is_boundary   = False                          # The entrypoint node for the VFS (always the last node appended to root)
 
         self.expansion_pending: bool = False                 # Threading active bool
         self._expansion_event: threading.Event | None = None # Threading event for active thread
@@ -63,22 +63,29 @@ class VfsNode:
         self._row: int = 0                                   # Cached row index within parent
 
     def append_child(self, child: VfsNode):
-        '''Allow children nodes'''
+        '''
+        Called to add a child node to this node.
+        Keeps separate HID increments for ISO and VFS nodes, split by boundary flag.
+        '''
         self.children.append(child)
         child.parent = self
-        child._id_path = self._id_path + (len(self.children) - 1,)
         child._row = len(self.children) - 1
 
+        if self.is_boundary:
+            child._id_path = (child._row,)
+        else:
+            child._id_path = self._id_path + (child._row,)
+
     @property
-    def hierarchical_id(self) -> Tuple[int, ...]:
+    def hierarchical_id(self) -> tuple[int, ...]:
         '''Return tuple id'''
         return self._id_path
-    
+
     @property
     def hierarchical_id_str(self) -> str:
         '''Return human readable id'''
         return '.'.join(map(str, self._id_path)) if self._id_path else '0'
-    
+
     @property
     def visible_children(self) -> list[VfsNode]:
         return [child for child in self.children if not getattr(child, 'is_hidden', False)]
@@ -88,7 +95,7 @@ class VfsNode:
         if self.parent is None:
             return 0
         return self._row
-        
+
     def begin_expansion(self) -> threading.Event:
         '''Mark expansion in progress. Return wait event.
         If an expansion is already pending and an event exists, return the existing
@@ -98,14 +105,14 @@ class VfsNode:
         self._expansion_event = threading.Event()
         self.expansion_pending = True
         return self._expansion_event
-    
+
     def finish_expansion(self) -> None:
         '''Signal expansion complete'''
         self.expansion_pending = False
         self._expansion_task_active = False
         if self._expansion_event:
             self._expansion_event.set()
-        
+
     def clear_pending(self):
         self.pending_data = None
         self.status = NodeStatus.UNMODIFIED
@@ -120,43 +127,71 @@ class VfsNode:
 class HidSnapshot(NamedTuple):
     '''Result of a lock-protect VFS snapshot'''
     resolved: list[VfsNode]             # nodes already in the VFS
-    unresolved: list[Tuple[int, ...]]   # HIDs whose parent need expansion
+    unresolved: list[tuple[int, ...]]   # HIDs whose parent need expansion
 
 class VfsManager(QObject):
-    '''Virtual File System Manager. Bridge between the dispatcher and node'''
-    insert_start = pyqtSignal(VfsNode, int, int) # (parent, first_row, last_row)
-    insert_finished = pyqtSignal()
+    '''
+    Holds O(N) node lookup tables for VFS and ISO nodes.
 
-    def __init__(self, root_node: VfsNode, node_enricher: Callable[[VfsNode], None] | None = None) -> None:
+    Registration is valid for both VFS and ISO nodes during init.
+    After which, the only way to register new ISO nodes is to add a child to root.
+    '''
+    insert_start      = pyqtSignal(VfsNode, int, int) # (parent, first_row, last_row)
+    insert_finished   = pyqtSignal()
+
+    request_extension = pyqtSignal(VfsNode)           # Request extension for a node that has '.bin' extension
+
+    def __init__(
+        self,
+        root:          VfsNode,
+        vfs_entry:     VfsNode,
+        node_enricher: Callable[[VfsNode], None] | None = None,
+    ) -> None:
         super().__init__()
-        self.root        = root_node
+        self.root        = root
+        self.vfs_entry   = vfs_entry
         self.enrich_node = node_enricher
         self._lock       = threading.RLock()
-       
-        self.nodes_by_id:      dict[Tuple[int, ...], VfsNode] = {}  # Flat path lookup map
+
+        self.vfs_nodes_by_id:  dict[tuple[int, ...], VfsNode] = {}  # VFS-only hid lookup map
+        self.iso_nodes_by_id:  dict[tuple[int, ...], VfsNode] = {}  # ISO-only hid lookup map, only mutated during init
         self.physical_offsets: dict[VfsNode, int] = {}              # Physical disk map
-        # Initialize root with offset 0
-        self._register_recursive(self.root) # Register physical nodes with VFS initilization
-    
+        self._register_recursive(self.root, self.iso_nodes_by_id)   # Register physical nodes with VFS initilization
+
     ###--------------------- Registration ----------------------###
 
-    def _register_recursive(self, node: VfsNode, is_physical: bool = False, disk_base: int = 0):
-        '''Register node and all its children. Must be called inside _lock after initialization.'''
-        self.nodes_by_id[node.hierarchical_id] = node
-        if is_physical:
-            self.physical_offsets[node] = disk_base + node.offset
-        for child in node.children:
-            self._register_recursive(child)
+    def _register_recursive(self, node: VfsNode, target_dict: dict[tuple[int, ...], VfsNode]) -> None:
+        '''
+        Register node and all its children.
+        Node is registered in the target_dict (vfs or iso).
 
-    def register_node(self, node: VfsNode):
-        with self._lock:
-            self._register_recursive(node)
+        After initialization, must be called inside _lock.
+        '''
+        target_dict[node.hierarchical_id] = node
+        self.physical_offsets[node] = node.offset
+
+        next_dict = self.vfs_nodes_by_id if node is self.vfs_entry else target_dict
+        for child in node.children:
+            self._register_recursive(child, next_dict)
 
     def insert_children(self, parent: VfsNode, new_children: list[VfsNode]) -> None:
-        '''Update the VFS and signal to the tree model'''
+        '''
+        Update the VFS and signal to the tree model.
+
+        Enforces all iso level nodes to be registered at initialization, not lazily via insert_children.
+        Unfortunately also enforces all iso level nodes to be depth 1.
+        Not really a problem for anything unless the project expands to splitting the kernel image or main ELF.
+        '''
         if not new_children:
             return
-        
+        assert parent is not self.vfs_entry, (
+            'vfs_entry\'s children must be populated at initialization, not lazily via insert_children'
+        )
+        OVERLAYS = [
+            'Step0_00', 'Step1_00', 'Step1_01', 'Step1_02', 'Step2_00', 'Step2_01',
+            'Step2_99', 'hoshi', 'kushi', 'nishi', 'yoko', 'kame', 'RouteEditor',
+            'CharaChecker', 'RmfChecker', 'T10000'
+        ]
         with self._lock:
             base_idx = len(parent.children)
             self.insert_start.emit(parent, base_idx, base_idx + len(new_children) - 1)
@@ -164,19 +199,23 @@ class VfsManager(QObject):
                 child.parent = parent
                 child._id_path = parent._id_path + (base_idx + i,)
                 child._row = base_idx + i
-                child.is_hidden = True if parent.is_hidden or not child.size or child.offset == -1 else False
+                child.is_hidden = bool(parent.is_hidden or not child.size or child.offset == -1)
                 if self.enrich_node:
                     self.enrich_node(child)
+                if child.extension == '.bin' and child.name not in OVERLAYS and child.offset != -1:
+                    self.request_extension.emit(child)
                 parent.children.append(child)
-                self._register_recursive(child)
+                self._register_recursive(child, self.vfs_nodes_by_id)
             self.insert_finished.emit()
 
     def enrich_initial_tree(self) -> None:
         '''Walk the tree after initialization enriching nodes with metadata'''
         if not self.enrich_node:
             return
-        for child in self.root.children:
+        for child in self.root.children[-1].children:
             self.enrich_node(child)
+            if child.extension == '.bin' and 'sentinel' not in child.name:
+                self.request_extension.emit(child)
         logger.debug('VfsManager.enrich_initial_tree: complete')
 
     ###--------------------- Lookup -----------------------###
@@ -185,39 +224,44 @@ class VfsManager(QObject):
         '''Get physical disk offsets'''
         return self.physical_offsets.get(node, 0)
 
-    def get_node_by_id(self, hid: Tuple[int, ...]) -> VfsNode | None:
-        '''Node lookup for known registered nodes.'''
+    def get_vfs_node_by_id(self, hid: tuple[int, ...]) -> VfsNode | None:
+        '''Node lookup for known vfs registered nodes.'''
         with self._lock:
-            return self.nodes_by_id.get(hid)
-    
+            return self.vfs_nodes_by_id.get(hid)
+
+    def get_iso_node_by_id(self, hid: tuple[int, ...]) -> VfsNode | None:
+        '''Node lookup for known iso registered nodes.'''
+        with self._lock:
+            return self.iso_nodes_by_id.get(hid)
+
     ###-------------------- Navigator API ------------------###
 
-    def snapshot_hids(self, hids: list[Tuple[int,...]]) -> HidSnapshot:
+    def snapshot_hids(self, hids: list[tuple[int,...]]) -> HidSnapshot:
         '''Lock-protected snapshot. Return nodes already in the VFS'''
         resolved:   list[VfsNode] =[]
-        unresolved: list[Tuple[int,...]] = []
+        unresolved: list[tuple[int,...]] = []
 
         with self._lock:
             for hid in hids:
-                node = self.nodes_by_id.get(hid)
+                node = self.vfs_nodes_by_id.get(hid)
                 if node:
                     resolved.append(node)
                 else:
                     unresolved.append(hid)
 
         return HidSnapshot(resolved, unresolved)
-    
-    def find_nearest_ancestor(self, hid: Tuple[int,...]) -> VfsNode | None:
+
+    def find_nearest_ancestor(self, hid: tuple[int,...]) -> VfsNode | None:
         '''Return the nearest ancestor for an HID, the node that needs expanding'''
         with self._lock:
             best: VfsNode | None = None
             for depth in range(1, len(hid)):
-                ancestor = self.nodes_by_id.get(hid[:depth])
+                ancestor = self.vfs_nodes_by_id.get(hid[:depth])
                 if ancestor:
                     best = ancestor
             return best
 
-    def _find_child_by_path(self, parent: VfsNode, target: Tuple[int,...]) -> VfsNode | None:
+    def _find_child_by_path(self, parent: VfsNode, target: tuple[int,...]) -> VfsNode | None:
         '''Scan children for match. Must be called from _lock.'''
         for child in parent.children:
             if child.hierarchical_id == target:

@@ -3,18 +3,21 @@ Dispatcher handles most of the coordination work between the UI and logic
 Functions as a signal proxy
 '''
 from __future__ import annotations
+from pkgutil import extend_path
+from wsgiref.util import request_uri
 
 import functools
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
-from PyQt6.QtCore import pyqtSignal, QObject, Qt
+from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
 
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
 from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle
 from core.navigator import VfsNavigator
 from core.metadata_manager import NodeMetadataStore
+from core.extension_overrides import lookup_extension
 if TYPE_CHECKING:
     from core.contracts import BaseHandler, BaseEditor
 
@@ -31,7 +34,7 @@ class Dispatcher(QObject):
     Dispatcher does not need to now what an action needs to execute.
     '''
     # Tree / Tracker
-    iso_loaded        = pyqtSignal(object)           # [root], None failed
+    iso_loaded        = pyqtSignal(object)           # [root] | None (failed)
     expand_requested  = pyqtSignal(object, object)   # (VfsNode, wait_event)
     node_changed      = pyqtSignal(VfsNode)          # Update for TreeView
     tracking_update   = pyqtSignal(int, int)         # (modified_count, staged_count)
@@ -279,7 +282,7 @@ class Dispatcher(QObject):
         Called on the main thread; each async layer connects back via _on_layer_done.'''
         if not self.vfs:
             return
-        node = self.vfs.get_node_by_id(target_hid)
+        node = self.vfs.get_vfs_node_by_id(target_hid)
         if node:
             on_success(node)
             return
@@ -325,7 +328,7 @@ class Dispatcher(QObject):
         self._on_action_complete(success, result)
         if not self.vfs:
             return
-        ancestor = self.vfs.get_node_by_id(ancestor_hid)
+        ancestor = self.vfs.get_vfs_node_by_id(ancestor_hid)
         if ancestor:
             ancestor.expansion_pending = False
         queued_expansions = self._pending_drills.pop(ancestor_hid, [])
@@ -433,6 +436,29 @@ class Dispatcher(QObject):
         task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         task_handle.finished.connect(functools.partial(self._on_expand_done, node, wait_event))
 
+    def _handle_extension_request(self, node: VfsNode, auto_save: bool = False) -> None:
+        '''
+        Fulfill extension request from the VFS when metadata return '.bin' (default extension)
+        Wastefully reads the entire node into memory before returning,
+        shouldn't matter too much since this only is triggered on nodes that had no extension enrichment
+        '''
+        if node.extension != '.bin':
+            return
+
+        def _check_pk(header: bytes) -> str:
+            offset_header = int.from_bytes(header[0x10:0x14], 'little')
+            pk3_magic = 0x004E000
+            if offset_header % pk3_magic == 0:  # header is pk3 divisible
+                return '.pk3'  # pk3 header
+            return '.bin'
+
+        header: bytes = self.get_node_data(node)[:0x30]
+        ext = lookup_extension(header, _check_pk(header))
+        node.extension = ext
+        if auto_save and self._metadata_store is not None:
+            self._metadata_store.register(node.hierarchical_id_str, extension=ext)
+        logger.debug(f'Extension request fulfilled: {node.name} -> {ext}')
+
     def _on_iso_loaded(self, success: bool, result: object) -> None:
         '''Takes the ISO's root+children nodes and intializes:
         VfsManager -> VfsNavigator -> metadata -> and signals'''
@@ -445,20 +471,29 @@ class Dispatcher(QObject):
             self.iso_loaded.emit(None)
             return
         handler, root = result.handler, result.root
+        if not root:
+            logger.error('ISO load succeeded but no root node was returned')
+            self.iso_loaded.emit(None)
+            return
         self.active_handler = handler
         self.vfs = VfsManager(
             root,
-            node_enricher=(
-                self._metadata_store.enrich
-                if self._metadata_store else None
-            )
+            root.children[-1],
+            node_enricher=(self._metadata_store.enrich if self._metadata_store else None)
         )
-        self.vfs.enrich_initial_tree()
+        self.vfs.request_extension.connect(self._handle_extension_request)
+        self.vfs.enrich_initial_tree() # This populates node names/categories/extensions from metadata, thus is now crucial
         self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
-        # self._migrate_targets_if_needed()   #Uncomment for building metadata from scratch
-        verify_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
-        verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
-        verify_handle.finished.connect(self._on_iso_verified)
+        if handler is not None:
+            # I think doing this on mainthread is fine since when this fires it is not possible for there to be any node registration
+            build = handler.get_build(root)  # type: ignore
+            QTimer.singleShot(0, lambda: self.iso_verified.emit(build))
+        # self._migrate_targets_if_needed()   # Uncomment for building metadata from scratch
+
+        # TODO: move verify action to new menu_bar
+        # verify_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
+        # verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
+        # verify_handle.finished.connect(self._on_iso_verified)
         self.iso_loaded.emit([root])
 
     def _on_rebuild_finished(self, success: bool, result: Any) -> None:

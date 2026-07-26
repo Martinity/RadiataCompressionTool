@@ -30,9 +30,9 @@ class VfsNavigator:
     '''Handles all tree traveling logic'''
     EXPANSION_TIMEOUT = 30.0  # seconds; raised from 1.0 — real disk+decompress can be slow
     def __init__(
-            self, 
-            vfs: VfsManager, 
-            data_reader: Callable[[VfsNode], bytes], 
+            self,
+            vfs: VfsManager,
+            data_reader: Callable[[VfsNode], bytes],
             expansion_callback: Callable[[VfsNode, threading.Event], None],
         ):
         self.vfs  = vfs
@@ -72,7 +72,7 @@ class VfsNavigator:
             previous_depth = current_depth
             self._expand_pending(snapshot.unresolved)
 
-        node = self.vfs.get_node_by_id(target)
+        node = self.vfs.get_vfs_node_by_id(target)
         if not node:
             logger.warning(f'Could not resolve datacenter header: {target}')
             return None
@@ -108,8 +108,8 @@ class VfsNavigator:
                 parent_bytes = self.read(parent)
                 header_bytes = None
                 if parent.target:
-                    target_node = self.vfs.get_node_by_id(parent.target)
-                    if target_node and target_node.pending_data:
+                    target_node = self.vfs.get_vfs_node_by_id(parent.target)
+                    if target_node is not None and target_node.pending_data:
                         header_bytes = target_node.pending_data
                     else:
                         header_bytes = self.resolve_data_from_hid(parent.target)
@@ -126,7 +126,7 @@ class VfsNavigator:
                     self._rollup_touched.add(parent)
                     if target_data and parent.target: # Datacenter rebuild
                         self.resolve_data_from_hid(parent.target) # Ensure target is in VFS
-                        target_node = self.vfs.get_node_by_id(parent.target)
+                        target_node = self.vfs.get_vfs_node_by_id(parent.target)
                         if target_node:
                             target_node.pending_data = target_data
                             self._rollup_touched.add(target_node)
@@ -174,7 +174,7 @@ class VfsNavigator:
 
     def _expand_pending(self, unresolved: list[tuple[int,...]]) -> None:
         '''
-        Find nearest ancestor and request expansion via callback. 
+        Find nearest ancestor and request expansion via callback.
         Blocks the thread until expansion completes or timesout.
         Lock never needs to be held here.
         '''
@@ -263,4 +263,3 @@ class VfsNavigator:
         if not profile:
             return False
         return issubclass(profile.handler_class, (ContainerHandler))
-    

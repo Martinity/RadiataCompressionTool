@@ -318,9 +318,9 @@ class TaskHandle(QObject):
 class Actions:
     """All background task logic in one place
 
-    log_callback: context dependent. Currently: LoggingWindow and rebuild page log
-    logger.*:     system/debug messages (LoggingWindow w/ Log Level Filtering)
-    progress_callback(%, label): progress bar
+    log_callback: context dependent. Currently: FileBrowserPage or RebuildPage logs
+    logger.*:     system/debug messages (FileBrowserPage w/ Log Level Filtering)
+    progress_callback(%, label): progress bar (RebuildPage)
     """
 
     ### Editor
@@ -478,10 +478,10 @@ class Actions:
 
     @staticmethod
     def rebuild_iso(
-        handler:      'IsoHandler',
-        root_node:    'VfsNode',
-        navigator:    'VfsNavigator',
-        staged_nodes: list['VfsNode'],
+        handler:      IsoHandler,
+        root_node:    VfsNode,
+        navigator:    VfsNavigator,
+        staged_nodes: list[VfsNode],
         output_path:  Path,
         task_handle:  TaskHandle,
     ) -> ActionResult:
@@ -537,9 +537,9 @@ class Actions:
     ### IO specific actions
     @staticmethod
     def export_node(
-        node:        'VfsNode',
+        node:         VfsNode,
         output_path:  Path,
-        navigator:   'VfsNavigator',
+        navigator:    VfsNavigator,
         task_handle:  TaskHandle,
         action_name:  str = 'Export'
     ) -> ActionResult:
@@ -572,7 +572,7 @@ class Actions:
 
     @staticmethod
     def import_node(
-            node:       'VfsNode',
+            node:        VfsNode,
             import_path: Path,
             task_handle: TaskHandle,
             action_name: str = 'Import'

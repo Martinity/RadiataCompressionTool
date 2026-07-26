@@ -1,12 +1,17 @@
 '''
-Contains all logic for interfacing with metadata json"s
+Contains all logic for interfacing with metadata json\'s
 NodeMeta            - Translates JSON <-> Application
 NodeMetadataStore   - Updates node metadata, updates metadata with new entries
-DatacenterTargets   - Links files to datacenter headers
+DatacenterTargets   - Links files to datacenter headers **Essential** (hardcodes links so if building a add/remove file feature this needs to be reworked)
+Metadata Imports section - Standard metadata to build a new metadata.json from scratch programmatically **Non-Essential**
+
+Extensions are added from source to the database for speed optimization on missing extension enrichment, thus non-essential.
+
 One possible improvement to search legibility is to remove the metadata that is filled for
 removed game files.
 '''
 from __future__ import annotations
+from cmath import e
 
 import json
 import threading
@@ -30,13 +35,14 @@ class NodeMeta:
     description: str
     tags:        tuple[str, ...]
     target_hid:  tuple[int, ...] | None = None
+    extension:   str | None = None
 
     @staticmethod
     def from_dict(d: dict) -> NodeMeta:
         cat = d.get('category', ['Unknown'])
         if isinstance(cat, str):
             cat = [cat] if cat else ['Unknown']
-        
+
         raw_target = d.get('target')
         target: tuple[int, ...] | None = None
         if raw_target:
@@ -44,7 +50,7 @@ class NodeMeta:
                 if isinstance(raw_target, list) and raw_target and isinstance(raw_target[0], list):
                     target = tuple(int(i) for i in raw_target[0])
                 else:
-                    target = tuple(int(i) for i in raw_target)        
+                    target = tuple(int(i) for i in raw_target)
             except (TypeError, ValueError) as e:
                 logger.debug(f'NodeMeta.from_dict: invalid target {raw_target!r}: {e}')
 
@@ -52,14 +58,16 @@ class NodeMeta:
             title=d.get('title', ''),
             description=d.get('description', ''),
             tags=tuple(d.get('tags', [])),
-            target_hid=target
+            target_hid=target,
+            extension=d.get('extension', None),
         )
-    
+
     def to_dict(self) -> dict:
         d: dict = {
             'title':       self.title,
             'description': self.description,
             'tags':        list(self.tags),
+            'extension':   self.extension,
         }
         if self.target_hid:
             d['target'] = list(self.target_hid)
@@ -75,10 +83,10 @@ class NodeMetadataStore(QObject):
     bulk_updated     = pyqtSignal(int)  # updated count
 
     def __init__(
-        self, 
-        json_path: Path, 
-        *, 
-        auto_save: bool = False, 
+        self,
+        json_path: Path,
+        *,
+        auto_save: bool = False,
         parent:    QObject | None = None
     ) -> None:
         super().__init__(parent)
@@ -97,7 +105,7 @@ class NodeMetadataStore(QObject):
         '''Parse json into a flat dict[str, NodeMeta]'''
         if not self._path.exists():
             logger.info(f'metadata file not found at {self._path} - Starting anew')
-            return 
+            return
         try:
             raw: dict[str, dict] = json.loads(self._path.read_text(encoding='utf-8'))
             parsed: dict[str, NodeMeta] = {}
@@ -112,13 +120,16 @@ class NodeMetadataStore(QObject):
                 self._db = parsed
             logger.info(
                 f'Loaded {len(parsed)} metadata from {self._path.name}'
-                + (f' ({errors} skipped)' if errors else '') 
+                + (f' ({errors} skipped)' if errors else '')
             )
         except Exception as e:
             logger.error(f'Failed to load metadata database: {e}', exc_info=True)
-        
+
     def enrich(self, node: VfsNode) -> None:
-        '''Stamp metadata onto a node'''
+        '''
+        Stamps metadata onto a VfsNode instance.
+        Used during runtime when new nodes are added to the filesystem.
+        '''
         with self._lock: # snapshot the db entry
             meta = self._db.get(node.hierarchical_id_str)
         if meta is None:
@@ -130,20 +141,22 @@ class NodeMetadataStore(QObject):
         if meta.target_hid:
             node.target = meta.target_hid
             node.extension = '.kods'
+        if meta.extension:
+            node.extension = meta.extension
 
-    ### Lookup 
+    ### Lookup
     def get(self, hid: str) -> NodeMeta | None:
         with self._lock:
             return self._db.get(hid)
-        
+
     def __contains__(self, hid: str) -> bool:
         with self._lock:
             return hid in self._db
-    
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._db)
-        
+
     ### runtime registration
     def _merge_entry(
         self,
@@ -153,7 +166,12 @@ class NodeMetadataStore(QObject):
         description: str | None = None,
         tags: list[str] | tuple[str, ...] | None = None,
         target: tuple[int, ...] | None = None,
+        extension:   str | None = None,
     ) -> None:
+        '''
+        Used to merge new metadata with existing entries at runtime.
+        Only called from register()
+        '''
         existing = self._db.get(hid)
         if tags is not None:
             existing_tags = existing.tags if existing else()
@@ -163,33 +181,36 @@ class NodeMetadataStore(QObject):
             new_tags = merged_tags
         else:
             new_tags = existing.tags if existing else ('Unknown',)
-        
+
         self._db[hid] = NodeMeta(
             title       = title       if title       is not None else (existing.title       if existing else ''),
             description = description if description is not None else (existing.description if existing else ''),
             tags        = new_tags,
-            target_hid  = target      if target      is not None else (existing.target_hid  if existing else None)
+            target_hid  = target      if target      is not None else (existing.target_hid  if existing else None),
+            extension   = extension   if extension   is not None else (existing.extension   if existing is not None else None),
         )
 
     def register(
-            self, 
-            hid: str, 
-            *, 
+            self,
+            hid: str,
+            *,
             title:       str | None = None,
             description: str | None = None,
             tags:   list[str]| None = None,
-            target: tuple[int, ...]| None = None,
+            target: tuple[int, ...] | None = None,
+            extension:   str | None = None,
         ) -> None:
         '''
         Create entries and update fields
         Update logic for fields:
-        title and description   - overwrite 
+        title and description   - overwrite
         tags                    - merge
         target                  - overwrite
+        extension               - overwrite
         '''
         with self._lock:
             is_new   = hid not in self._db
-            self._merge_entry(hid, title=title, description=description, tags=tags, target=target)
+            self._merge_entry(hid, title=title, description=description, tags=tags, target=target, extension=extension)
             self._dirty = True
         # Update search model
         if is_new:
@@ -209,7 +230,8 @@ class NodeMetadataStore(QObject):
                     title=fields.get('title'),
                     description=fields.get('description'),
                     tags=fields.get('tags'),
-                    target=fields.get('target')
+                    target=fields.get('target'),
+                    extension=fields.get('extension'),
                 )
                 count += 1
             if count:
@@ -242,7 +264,7 @@ class NodeMetadataStore(QObject):
             )
             logger.debug(f'Metadata updated - {len(snapshot)} total entries -> {self._path.name}')
         except Exception as e:
-            logger. error(f'Failed to save metadata: {e}', exc_info=True)
+            logger.error(f'Failed to save metadata: {e}', exc_info=True)
             with self._lock:
                 self._dirty = True
 
@@ -292,7 +314,7 @@ class NodeMetadataStore(QObject):
         count = self.register_many(_all_entries())
         logger.info(f'Ingested {count} metadata entries from {len(_SOURCES)} source(s).')
         return count
-        
+
 ###--------------------------------------------- Radiata Datacenter targets --------------------------------------------------------###
 
 class DatacenterTargets:
@@ -317,7 +339,7 @@ class DatacenterTargets:
     ]
     @classmethod
     def get_target(
-        cls, 
+        cls,
         disk_index: int,
         child_index: int | None = None,
         ) -> list[tuple[int,...]] | None:
@@ -474,6 +496,7 @@ class IOPModules:
                 if len(values) > 1 and values[1]:
                     fields['description'] = values[1]
                 fields['tags'] = ('System', 'IOP')
+                fields['extension'] = '.IRX'
                 yield f'{disk_idx}.{child_idx}', fields
 
 class EventScripts:
@@ -762,44 +785,44 @@ class CharaPortraits:
         'Placeholder Icon', 'Jack Icon', 'Ganz Icon', 'Ridley Icon','Rynka Icon', 'Flau Icon',
         'Star', 'Sebastian', 'Genius', 'Rocky', 'Gawain', 'Heavy Guardsman', 'Elwen', 'Gerald',
         'Caesar', 'Alicia', 'Dennis', 'Gareth', 'Gregory', 'Walter', 'Jarvis', 'Light Guardsman',
-        'Aldo', 'Gordon', 'Bruce', 'David', 'Conrad', 'Rolec', 'Daniel', 'Carlos', 'Gene', 
-        'Light Guardsman', 'Thanos', 'Curtis', 'Cecil', 'Morgan', 'Felix', 'Jill', 'Ursula', 
-        'Derek', 'Christoph', 'Claudia', 'Ardoph', 'Dimitri', 'Aidan', 'Cornelia', 'Faraus', 
-        'Marietta', 'Ernest', 'Franklin', 'Johan', 'Roche', 'Light Guardsman', 'Kain', 'Fernando', 
-        'Anastasia', 'Dwight', 'Godwin', 'Achilles', 'Flora', 'Elena', 'Alvin', 'Vitas', 'Cosmo', 
-        'Grant', 'Adina', 'Miranda', 'Edgar', 'Clive', 'Lulu', 'Eugene', 'Nyx', 'Ortoroz', 'Sonata', 
-        'Iris', 'Nocturne', 'Herz', 'Alba', 'Lily', 'Jared', 'Pinky', 'Interlude', 'Solo', 'Joaquel', 
-        'Eon', 'Elmo', 'Jiorus', 'Sarasenia', 'Belflower', 'Jasne', 'Larks', 'Sakurazaki', 'Junzaburo', 
+        'Aldo', 'Gordon', 'Bruce', 'David', 'Conrad', 'Rolec', 'Daniel', 'Carlos', 'Gene',
+        'Light Guardsman', 'Thanos', 'Curtis', 'Cecil', 'Morgan', 'Felix', 'Jill', 'Ursula',
+        'Derek', 'Christoph', 'Claudia', 'Ardoph', 'Dimitri', 'Aidan', 'Cornelia', 'Faraus',
+        'Marietta', 'Ernest', 'Franklin', 'Johan', 'Roche', 'Light Guardsman', 'Kain', 'Fernando',
+        'Anastasia', 'Dwight', 'Godwin', 'Achilles', 'Flora', 'Elena', 'Alvin', 'Vitas', 'Cosmo',
+        'Grant', 'Adina', 'Miranda', 'Edgar', 'Clive', 'Lulu', 'Eugene', 'Nyx', 'Ortoroz', 'Sonata',
+        'Iris', 'Nocturne', 'Herz', 'Alba', 'Lily', 'Jared', 'Pinky', 'Interlude', 'Solo', 'Joaquel',
+        'Eon', 'Elmo', 'Jiorus', 'Sarasenia', 'Belflower', 'Jasne', 'Larks', 'Sakurazaki', 'Junzaburo',
         'Natalie', 'Nina', 'Charlie', 'Leonard', 'Light Guardsman', 'Heavy Guardsman', 'Raymond', 'Al',
-        'Margaret', 'Zion', 'Paul', 'Toma', 'Torenia', 'Testa', 'Nuse', 'Jorn', 'Barbena', 'Giske', 
-        'Yuri', 'Warc', 'Robin', 'Sheila', 'Jasmine', 'Camuse', 'Lantana', 'Lyle', 'Rose', 'Josef', 
-        'Virginia', 'Morfinn', 'Bligh', 'Freija', 'Nask', 'Cherie', 'Zeke', 'Dan', 'Servia', 'Lunbar', 
+        'Margaret', 'Zion', 'Paul', 'Toma', 'Torenia', 'Testa', 'Nuse', 'Jorn', 'Barbena', 'Giske',
+        'Yuri', 'Warc', 'Robin', 'Sheila', 'Jasmine', 'Camuse', 'Lantana', 'Lyle', 'Rose', 'Josef',
+        'Virginia', 'Morfinn', 'Bligh', 'Freija', 'Nask', 'Cherie', 'Zeke', 'Dan', 'Servia', 'Lunbar',
         'Sonia', 'Startis', 'Brood', 'Garbella', 'Silvia', 'Thyme', 'Elef', 'Ryan', 'Hip', 'Nick', 'Kira',
-        'Rabi', 'Golye', 'Butch', 'Sarval', 'Sunset', 'Sora', 'Keaton', 'Tarkin', 'Gonber', 'Leban', 'Mook', 
-        'Wal', 'Wyze', 'Zeranium', '', 'Pommelie', 'Saron', 'Cepheid', 'Baade', 'Quasar', 'Aphelion', 
-        'Gonovitch', 'Albert', 'Vladimir', 'Yevgeni', 'Oleg', 'Grigory', 'Brockle', 'Dyvad', 'Gehrmann', 
-        'Sergei', 'Naom', 'Aegenhart', 'Marke', 'Donovitch', 'Zane', 'Hap', 'Gil', 'Shin', 'Fan', 'Row', 
-        'Pitt', 'Few', 'Alan', 'Keane', 'Nogueira', 'Clarence', 'Serva', 'Hyann', 'Chatt', 'Zida', 'Franz', 
-        'Romaria', 'Marsha', 'Lufa', 'Coco', 'Martinez', 'Santos', 'Rika', 'Mikey', 'Gob', 'Lin', 'Brie', 
-        'Gonn', 'Golly', 'Gobrey', 'Den', 'Ben', 'Aesop', 'Monki', 'Gabe', 'Mason', 'Goo', 'Donkey', 
-        'Ricky', 'Drew', 'Gruel', 'Doppio', 'Pietro', 'Jan', 'Marco', 'Niko', 'Danny', 'Dominic', 'Bosso', 
-        'Georgio', 'Luka', 'Sonny', 'Giovanni', 'Polpo', 'Jj', 'Leona', 'Leann', 'Ray C Ross', 'Pinta', 
-        'Buta', 'Valkyrie', 'Lezard', 'Radian', 'Ethereal Queen', 'Cairn', 'Kelvin', 'Gabriel Celesta', 
-        '', '', 'Galvados', '', '', '', '', '', 'Drago', 'Bull', '', '', '', 
-        '', 'Library', 'Phonograph', 'Jack Bookshelf', 'Cross', 'Stein', 'Blackjack', 'Event Watcher', 
-        'Parsec', 'Light Guardsman', 'Light Guardsman', 'Light Guardsman', 'Heavy Guardsman', 
-        'Heavy Guardsman', 'Heavy Guardsman', 'Heavy Guardsman', 'Heavy Guardsman', 'Heavy Guardsman', 
+        'Rabi', 'Golye', 'Butch', 'Sarval', 'Sunset', 'Sora', 'Keaton', 'Tarkin', 'Gonber', 'Leban', 'Mook',
+        'Wal', 'Wyze', 'Zeranium', '', 'Pommelie', 'Saron', 'Cepheid', 'Baade', 'Quasar', 'Aphelion',
+        'Gonovitch', 'Albert', 'Vladimir', 'Yevgeni', 'Oleg', 'Grigory', 'Brockle', 'Dyvad', 'Gehrmann',
+        'Sergei', 'Naom', 'Aegenhart', 'Marke', 'Donovitch', 'Zane', 'Hap', 'Gil', 'Shin', 'Fan', 'Row',
+        'Pitt', 'Few', 'Alan', 'Keane', 'Nogueira', 'Clarence', 'Serva', 'Hyann', 'Chatt', 'Zida', 'Franz',
+        'Romaria', 'Marsha', 'Lufa', 'Coco', 'Martinez', 'Santos', 'Rika', 'Mikey', 'Gob', 'Lin', 'Brie',
+        'Gonn', 'Golly', 'Gobrey', 'Den', 'Ben', 'Aesop', 'Monki', 'Gabe', 'Mason', 'Goo', 'Donkey',
+        'Ricky', 'Drew', 'Gruel', 'Doppio', 'Pietro', 'Jan', 'Marco', 'Niko', 'Danny', 'Dominic', 'Bosso',
+        'Georgio', 'Luka', 'Sonny', 'Giovanni', 'Polpo', 'Jj', 'Leona', 'Leann', 'Ray C Ross', 'Pinta',
+        'Buta', 'Valkyrie', 'Lezard', 'Radian', 'Ethereal Queen', 'Cairn', 'Kelvin', 'Gabriel Celesta',
+        '', '', 'Galvados', '', '', '', '', '', 'Drago', 'Bull', '', '', '',
+        '', 'Library', 'Phonograph', 'Jack Bookshelf', 'Cross', 'Stein', 'Blackjack', 'Event Watcher',
+        'Parsec', 'Light Guardsman', 'Light Guardsman', 'Light Guardsman', 'Heavy Guardsman',
+        'Heavy Guardsman', 'Heavy Guardsman', 'Heavy Guardsman', 'Heavy Guardsman', 'Heavy Guardsman',
         'Heavy Guardsman', 'Heavy Guardsman', 'Heavy Guardsman', 'Cody', 'Adele', 'Howard', 'Ravil',
-        'Astor', 'Maddock', 'Synelia', 'Tony', 'Patrick', 'Putt', 'Reynos', 'Gobblehope Ix', 'Nalshay', 
+        'Astor', 'Maddock', 'Synelia', 'Tony', 'Patrick', 'Putt', 'Reynos', 'Gobblehope Ix', 'Nalshay',
         'Sayna', 'Bran', 'Stefan', 'Mint', 'Daria', 'Yack', 'Lauren', 'Theresa', 'Garcia', 'Dynas', 'Epoch',
         'Roy', 'Louis',
     ]
     _THOUSANDS = [
         'Jack Handmade Tunic', 'Jack Trainee\'s Wear', 'Jack Leather Armor', 'Jack Sharkskin',
         'Jack Iron Breastplate', 'Jack Wooden Breastplate', 'Jack Wind Garb', 'Jack Divine Coat',
-        'Jack Alfestrain', 'Jack Scale Armor', 'Jack Dragon Scale', 'Jack Iron Plate', 'Jack Plate Armour', 
-        'Jack Ore Armour', 'Jack Valiant Mail', 'Jack Demon Mail', 'Jack Samurai Armour', 
-        'Jack Absolute Guard', 'Jack Fayt Armour', 'Jack Robot Suit', 'Jack Recruitment Suit', 
+        'Jack Alfestrain', 'Jack Scale Armor', 'Jack Dragon Scale', 'Jack Iron Plate', 'Jack Plate Armour',
+        'Jack Ore Armour', 'Jack Valiant Mail', 'Jack Demon Mail', 'Jack Samurai Armour',
+        'Jack Absolute Guard', 'Jack Fayt Armour', 'Jack Robot Suit', 'Jack Recruitment Suit',
         'Ganz Second', 'Ridely Second', 'Ridely Third', 'Adele Second', 'Ridely Fourth'
     ]
     _RANGE_ICONS = 205
@@ -822,8 +845,8 @@ class CharaPortraits:
             yield f'{disk_idx}.{child_idx}', {'title': f'{name} Portrait (Compressed)', 'tags': ('Texture',)}
         for child_idx, name in enumerate(cls._ICONS):
             yield f'{disk_idx}.{child_idx}.0', {
-                'title': f'{name} Portrait', 
-                'tags': ('Texture', 'FIS'), 
+                'title': f'{name} Portrait',
+                'tags': ('Texture', 'FIS'),
                 'description': f'Friends book portrait for {name}.'
             }
 
@@ -876,95 +899,95 @@ class TextureBanks:
     _RANGE01 = 190
     _BANK02 = [
         "Not Implemented Placeholder", "Not Implemented Attack", "Not Implemented Volty", "Not Implemented Message", "Not Implemented File",
-        "Music Disk", "Herb Extract", "Moon Stone", "Cure Needle", "Eye Drops", "Bell Amulet", "Heating Tablet", 
-        "Mint Drop", "Recovery Pills", "Toadstool Powder", "Book of _", "Strength Berry", "Not Implemented Apple", 
-        "Defense Berry", "Evasion Berry", "Luck Berry", "Life Berry", "Mystery Berry", "Growth Stone", 
-        "Not Implemented Bug", "Not Implemented Bread", "Not Implemented Flower", "Not Implemented Flask", 
+        "Music Disk", "Herb Extract", "Moon Stone", "Cure Needle", "Eye Drops", "Bell Amulet", "Heating Tablet",
+        "Mint Drop", "Recovery Pills", "Toadstool Powder", "Book of _", "Strength Berry", "Not Implemented Apple",
+        "Defense Berry", "Evasion Berry", "Luck Berry", "Life Berry", "Mystery Berry", "Growth Stone",
+        "Not Implemented Bug", "Not Implemented Bread", "Not Implemented Flower", "Not Implemented Flask",
         "Not Implemented Bottle", "Not Implemented Meat", "Not Implemented Fish", 'Not Implemented Bowl',
-        "Not Implemented Cutlery", "Not Implemented Silhouette", "Not Implemented Mushroom 1", "Not Implemented Mushroom 2", 
-        "Not Implemented Mineral", "Not Implemented Cards", "Not Implemented Book", "Not Implemented Scarf", 
-        "Not Implemented Gem", "Not Implemented Tooth", "Not Implemented Feather", "Not Implemented Stone", 
-        "Not Implemented Egg", "Not Implemented Crystal", "Not Implemented Bone", "Not Implemented Root", 
-        "Sage", "Not Implemented Pollen", "Power Bangle", "Warrior Bangle", "Not Implemented Accessory 1", 
-        "Not Implemented Bangle 2", "Protect Shell", "Monk Bangle", "Skill Upper", "Thief Bangle", 
-        "Luck Bracelet", "Lucky Charm", "Toughness Bangle", "Life Bangle", "Not Implemented Accessory 3", 
-        'Not Implemented Accessory 4', "Not Implemented Accessory 5", "Not Implemented Accessory 6", 
-        "Not Implemented Accessory 7", "Not Implemented Accessory 8", "Not Implemented Accessory 9", 
-        "Not Implemented Accessory 10", "Not Implemented Accessory 11", "Not Implemented Accessory 12", 
-        "Not Implemented Accessory 13", "Not Implemented Accessory 14", "Not Implemented Accessory 15", 
-        "Not Implemented Accessory 16", "Not Implemented Accessory 17", "Not Implemented Accessory 18", 
-        "Not Implemented Accessory 19", "Not Implemented Accessory 20", "Not Implemented Accessory 21", 
-        "Not Implemented Accessory 22", "Not Implemented Accessory 23", "Not Implemented Accessory 24", 
-        "Not Implemented Accessory 25", "Not Implemented Accessory 26", "Not Implemented Accessory 27", 
-        "Not Implemented Accessory 28", "Not Implemented Accessory 29", "Eagle Crest", "Lion Crest", "Elephant Crest", "Serpent Crest", 
-        "Not Implemented Accessory 30", "Feather Earring", "Not Implemented Accessory 31", "Not Implemented Accessory 32", 
-        "Divine Earring", "Hermit's Trophy", "Saint's Trophy", "Pluto's Trophy", "Beckoning Cat", "Not Implemented Accessory 33", 
-        "Not Implemented Accessory 34", "Not Implemented Accessory 35", "Not Implemented Accessory 36", 
-        "Power Stone", "Not Implemented Accessory 37", "Not Implemented Accessory 38", "Not Implemented Accessory 39", 
-        "Not Implemented Accessory 40", "Not Implemented Accessory 41", "Not Implemented Accessory 42", 
+        "Not Implemented Cutlery", "Not Implemented Silhouette", "Not Implemented Mushroom 1", "Not Implemented Mushroom 2",
+        "Not Implemented Mineral", "Not Implemented Cards", "Not Implemented Book", "Not Implemented Scarf",
+        "Not Implemented Gem", "Not Implemented Tooth", "Not Implemented Feather", "Not Implemented Stone",
+        "Not Implemented Egg", "Not Implemented Crystal", "Not Implemented Bone", "Not Implemented Root",
+        "Sage", "Not Implemented Pollen", "Power Bangle", "Warrior Bangle", "Not Implemented Accessory 1",
+        "Not Implemented Bangle 2", "Protect Shell", "Monk Bangle", "Skill Upper", "Thief Bangle",
+        "Luck Bracelet", "Lucky Charm", "Toughness Bangle", "Life Bangle", "Not Implemented Accessory 3",
+        'Not Implemented Accessory 4', "Not Implemented Accessory 5", "Not Implemented Accessory 6",
+        "Not Implemented Accessory 7", "Not Implemented Accessory 8", "Not Implemented Accessory 9",
+        "Not Implemented Accessory 10", "Not Implemented Accessory 11", "Not Implemented Accessory 12",
+        "Not Implemented Accessory 13", "Not Implemented Accessory 14", "Not Implemented Accessory 15",
+        "Not Implemented Accessory 16", "Not Implemented Accessory 17", "Not Implemented Accessory 18",
+        "Not Implemented Accessory 19", "Not Implemented Accessory 20", "Not Implemented Accessory 21",
+        "Not Implemented Accessory 22", "Not Implemented Accessory 23", "Not Implemented Accessory 24",
+        "Not Implemented Accessory 25", "Not Implemented Accessory 26", "Not Implemented Accessory 27",
+        "Not Implemented Accessory 28", "Not Implemented Accessory 29", "Eagle Crest", "Lion Crest", "Elephant Crest", "Serpent Crest",
+        "Not Implemented Accessory 30", "Feather Earring", "Not Implemented Accessory 31", "Not Implemented Accessory 32",
+        "Divine Earring", "Hermit's Trophy", "Saint's Trophy", "Pluto's Trophy", "Beckoning Cat", "Not Implemented Accessory 33",
+        "Not Implemented Accessory 34", "Not Implemented Accessory 35", "Not Implemented Accessory 36",
+        "Power Stone", "Not Implemented Accessory 37", "Not Implemented Accessory 38", "Not Implemented Accessory 39",
+        "Not Implemented Accessory 40", "Not Implemented Accessory 41", "Not Implemented Accessory 42",
         "Not Implemented Accessory 43", "Not Implemented Accessory 44", "Training Device", 'VIP Badge',
         'Not Implemented Accessory 45', 'Not Implemented Accessory 46', 'Not Implemented Accessory 47',
         'Leprechaun', 'Magic Mirror', 'Not Implemented Accessory 48', 'Magic Boost', 'Unknown Cross Trinket',
-        'Unknown Trophy', "Iron Edge", "Steel Blade", "Knight Edge", "Glory Edge", "Avcoor*", "Jinn", 
-        "Murasame*", "Kotetsu", "Basilisktos", "Evil Blade", "Hatred Edge", "Phantom Edge", "Spark Edge*", 
-        "Flame Blade", "Aqua Blade", "Icicle Edge*", "Air Blade", "Breeze Edge*", "Lightning Edge*", 
-        "Storm Bringer", "Iron Sword", "Steel Saber", "Knight Saber", "Glory Sword", "Holy Sword*", 
-        "Falvern", "Efreet", "Muramasa", "Bizenosafune", "Rune Saber", "Curse Sword*", "Brain Breaker*", 
-        "Bind Saber", "Heat Saber", "Flame Sword*", "Lævateinn*", "Blaze Saber", "Grand Saber", "Venom Sword", 
-        "Cyclone Sword*", "Fake Gram", "Iron Axe", "Steel Axe", "Knight Axe", "Glory Axe", "Ancient Axe", 
-        "Behemoth", "Death Scythe*", "Hard Chopper*", "Bind Smasher*", "Confuse Axe*", "Fall Smasher", 
-        "Mist Axe*", "Spark Chopper", "Flame Axe*", "Aqua Chopper", "Icicle Axe", "Mad Axe*", "Rock Axe", 
-        "Grand Smasher", "Earth Chopper", "Iron Spear", "Steel Pike", "Knight Spear", "Paradigm", "Leviathan", 
-        "Gungnir*", "Medusa Spear", "Curse Lance", "Brain Shooter*", "Binding Spear", "Duster Pike*", 
-        "Mad Spear*", "Grand Pike", "Water Pike", "Aqua Spear", "Deep Lance", "Unknown Spear", "Wind Spear*", 
-        "Brionac","Oratorio", "Requiem", "Sylph Edge", 
-        "Psycho Edge", "Floating Sword", "Vettea", "Dunvera", "Vaise", "Arabum", "President Blade", 
-        "Toadstool Blade", "Ganz Sword", 
-        "Bloody Grip", "Fathmil", "Damascus Blade", "E. Toadstool Sword", "Love Me True", "Blaze Axe", "Heavy Rain", "Bear Smasher", "Toadstool Axe", 
-        "Titan Pike", "Storm Spear", "Cracked Spear", 
-        "Toadstool Lance", "Abyss", "Ares Salute", "Adventia", "Entier", "Aldore", "Curozide", "Windmill", 
-        "Arshaja", "Wellness", "Atmis", "Vipole", "Naruth", "Vatirork", "Asteka", 
-        "Vathao", "Agroth", "Villhe", "Anviteo", "Suolo", "Wanchu", "Gigantic Hammer", "Flying Foot", 
-        "Mythril Hammer", "Ore Hammer", "Bloody Hammer", "Iron Hammer", "Aron", "Esthia", "Raven Claw", 
-        "Answerer", "Steel Dagger", "Butterfly Knife", "Iron Knife", "Kogitsunemaru", "Heat Dagger", 
-        "Morningstar", "Head Basher", "Earth Crusher", "Bronze Crusher", "Symphonia", "Whip", "Predator Claw", 
-        "Shovel Claw", "Chupa Claw", "Farmer's Hoe", "Spade", "Crossbow", "Truncheon", "Halberd", 
-        "Oak Club", "Ladle", "Spatula", "Justice Ruling", "Winner Ruling", "Tobacco Pipe", "Bottle", 
-        "Guiron Tree", "Walking Stick", "Metal Pipe", "Fly Swatter", "Toadstool Bazooka", 
+        'Unknown Trophy', "Iron Edge", "Steel Blade", "Knight Edge", "Glory Edge", "Avcoor*", "Jinn",
+        "Murasame*", "Kotetsu", "Basilisktos", "Evil Blade", "Hatred Edge", "Phantom Edge", "Spark Edge*",
+        "Flame Blade", "Aqua Blade", "Icicle Edge*", "Air Blade", "Breeze Edge*", "Lightning Edge*",
+        "Storm Bringer", "Iron Sword", "Steel Saber", "Knight Saber", "Glory Sword", "Holy Sword*",
+        "Falvern", "Efreet", "Muramasa", "Bizenosafune", "Rune Saber", "Curse Sword*", "Brain Breaker*",
+        "Bind Saber", "Heat Saber", "Flame Sword*", "Lævateinn*", "Blaze Saber", "Grand Saber", "Venom Sword",
+        "Cyclone Sword*", "Fake Gram", "Iron Axe", "Steel Axe", "Knight Axe", "Glory Axe", "Ancient Axe",
+        "Behemoth", "Death Scythe*", "Hard Chopper*", "Bind Smasher*", "Confuse Axe*", "Fall Smasher",
+        "Mist Axe*", "Spark Chopper", "Flame Axe*", "Aqua Chopper", "Icicle Axe", "Mad Axe*", "Rock Axe",
+        "Grand Smasher", "Earth Chopper", "Iron Spear", "Steel Pike", "Knight Spear", "Paradigm", "Leviathan",
+        "Gungnir*", "Medusa Spear", "Curse Lance", "Brain Shooter*", "Binding Spear", "Duster Pike*",
+        "Mad Spear*", "Grand Pike", "Water Pike", "Aqua Spear", "Deep Lance", "Unknown Spear", "Wind Spear*",
+        "Brionac","Oratorio", "Requiem", "Sylph Edge",
+        "Psycho Edge", "Floating Sword", "Vettea", "Dunvera", "Vaise", "Arabum", "President Blade",
+        "Toadstool Blade", "Ganz Sword",
+        "Bloody Grip", "Fathmil", "Damascus Blade", "E. Toadstool Sword", "Love Me True", "Blaze Axe", "Heavy Rain", "Bear Smasher", "Toadstool Axe",
+        "Titan Pike", "Storm Spear", "Cracked Spear",
+        "Toadstool Lance", "Abyss", "Ares Salute", "Adventia", "Entier", "Aldore", "Curozide", "Windmill",
+        "Arshaja", "Wellness", "Atmis", "Vipole", "Naruth", "Vatirork", "Asteka",
+        "Vathao", "Agroth", "Villhe", "Anviteo", "Suolo", "Wanchu", "Gigantic Hammer", "Flying Foot",
+        "Mythril Hammer", "Ore Hammer", "Bloody Hammer", "Iron Hammer", "Aron", "Esthia", "Raven Claw",
+        "Answerer", "Steel Dagger", "Butterfly Knife", "Iron Knife", "Kogitsunemaru", "Heat Dagger",
+        "Morningstar", "Head Basher", "Earth Crusher", "Bronze Crusher", "Symphonia", "Whip", "Predator Claw",
+        "Shovel Claw", "Chupa Claw", "Farmer's Hoe", "Spade", "Crossbow", "Truncheon", "Halberd",
+        "Oak Club", "Ladle", "Spatula", "Justice Ruling", "Winner Ruling", "Tobacco Pipe", "Bottle",
+        "Guiron Tree", "Walking Stick", "Metal Pipe", "Fly Swatter", "Toadstool Bazooka",
         "Slingshot", "Tamtam Slingshot", "Frying Pan", "Bokken", "Zengen", 'Ancient Magic Book', 'Iron Gauntlet',
-        'Vagabond\'s Guitar', 'Knight Axe', 'Handmade Tunic', "Leather Armor", "Sharkskin", "Iron Breastplate", 
-        "Wind Garb", "Wooden Breastplate", "Iron Plate", "Scale Armor", "Divine Coat", "Plate Armor", 
-        "Dragon Scale", "Demon Mail", "Ore Armor", "Alfestrain", "Samurai Armor", "Absolute Guard", 
-        "Valiant Mail", "Fayt Armor", "Robot Suit", "Recruitment Suit", "Glory Armor", "Ganz's Armor", 
-        "Ridley's Clothes", "Trainee's Wear", "Valiant Mail", "Steel Guard", 
-        "Leather Tunic", "Legendary Armor", "Metal Body", "Enchanted Robe", "Bushin Armor", "Red Lion Armor", 
-        "Ancient Mail", "Resist Coat", "Samurai Armor", "Wing Garb", "Crocogator Skin", "Plate Armor", 
-        "Plate Armor", "Plate Armor", "Axe Head", "Plate Armor", "Plate Armor", "Plate Armor", "Crocogator Skin", 
-        "Crocogator Skin", "Resist Coat", "Plate Armor", "Plate Armor", "Crocogator Skin", "Normal Clothes", 
-        "Mage Armor", "Great Mage Robe", "Magical Dress", "Mage's Robe", "Witch Cloak", "Vareth Uniform", 
-        "High Priest's Gown", "Dual Cloak", "Peacock Garb", "Dry Cloak", "Master's Garment", "Robe of Order", 
+        'Vagabond\'s Guitar', 'Knight Axe', 'Handmade Tunic', "Leather Armor", "Sharkskin", "Iron Breastplate",
+        "Wind Garb", "Wooden Breastplate", "Iron Plate", "Scale Armor", "Divine Coat", "Plate Armor",
+        "Dragon Scale", "Demon Mail", "Ore Armor", "Alfestrain", "Samurai Armor", "Absolute Guard",
+        "Valiant Mail", "Fayt Armor", "Robot Suit", "Recruitment Suit", "Glory Armor", "Ganz's Armor",
+        "Ridley's Clothes", "Trainee's Wear", "Valiant Mail", "Steel Guard",
+        "Leather Tunic", "Legendary Armor", "Metal Body", "Enchanted Robe", "Bushin Armor", "Red Lion Armor",
+        "Ancient Mail", "Resist Coat", "Samurai Armor", "Wing Garb", "Crocogator Skin", "Plate Armor",
+        "Plate Armor", "Plate Armor", "Axe Head", "Plate Armor", "Plate Armor", "Plate Armor", "Crocogator Skin",
+        "Crocogator Skin", "Resist Coat", "Plate Armor", "Plate Armor", "Crocogator Skin", "Normal Clothes",
+        "Mage Armor", "Great Mage Robe", "Magical Dress", "Mage's Robe", "Witch Cloak", "Vareth Uniform",
+        "High Priest's Gown", "Dual Cloak", "Peacock Garb", "Dry Cloak", "Master's Garment", "Robe of Order",
         "Monk's Robe", "Robe of Order", "Nun's Robe",
-        "Monster Cloak", "Scouts Suit", "Hades Robe", "Black Dress", "Leather Clothes", "Disguise", 
-        "Hoodlum's Clothes", "Assassin Suit", "Scouts Suit", "Chrome Clothes", "Chrome Clothes", "Scouts Suit", 
-        "Not Implemented Armor 1", "Chrome Clothes", "Chrome Clothes", "Knight Armor", "Knight Armor", "Normal Clothes", 
-        "Not Implemented Armor 2", "Sacred Blue Gown", 
-        "Children's Clothes", "Herdsman's Clothes", "Children's Clothes", 
-        "Farming Clothes", "Farming Clothes", "Cook's Apron","Farming Clothes", "Linen Cuirass", "Cloth Apron", 
-        "Green Robe", "Grass Clothes", 
-        "Grass Clothes", "Grass Clothes", "Grass Clothes", "Autumn Leaf Cloak", "Leaf Clothes", "Leaf Clothes", "Leaf Clothes", 
-        "Goblin Suit", 
-        "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", 
-        "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Big Toadstool Suit", 
-        "Toadstool Suit", "Toadstool Suit", "Toadstool Suit", 
-        "Shoulder Pads", "Vareth Uniform", "Shabby Mail", "Shabby Mail", "Glory Armor", 
-        "Normal Clothes", "Nurse Uniform", "Smelly Old Clothes", 
-        "Children's Clothes", "Valiant Mail", "Not Implemented Armor 3", "Glory Armor", "Trainee's Wear", 
+        "Monster Cloak", "Scouts Suit", "Hades Robe", "Black Dress", "Leather Clothes", "Disguise",
+        "Hoodlum's Clothes", "Assassin Suit", "Scouts Suit", "Chrome Clothes", "Chrome Clothes", "Scouts Suit",
+        "Not Implemented Armor 1", "Chrome Clothes", "Chrome Clothes", "Knight Armor", "Knight Armor", "Normal Clothes",
+        "Not Implemented Armor 2", "Sacred Blue Gown",
+        "Children's Clothes", "Herdsman's Clothes", "Children's Clothes",
+        "Farming Clothes", "Farming Clothes", "Cook's Apron","Farming Clothes", "Linen Cuirass", "Cloth Apron",
+        "Green Robe", "Grass Clothes",
+        "Grass Clothes", "Grass Clothes", "Grass Clothes", "Autumn Leaf Cloak", "Leaf Clothes", "Leaf Clothes", "Leaf Clothes",
+        "Goblin Suit",
+        "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit",
+        "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Goblin Suit", "Big Toadstool Suit",
+        "Toadstool Suit", "Toadstool Suit", "Toadstool Suit",
+        "Shoulder Pads", "Vareth Uniform", "Shabby Mail", "Shabby Mail", "Glory Armor",
+        "Normal Clothes", "Nurse Uniform", "Smelly Old Clothes",
+        "Children's Clothes", "Valiant Mail", "Not Implemented Armor 3", "Glory Armor", "Trainee's Wear",
         "Umbrella", "Herb Extract S", "Herb Extract DX", "Herb Extract MAX", "Revival Stone", "Cleansing Stone",
         "Moon Stone Chip", "Revival Stone Chip", "Cure Drop", "Cooling Spray", "Holy Water", "Flexibility Lotion",
-        "Invincibility Med", "Mud Powder", "Mustard Powder", "Startle Powder", "Snow Powder", "Magma Powder", 
-        "Panic Powder", "Mass of Enmity", "Cement Powder", "Tsuchinoko Dumpling", "Flee Ball", "Analysis Ball", 
-        "Celestial Nectar", "Holy Sword Gram", "Seraphic Garb", "Evening Bloom", "David's Letter", 
-        "Carlos's Contact Lens", "Faraus's Med/Voynich Book", "Key to Repository", "Man's Picture", "Church Bulletin", "Worn Belt", 
+        "Invincibility Med", "Mud Powder", "Mustard Powder", "Startle Powder", "Snow Powder", "Magma Powder",
+        "Panic Powder", "Mass of Enmity", "Cement Powder", "Tsuchinoko Dumpling", "Flee Ball", "Analysis Ball",
+        "Celestial Nectar", "Holy Sword Gram", "Seraphic Garb", "Evening Bloom", "David's Letter",
+        "Carlos's Contact Lens", "Faraus's Med/Voynich Book", "Key to Repository", "Man's Picture", "Church Bulletin", "Worn Belt",
         "Lulu's Cat", "Matango Larva", "Gobpakken Seed", "Pointura's Thread", "Blood Orc's Horn" "Collection Bag",
         "Bridge Blueprints", "Piglet", "King's Toadstool", "Polpo's Soup", "Tria Milk", "Bligh's Pipe",
         "Deathclover Larva", "Nightstone", "Blue Orb", "Green Orb", "Red Orb", "Purple Orb", "Orb",
@@ -1047,16 +1070,16 @@ class TextureBanks:
                 desc = data.get('description', '')
                 # Base (Compressed) entry
                 base_meta: dict[str, Any] = {
-                    'title': f'{name} (Compressed)', 
+                    'title': f'{name} (Compressed)',
                     'tags': ('Texture',)
                 }
                 if desc:
                     base_meta['description'] = desc
                 yield f'{disk_idx}.{child_idx}', base_meta
-        
+
                 # FIS entry
                 fis_meta: dict[str, Any] = {
-                    'title': name, 
+                    'title': name,
                     'tags': ('Texture', 'FIS')
                 }
                 if desc:
@@ -1067,11 +1090,11 @@ class TextureBanks:
         disk_idx = cls._RANGE02
         for child_idx, name in enumerate(cls._BANK02):
             yield f'{disk_idx}.{child_idx + 1}', {
-                'title': f'{name} Icon (Compressed)', 
+                'title': f'{name} Icon (Compressed)',
                 'tags': ('Texture',)
             }
             yield f'{disk_idx}.{child_idx + 1}.0', {
-                'title': f'{name} Icon', 
+                'title': f'{name} Icon',
                 'tags': ('Texture', 'FIS')
             }
         # Metadata for Texture Bank 10
@@ -1079,6 +1102,6 @@ class TextureBanks:
         disk_idx = cls._RANGE10
         for child_idx, data in cls._BANK10.items():
             yield f'{disk_idx}.{child_idx}', {
-                'title': data.get('title'), 
-                'description': data.get('description'), 
+                'title': data.get('title'),
+                'description': data.get('description'),
                 'tags': ('Texture', 'FIS')}
