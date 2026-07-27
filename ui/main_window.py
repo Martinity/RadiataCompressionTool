@@ -37,6 +37,7 @@ Here is a visual breakdown of the widget hierarchy with ISO loading/rebuild as e
 """
 
 from __future__ import annotations
+from sre_compile import SUCCESS
 
 import logging
 import threading
@@ -252,17 +253,18 @@ class MainWindow(QMainWindow):
         if handle:
             self.rebuild_page.set_task_handle(handle)
 
-    def _on_iso_loaded(self, nodes: list | None) -> None:
+    def _on_iso_loaded(self, success: bool, result: VfsNode | str) -> None:
         self.welcome_page.set_loading(False)
-        if nodes is None:
-            QMessageBox.critical(self, 'Load Error', 'Invalid ISO.')
+        if not success:
+            QMessageBox.critical(self, 'Load Error', f'Failed to load ISO:\n{result}')
+            self.status_bar.clearMessage()
             return
-        root_node = nodes[0]
-        self.controller.init_file_tree(root_node)
+        has_iso = isinstance(result, VfsNode)
+        if not has_iso:
+            return
+        self.controller.init_file_tree(result)
         self.stack.setCurrentIndex(AppPage.WORKSPACE)
         self.workspace_page.setFocus()
-        self.status_bar.showMessage('ISO loaded - verifying build...')
-        has_iso = bool(nodes)
         self.menu_manager.open_action.setEnabled(not has_iso)
         self.menu_manager.close_action.setEnabled(has_iso)
         self.menu_manager.verify_hash.setEnabled(has_iso)

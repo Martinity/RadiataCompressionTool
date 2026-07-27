@@ -463,7 +463,7 @@ class Actions:
         handler_class: type,
         path:          Path,
         task_handle:   TaskHandle,
-    ) -> tuple | None:
+    ) -> object:
         '''Read the TOC and split the disk into it's physical files'''
         try:
             handler = handler_class(path, None)
@@ -472,9 +472,7 @@ class Actions:
             handler.release_handle()
             return LoadIsoResult(True, handler, root)
         except ValueError as e:
-            task_handle.finished.emit(False, str(e))
-            task_handle.checkpoint()
-            return None
+            return str(e)
 
     @staticmethod
     def rebuild_iso(

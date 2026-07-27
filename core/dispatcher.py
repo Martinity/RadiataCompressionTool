@@ -35,7 +35,7 @@ class Dispatcher(QObject):
     Dispatcher does not need to now what an action needs to execute.
     '''
     # Tree / Tracker
-    iso_loaded        = pyqtSignal(object)           # [root] | None (failed)
+    iso_loaded        = pyqtSignal(bool, object)     # (success, result[root | error_msg])
     expand_requested  = pyqtSignal(object, object)   # (VfsNode, wait_event)
     node_changed      = pyqtSignal(VfsNode)          # Update for TreeView
     tracking_update   = pyqtSignal(int, int)         # (modified_count, staged_count)
@@ -470,17 +470,16 @@ class Dispatcher(QObject):
         '''Takes the ISO's root+children nodes and intializes:
         VfsManager -> VfsNavigator -> metadata -> and signals completion'''
         if threading.get_ident() != self._main_thread_id:
-            logger.error("_on_iso_loaded ran off the main thread")
+            raise threading.ThreadError("_on_iso_loaded ran off the main thread")
         from core.workers import LoadIsoResult
         if not isinstance(result, LoadIsoResult) or not success:
             msg = result.error if isinstance(result, LoadIsoResult) else str(result)
-            logger.error(f'ISO load failed: {msg}')
-            self.iso_loaded.emit(None)
+            self.iso_loaded.emit(False, msg)
             return
         handler, root = result.handler, result.root
         if not root:
-            logger.error('ISO load succeeded but no root node was returned')
-            self.iso_loaded.emit(None)
+            msg = 'ISO load succeeded but no root node was returned'
+            self.iso_loaded.emit(False, msg)
             return
         self.active_handler = handler
         self.vfs = VfsManager(
@@ -497,7 +496,7 @@ class Dispatcher(QObject):
             QTimer.singleShot(0, lambda: self.iso_verified.emit(build))
         # self._migrate_targets_if_needed()   # Uncomment for building metadata from scratch
 
-        self.iso_loaded.emit([root])
+        self.iso_loaded.emit(True, root)
 
     def _handle_verify_hash(self) -> None:
         if self.active_handler is None:
