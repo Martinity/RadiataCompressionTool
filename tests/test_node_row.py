@@ -64,13 +64,16 @@ class _FakeQObject:
 
 def _make_manager(root: VfsNode) -> VfsManager:
     """Create a VfsManager; suppress PyQt6 signals for testing."""
-    return VfsManager(root)
+    return VfsManager(root, root.children[-1])
 
 
 def test_insert_children_sets_row(qtbot):
     """VfsManager.insert_children must set _row correctly."""
     root = VfsNode(name='root')
-    mgr = VfsManager(root)
+    vfs_entry = VfsNode(name='vfs_entry')
+    vfs_entry.is_boundary = True
+    root.append_child(vfs_entry)
+    mgr = VfsManager(root, root.children[-1])
 
     new_nodes = [VfsNode(name=f'n{i}', size=1, offset=i) for i in range(6)]
     mgr.insert_children(root, new_nodes)
@@ -84,7 +87,10 @@ def test_insert_children_sets_row(qtbot):
 def test_insert_children_appended_after_existing(qtbot):
     """Row indices are offset correctly when children already exist."""
     root = VfsNode(name='root')
-    mgr = VfsManager(root)
+    vfs_entry = VfsNode(name='vfs_entry')
+    vfs_entry.is_boundary = True
+    root.append_child(vfs_entry)
+    mgr = VfsManager(root, root.children[-1])
 
     first_batch = [VfsNode(name=f'first{i}', size=1, offset=i) for i in range(3)]
     mgr.insert_children(root, first_batch)

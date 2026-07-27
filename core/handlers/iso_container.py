@@ -199,41 +199,34 @@ class IsoHandler(PhysicalHandler):
         Returns the root node of the VFS (the toc/gameassets)
         '''
         logger.debug('Building VFS tree from TOC')
+        # Root node
         root = VfsNode(name='VFS Mount-point', size=-1, offset=-1)
         root.is_hidden   = False
         root.is_boundary = True
 
-        # semantic_names: dict[int, str] = generate_name_overrides()
-
         for entry in toc:
             disk_index = entry['id']
-            if entry['size'] == 0:  # null entries
-                self_reference_node = VfsNode(
+            # Sentinel nodes
+            if entry['size'] == 0:
+                sentinel = VfsNode(
                     name=f'sentinel {disk_index}',
-                    offset=self.params.toc_offset,
-                    size=self.params.total_entries * self.params.sector_size,
+                    offset=-1,
+                    size=-1,
                     parent=root,
                 )
-                self_reference_node.is_hidden = True
-                root.append_child(self_reference_node)
+                sentinel.is_hidden = True
+                root.append_child(sentinel)
                 continue
-
-            # Real node
-            # header: bytes = self.handle.read(32)
-            # ext: str = lookup_extension(header, self._check_pk(header))
-            # semantic_name: str | None = semantic_names.get(disk_index, entry['name'])
-
+            # Valid nodes
             node = VfsNode(
                 name='Unknown',
                 category=('',),
                 offset=entry['offset'],
                 size=(entry['size'] * self.params.sector_size),
                 parent=root,
-                # header=header,
-                # extension=ext,
                 target=None,
             )
-            node.is_physical = True  # Set as reference node for all file processes
+            node.is_physical = True
             root.append_child(node)
             if disk_index in [0, 5]:  # Hide file system nodes
                 node.is_hidden = True

@@ -29,7 +29,7 @@ class VfsNode:
         offset:    int = 0,
         size:      int = 0,
         header:    bytes = b'',
-        extension: str = '.bin',
+        extension: str | None = None,
         parent:    VfsNode | None = None,
         hid:       tuple[int, ...] = (),
         target:    tuple[int, ...] | None = None,
@@ -44,7 +44,7 @@ class VfsNode:
         self.target: tuple[int,...] | None = target         # Header HID for unpacking datacenter
 
         self.header    = header                             # raw header
-        self.extension = extension                          # extension from override
+        self.extension = extension                          # extension from override saved in radi_metadata
         self.compressed_header: CompressorHandler.SlzHeader | None = None        # SLZ source header
 
         self._id_path: tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
@@ -179,19 +179,15 @@ class VfsManager(QObject):
         Update the VFS and signal to the tree model.
 
         Enforces all iso level nodes to be registered at initialization, not lazily via insert_children.
-        Unfortunately also enforces all iso level nodes to be depth 1.
+        Because of the registration enforcement all iso level nodes are depth 1 only.
         Not really a problem for anything unless the project expands to splitting the kernel image or main ELF.
+        Could also be a problem if some kind of custom ISO level structure is modded in.
         '''
         if not new_children:
             return
         assert parent is not self.vfs_entry, (
             'vfs_entry\'s children must be populated at initialization, not lazily via insert_children'
         )
-        OVERLAYS = [
-            'Step0_00', 'Step1_00', 'Step1_01', 'Step1_02', 'Step2_00', 'Step2_01',
-            'Step2_99', 'hoshi', 'kushi', 'nishi', 'yoko', 'kame', 'RouteEditor',
-            'CharaChecker', 'RmfChecker', 'T10000'
-        ]
         with self._lock:
             base_idx = len(parent.children)
             self.insert_start.emit(parent, base_idx, base_idx + len(new_children) - 1)
@@ -202,7 +198,7 @@ class VfsManager(QObject):
                 child.is_hidden = bool(parent.is_hidden or not child.size or child.offset == -1)
                 if self.enrich_node:
                     self.enrich_node(child)
-                if child.extension == '.bin' and child.name not in OVERLAYS and child.offset != -1:
+                if not child.extension and child.offset != -1:
                     self.request_extension.emit(child)
                 parent.children.append(child)
                 self._register_recursive(child, self.vfs_nodes_by_id)

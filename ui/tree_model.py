@@ -91,7 +91,7 @@ class VfsTreeModel(QAbstractItemModel):
             if col == 0:
                 return node.hierarchical_id_str
             if col == 1:
-                return node.name + node.extension
+                return node.name + node.extension if node.extension else node.name
             if col == 2:
                 return human_size(node.size)
 

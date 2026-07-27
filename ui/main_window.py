@@ -175,7 +175,7 @@ class MainWindow(QMainWindow):
         self.dispatcher.rebuild_progress.connect(self.rebuild_page.update_progress)
         self.dispatcher.rebuild_log.connect(self.rebuild_page.append_log)
         self.dispatcher.rebuild_complete.connect(self.on_rebuild_complete)
-        self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(f'Build: {build}', 0))
+        self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(f'Build: {build}'))
         self.dispatcher.io_progress.connect(lambda val, msg: self.status_bar.showMessage(msg))
         self.dispatcher.io_complete.connect(self._handle_io_completion)
 
@@ -265,6 +265,7 @@ class MainWindow(QMainWindow):
         has_iso = bool(nodes)
         self.menu_manager.open_action.setEnabled(not has_iso)
         self.menu_manager.close_action.setEnabled(has_iso)
+        self.menu_manager.verify_hash.setEnabled(has_iso)
 
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         """Handles the completion signal from the background thread"""
@@ -444,6 +445,11 @@ class MainMenuBar:
         self.dump_metadata.triggered.connect(self._handle_meta_dump)
         file_menu.addAction(self.dump_metadata)
 
+        self.verify_hash = QAction('Verify hash', self.window)
+        self.verify_hash.triggered.connect(self._handle_verify_hash)
+        self.verify_hash.setEnabled(False)
+        file_menu.addAction(self.verify_hash)
+
         file_menu.addSeparator()
 
         self.open_action = QAction('Open ISO', self.window)
@@ -539,6 +545,9 @@ class MainMenuBar:
             path += '.json'
         self.window.metadata_store.dump_metadata(Path(path))
 
+    def _handle_verify_hash(self) -> None:
+        self.window.dispatcher._handle_verify_hash()
+
     def _handle_open(self) -> None:
         start_dir = self.settings.last_iso_dir or ''
         path, _ = QFileDialog.getOpenFileName(
@@ -552,6 +561,7 @@ class MainMenuBar:
         self.dispatcher.close()
         self.open_action.setEnabled(True)
         self.close_action.setEnabled(False)
+        self.verify_hash.setEnabled(False)
         self.window.welcome_page.set_loading(False)
         self.window.stack.setCurrentIndex(AppPage.WELCOME)
 

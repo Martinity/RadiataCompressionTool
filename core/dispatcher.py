@@ -8,6 +8,7 @@ from wsgiref.util import request_uri
 
 import functools
 import threading
+from struct import unpack_from
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
@@ -45,7 +46,7 @@ class Dispatcher(QObject):
     rebuild_log      = pyqtSignal(str)               # log for rebuild page
     rebuild_complete = pyqtSignal(bool, str)         # (success, message)
     # ISO verification
-    iso_verified = pyqtSignal(str)                   # Build string
+    iso_verified = pyqtSignal(str)                   # Build string. Used for get_build and verify_iso with the difference being specificity
     # Generic node actions
     action_complete  = pyqtSignal(object)            # ActionResult
     file_browser_log = pyqtSignal(str)               # Testing usefulness of log signalling
@@ -438,17 +439,23 @@ class Dispatcher(QObject):
 
     def _handle_extension_request(self, node: VfsNode, auto_save: bool = False) -> None:
         '''
-        Fulfill extension request from the VFS when metadata return '.bin' (default extension)
-        Wastefully reads the entire node into memory before returning,
-        shouldn't matter too much since this only is triggered on nodes that had no extension enrichment
+        Fulfill extension request from the VFS when metadata return null (default extension)
+
+        Wastefully reads the entire node into memory on the main thread before returning,
+        shouldn't matter too much since this only is triggered on nodes that had no extension enrichment.
+
+        Preferably upgrade the data fetch to a background task.
         '''
-        if node.extension != '.bin':
+        if node.extension:
             return
 
+        PK3_MAGIC = 0x004E000
         def _check_pk(header: bytes) -> str:
-            offset_header = int.from_bytes(header[0x10:0x14], 'little')
-            pk3_magic = 0x004E000
-            if offset_header % pk3_magic == 0:  # header is pk3 divisible
+            '''Checks the header for pk3 pattern, filters out sentinel values.'''
+            check_1, check_2 = unpack_from('<II', header, 0x10)
+            if not check_1 or not check_2:
+                return '.bin'
+            if check_2 % PK3_MAGIC == 0 and check_1 % PK3_MAGIC == 0:  # header is pk3 divisible
                 return '.pk3'  # pk3 header
             return '.bin'
 
@@ -461,7 +468,7 @@ class Dispatcher(QObject):
 
     def _on_iso_loaded(self, success: bool, result: object) -> None:
         '''Takes the ISO's root+children nodes and intializes:
-        VfsManager -> VfsNavigator -> metadata -> and signals'''
+        VfsManager -> VfsNavigator -> metadata -> and signals completion'''
         if threading.get_ident() != self._main_thread_id:
             logger.error("_on_iso_loaded ran off the main thread")
         from core.workers import LoadIsoResult
@@ -490,11 +497,14 @@ class Dispatcher(QObject):
             QTimer.singleShot(0, lambda: self.iso_verified.emit(build))
         # self._migrate_targets_if_needed()   # Uncomment for building metadata from scratch
 
-        # TODO: move verify action to new menu_bar
-        # verify_handle = self.task_coordinator.start_task(Actions.verify_iso, handler)
-        # verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
-        # verify_handle.finished.connect(self._on_iso_verified)
         self.iso_loaded.emit([root])
+
+    def _handle_verify_hash(self) -> None:
+        if self.active_handler is None:
+            return
+        verify_handle = self.task_coordinator.start_task(Actions.verify_iso, self.active_handler)
+        verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
+        verify_handle.finished.connect(self._on_iso_verified)
 
     def _on_rebuild_finished(self, success: bool, result: Any) -> None:
         '''Verify type of result and pack signal'''
