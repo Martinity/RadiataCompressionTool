@@ -3,11 +3,10 @@ Dispatcher handles most of the coordination work between the UI and logic
 Functions as a signal proxy
 '''
 from __future__ import annotations
-from pkgutil import extend_path
-from wsgiref.util import request_uri
 
 import functools
 import threading
+import platform
 from struct import unpack_from
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -16,11 +15,13 @@ from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
 from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle
+from core.native.block_device import BlockDevice
 from core.navigator import VfsNavigator
 from core.metadata_manager import NodeMetadataStore
 from core.extension_overrides import lookup_extension
 if TYPE_CHECKING:
     from core.contracts import BaseHandler, BaseEditor
+    from core.handlers.iso_container import IsoHandler
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -50,9 +51,7 @@ class Dispatcher(QObject):
     # Generic node actions
     action_complete  = pyqtSignal(object)            # ActionResult
     file_browser_log = pyqtSignal(str)               # Testing usefulness of log signalling
-    # IO
-    io_progress = pyqtSignal(int, str)               # completion %
-    io_complete = pyqtSignal(bool, object)           # (success, result)
+    action_progress  = pyqtSignal(int, str)          # (completion %, action name)
 
     def __init__(self) -> None:
         super().__init__()
@@ -89,12 +88,22 @@ class Dispatcher(QObject):
     ###----------------------------------- Public ----------------------------------------###
 
     def load_source(self, source: Path | VfsNode) -> TaskHandle | list[VfsNode]:
+        '''Route a block file or VfsNode to the appropriate handler.'''
         if isinstance(source, Path):
             handler_class = Registry.get_handler(source)
-            if not handler_class:
-                logger.warning(f'No handler for {source.name}')
+            from core.contracts import PhysicalHandler
+            from core.handlers.iso_container import IsoHandler
+            if (
+                not handler_class or
+                not (isinstance(handler_class, type) and issubclass(handler_class, PhysicalHandler)) or
+                not (isinstance(handler_class, type) and issubclass(handler_class, IsoHandler))
+            ):
+                logger.warning(f'No handler for {source.name}, {handler_class}')
                 return []
-            return self._load_physical(handler_class, source)
+            resolved = resolve_raw_disc_device(source)
+            source_stream = BlockDevice(str(resolved), sector_size=2048)
+            handler = handler_class(source_stream)
+            return self._load_physical(handler)
 
         if source.children or source.expansion_pending:
             return source.children or []
@@ -368,7 +377,7 @@ class Dispatcher(QObject):
 
     ###------------------------------ Helpers --------------------------------###
 
-    def _load_physical(self, handler_class: type, path: Path) -> TaskHandle:
+    def _load_physical(self, handler: IsoHandler) -> TaskHandle:
         '''Send ISO loading to a worker thread'''
         if self.active_handler:
             self.active_handler.close()
@@ -377,8 +386,7 @@ class Dispatcher(QObject):
 
         task_handle = self.task_coordinator.start_task(
             Actions.load_iso,
-            handler_class,
-            path
+            handler,
         )
         task_handle.log_message.connect(self.file_browser_log.emit)
         task_handle.finished.connect(self._on_iso_loaded)
@@ -456,7 +464,7 @@ class Dispatcher(QObject):
             if not check_1 or not check_2:
                 return '.bin'
             if check_2 % PK3_MAGIC == 0 and check_1 % PK3_MAGIC == 0:  # header is pk3 divisible
-                return '.pk3'  # pk3 header
+                return '.pk3'
             return '.bin'
 
         header: bytes = self.get_node_data(node)[:0x30]
@@ -499,9 +507,16 @@ class Dispatcher(QObject):
         self.iso_loaded.emit(True, root)
 
     def _handle_verify_hash(self) -> None:
+        '''
+        Background task for manual ISO hashing.
+        I'm not fully convinced that this is necesarry with the new ISO ingestion,
+        will come down to how the community wants to handle mod distribution.
+        For now it's easier to leave the dependency than remove and add it again.
+        '''
         if self.active_handler is None:
             return
         verify_handle = self.task_coordinator.start_task(Actions.verify_iso, self.active_handler)
+        verify_handle.progress.connect(lambda pct: self.action_progress.emit(pct, 'Verify iso'))
         verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         verify_handle.finished.connect(self._on_iso_verified)
 
@@ -585,3 +600,44 @@ class Dispatcher(QObject):
             logger.error(f'Decode failed: {error_msg}')
             if on_failure:
                 on_failure(error_msg)
+
+###------------------------------------- Block Device Helpers -----------------------------------###
+
+def resolve_raw_disc_device(path: Path) -> Path | str:
+    '''
+    Resolves a mountpoint or drive letter to its raw physical block device path.
+    If the path is already a file, it is returned as-is.
+    '''
+    path = Path(path).resolve()
+    if path.is_file():
+        return path
+    system = platform.system()
+
+    if system == 'Windows':
+        drive_letter = path.drive.rstrip('\\')
+        if drive_letter:
+            return fr'\\.\{drive_letter}'
+        raise ValueError(f'Could not resolve Windows drive letter from {path}')
+
+    elif system == 'Linux':
+        for dev in ['/dev/sr0', '/dev/cdrom', '/dev/dvd']:
+            if Path(dev).exists():
+                return dev
+        with open('/proc/mounts') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == str(path):
+                    return parts[0]
+        raise FileNotFoundError(f'No optical raw device found for mountpoint {path}')
+
+    elif system == 'Darwin':
+        import subprocess
+        result = subprocess.run(['df', str(path)], capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            if len(lines) > 1:
+                dev = lines[1].split()[0]
+                return dev.replace('/dev/disk', '/dev/rdisk')
+        raise FileNotFoundError(f'Could not resolve macOS disk device for {path}')
+
+    return path

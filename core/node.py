@@ -43,7 +43,6 @@ class VfsNode:
         self.size   = size                                  # Size of node in bytes (VirtualFile=disk[offset:offset+size])
         self.target: tuple[int,...] | None = target         # Header HID for unpacking datacenter
 
-        self.header    = header                             # raw header
         self.extension = extension                          # extension from override saved in radi_metadata
         self.compressed_header: CompressorHandler.SlzHeader | None = None        # SLZ source header
 
@@ -198,19 +197,23 @@ class VfsManager(QObject):
                 child.is_hidden = bool(parent.is_hidden or not child.size or child.offset == -1)
                 if self.enrich_node:
                     self.enrich_node(child)
-                if not child.extension and child.offset != -1:
+                if not child.extension and not child.is_hidden:
                     self.request_extension.emit(child)
                 parent.children.append(child)
                 self._register_recursive(child, self.vfs_nodes_by_id)
             self.insert_finished.emit()
 
     def enrich_initial_tree(self) -> None:
-        '''Walk the tree after initialization enriching nodes with metadata'''
+        '''
+        Walk the VFS after initialization enriching nodes with metadata.
+        No need for extra metadata on ISO level nodes since the root
+        directory + system.cnf supplies enough context.
+        '''
         if not self.enrich_node:
             return
         for child in self.root.children[-1].children:
             self.enrich_node(child)
-            if child.extension == '.bin' and 'sentinel' not in child.name:
+            if not child.extension and not child.is_hidden:
                 self.request_extension.emit(child)
         logger.debug('VfsManager.enrich_initial_tree: complete')
 

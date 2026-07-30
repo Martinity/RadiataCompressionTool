@@ -1,8 +1,6 @@
 """PhysicalHandler ISO related processing. Extraction, rebuilding, TOC parsing, disk verification"""
 
 from __future__ import annotations
-from inspect import Signature
-from ast import main
 
 import logging
 import struct
@@ -12,22 +10,18 @@ from typing import Any
 
 import xxhash
 from core.contracts import PhysicalHandler
-from core.extension_overrides import lookup_extension
-from core.name_overrides import generate_name_overrides
 from core.node import VfsNode
 from core.registry import Registry
 from core.workers import TaskHandle
+from core.native.block_device import BlockDevice
 
 logger = logging.getLogger(f'radiata.{__name__}')
 
-_VD_SECTOR = 16  # Primary Volume Descriptor sector
-_VD_VOL_SPACE_OFF = 80  # Both-endian 'Volume Space Size' field ISO9660 §8.4.8
 _KNOWN_BUILDS: dict[str, str] = {
     '7ee1ab6550739833f757ccc9db23cc36': 'Prototype',
     'afb46b880ee88e93b1f2ccb417e02977': 'USA release',
     'f5fbce42d0d943c01e506c7f7d7e24e2': 'JPN release',
 }
-
 
 @dataclass(frozen=True)
 class RootDirectoryStructure:
@@ -74,19 +68,15 @@ class RootDirectoryStructure:
             file_name=file_name,
         )
 
-    @classmethod
-    def to_bytes(cls, record: RootDirectoryStructure) -> bytes:
-        # Pack the entry
-
-        return bytes()
-
 
 ###------------------------------ ISO HANDLER ------------------------------------###
 
 
 @Registry.register(name='Radiata Stories ISO Handler', extensions=('.iso',))
 class IsoHandler(PhysicalHandler):
-    """Responsible for loading the ISO and TOC related operations"""
+    """
+    Responsible for managing and keeping the ISOfs and Vfs consistent and in sync.
+    """
 
     @dataclass(slots=True)
     class IsoParameters:
@@ -99,22 +89,20 @@ class IsoHandler(PhysicalHandler):
         iso_9660_pvd:           int = 16
         root_dir_record_offset: int = 0x9C
 
-    def __init__(self, iso_path: Path, parent=None):
+    def __init__(self, source: BlockDevice, parent=None):
         """Initialize iso properties"""
-        super().__init__(iso_path)
-        logger.info(f'IsoHandler initialized for {iso_path.name}')
-        self.source: Path = iso_path
-        self.params       = self.IsoParameters()
-        self.toc: list    = []
-        self.toc_location = -1
+        super().__init__(source, parent_node=parent)
+        logger.info(f'IsoHandler initialized for {source.name}')
+
+        self.params            = self.IsoParameters()
+        self.toc: list         = []
+        self.toc_location      = -1
+        self.pvd: RootDirectoryStructure | None = None
         self.cnf: tuple[int, int] | None = None
 
     def get_raw_node(self, node: VfsNode) -> bytes:
         """Called for the raw data of a physical node with a private handle"""
-        with open(self.path, 'rb') as fh:
-            fh.seek(node.offset)
-            data = fh.read(node.size)
-
+        data = self.handle.pread(node.offset, node.size)
         logger.debug(
             f'Read {len(data) // self.params.sector_size} sectors from offset {hex(node.offset)}'
         )
@@ -129,29 +117,23 @@ class IsoHandler(PhysicalHandler):
         SIGNATURE        = b'RADIATA'
         SIGNATURE_OFFSET = 0x28
         SIGNATURE_LENGTH = 7
-        self.handle.seek((self.params.iso_9660_pvd * self.params.sector_size) + SIGNATURE_OFFSET)
-        title = bytes(self.handle.read(SIGNATURE_LENGTH))
+        offset = (self.params.iso_9660_pvd * self.params.sector_size) + SIGNATURE_OFFSET
+        title = self.handle.pread(offset, SIGNATURE_LENGTH)
         if title != SIGNATURE:
             raise ValueError(
-                f'Not a Radiata Stories disk. Found {title}, expected {SIGNATURE}'
+                f'Not a Radiata Stories disk. Found {title}, expected {SIGNATURE} @{offset}({hex(offset)})'
             )
 
         root = VfsNode(name='root')
         # Read descriptor volume for root dir location
-        self.handle.seek(
-            (self.params.iso_9660_pvd * self.params.sector_size)
-            + self.params.root_dir_record_offset
-        )
-        pvd_len = self.handle.read(1)[0]
-        self.handle.seek(-1, 1)
-        pvd = RootDirectoryStructure.from_bytes(self.handle.read(pvd_len))
+        offset = (self.params.iso_9660_pvd * self.params.sector_size) + self.params.root_dir_record_offset
+        pvd_len = self.handle.pread(offset, 1)[0]
+        self.pvd = RootDirectoryStructure.from_bytes(self.handle.pread(offset, pvd_len))
 
         # Read root dir for files
         bytes_read = 0
-        self.handle.seek(pvd.lba)
-        root_dir_view = memoryview(self.handle.read(pvd.file_size))
-
-        while bytes_read < pvd.file_size:
+        root_dir_view = memoryview(self.handle.pread(self.pvd.lba, self.pvd.file_size))
+        while bytes_read < self.pvd.file_size:
             entry_length = root_dir_view[bytes_read]
             bytes_read  += 1
             if not entry_length:
@@ -258,8 +240,7 @@ class IsoHandler(PhysicalHandler):
         elf_bytes: bytes | None = None
         for child in root.children:
             if child.name.startswith('SLUS') or child.name.startswith('SLPM'):
-                self.handle.seek(child.offset)
-                elf_bytes = bytes(self.handle.read(child.size))
+                elf_bytes = self.handle.pread(child.offset, child.size)
                 break
         if elf_bytes is None:
             raise ValueError('No main ELF found.')
@@ -293,8 +274,8 @@ class IsoHandler(PhysicalHandler):
     def _load_toc(self) -> memoryview:
         """Locate the TOC."""
         # Check for radiata ISO
-        self.handle.seek(self.params.toc_offset * self.params.sector_size)
-        toc_view = memoryview(self.handle.read(self.params.total_entries * 3 * 4))
+        offset = self.params.toc_offset * self.params.sector_size
+        toc_view = memoryview(self.handle.pread(offset, self.params.total_entries * 3 * 4))
         if self.params.signature != int.from_bytes(toc_view[:4], 'little'):
             raise ValueError(
                 f'Not a Radiata Stories TOC. Got TOC signature: {int.from_bytes(toc_view[:4], 'little')} Expected: {hex(self.params.signature)}'
@@ -328,81 +309,48 @@ class IsoHandler(PhysicalHandler):
 
     def rebuild_node(
         self,
-        node: VfsNode,
+        root:         VfsNode,
         staged_nodes: list[VfsNode],
-        output_path: Path,
-        task_handle: TaskHandle,
+        output_path:  Path,
+        task_handle:  TaskHandle,
+        slimmed_rebuild_requested: bool,
     ) -> bool:
-        """Rebuilds the ISO, preserving physical ordering, aliasing, and system file integrity."""
-        if output_path.resolve() == self.source.resolve():
+        """
+        Rebuild the iso file system and the games virtual filesystem independently.
+
+        Starts with the iso file system (front of the disk) before rebuilding the virtual filesystem.
+        If the slimmed_rebuild_requested flag is set the toc location hardcode is moved to the next
+        available sector after the iso file system.
+
+        The virtual filesystem is rebuilt after the iso file system to preserve physical ordering and aliasing.
+        """
+        src_path: Path = self.source.path
+        if output_path.resolve() == src_path.resolve():
             raise ValueError('Cannot overwrite source ISO')
-        staged_set = set(staged_nodes)
+        # Split the staged nodes into two sets, one for ISO and VFS
+        staged_iso_set = set()
+        staged_vfs_set = set()
+        for child in root.children:
+            if child in staged_nodes and child.is_boundary is False:
+                staged_iso_set.add(child)
+            elif child in staged_nodes and child.is_boundary is True:
+                staged_vfs_set.add(child)
+                staged_nodes.remove(child)
+        for node in staged_nodes:
+            staged_vfs_set.add(node)
+        # locate the boundary node - could change to next((child for child in root.children if child.is_boundary), None)
+        vfs_root = root.children[-1] if root.children[-1].is_boundary else None
+        if vfs_root is None:
+            raise ValueError('No boundary node found')
         try:
             with (
-                open(self.path, 'rb') as src,
                 open(output_path, 'wb') as dst,
             ):  # open private handle
-                task_handle.progress.emit(0, 'Initialized ISO rebuild...')
-                task_handle.log_message.emit('Initialized ISO rebuild...')
-                toc_lba = self.params.toc_offset // self.params.sector_size
-                toc_size = self.params.total_entries * 3 * 4
-                # Copy pre-TOC
-                src.seek(0)
-                self._stream_copy(src, dst, self.params.toc_offset)
-                # Reserve TOC space
-                dst.write(b'\x00' * toc_size)
-                # Start sequential build
-                new_lba_map: dict[VfsNode, int] = {}
-                current_offset = self.params.toc_offset + toc_size
-                for idx, child in enumerate(node.children):
-                    task_handle.checkpoint()
-                    orig_lba = self.toc[idx]['lba'] if idx < len(self.toc) else 0
-                    # TOC self-reference, built in _build_toc
-                    if idx == 0:
-                        new_lba_map[child] = toc_lba
-                        continue
-                    # NULL entries
-                    if child.size == 0 and not (
-                        child in staged_set and child.pending_data is not None
-                    ):
-                        new_lba_map[child] = 0
-                        continue
-                    # Sentinel entries
-                    if orig_lba == -1:
-                        new_lba_map[child] = orig_lba
-                    # Entries with data
-                    data = (
-                        child.pending_data
-                        if child in staged_set and child.pending_data is not None
-                        else self._read_node_from(src, child)
-                    )
-                    if not data:
-                        logger.warning(f'No data for {child.name} (idx {idx})')
-                        new_lba_map[child] = 0
-                        continue
-                    new_lba_map[child] = current_offset // self.params.sector_size
-                    dst.write(data)
-                    padding = (-len(data)) & (self.params.sector_size - 1)
-                    if padding:
-                        dst.write(b'\x00' * padding)
-                    current_offset += len(data) + padding
-
-                    if idx % 50 == 0:
-                        pct = int((idx / self.params.total_entries) * 90)
-                        task_handle.progress.emit(
-                            pct, f'Writing file {idx}/{self.params.total_entries}'
-                        )
-                # Verify the TOC
-                new_toc = self._build_toc(node.children, staged_set, new_lba_map)
-                new_sig = struct.unpack_from('<I', new_toc, 0)[0]
-                if new_sig != self.params.signature:
-                    raise ValueError(
-                        f'TOC signature mismatch. Expected {hex(self.params.signature)} got: {hex(new_sig)}. Entry 0 LBA reconstruction failed.'
-                    )
-                dst.seek(self.params.toc_offset)
-                dst.write(new_toc)
-
-            task_handle.progress.emit(100, 'Rebuild complete!')
+                task_handle.progress.emit(0)
+                task_handle.log_message.emit('Starting to write ISO to disk...')
+                self._rebuild_iso_fs(dst, root, staged_iso_set, slimmed_rebuild_requested, task_handle)
+                self._rebuild_vfs(dst, vfs_root, staged_vfs_set, task_handle)
+            task_handle.progress.emit(100)
             return True
 
         except Exception as e:
@@ -415,19 +363,180 @@ class IsoHandler(PhysicalHandler):
                     logger.error(f'Could not remove partial output: {err}')
             return False
 
-    def _read_node_from(self, file_handle, node: VfsNode) -> None:
-        """Called for raw data of a physical node with an already open handle"""
-        file_handle.seek(node.offset)
-        return file_handle.read(node.size)
 
-    def _stream_copy(self, source_handle, output_obj, length, chunk_size=1024 * 1024):
+    def _rebuild_vfs(
+        self,
+        dst,
+        root: VfsNode,
+        staged_set: set[VfsNode],
+        task_handle: TaskHandle,
+    ) -> None:
+        '''Rebuilds the virtual filesystem (the section of the ISO after the TOC)'''
+
+        toc_lba = self.params.toc_offset // self.params.sector_size
+        toc_size = self.params.total_entries * 3 * 4
+        # Copy pre-TOC
+        src.seek(0)
+        self._stream_copy(src, dst, self.params.toc_offset)
+        # Reserve TOC space
+        dst.write(b'\x00' * toc_size)
+        # Start sequential build
+        new_lba_map: dict[VfsNode, int] = {}
+        current_offset = self.params.toc_offset + toc_size
+        for idx, child in enumerate(root.children):
+            task_handle.checkpoint()
+            orig_lba = self.toc[idx]['lba'] if idx < len(self.toc) else 0
+            # TOC self-reference, built in _build_toc
+            if idx == 0:
+                new_lba_map[child] = toc_lba
+                continue
+            # NULL entries
+            if child.size == 0 and not (
+                child in staged_set and child.pending_data is not None
+            ):
+                new_lba_map[child] = 0
+                continue
+            # Sentinel entries
+            if orig_lba == -1:
+                new_lba_map[child] = orig_lba
+            # Entries with data
+            data = (
+                child.pending_data
+                if child in staged_set and child.pending_data is not None
+                else self._read_node_from(src, child)
+            )
+            if not data:
+                logger.warning(f'No data for {child.name} (idx {idx})')
+                new_lba_map[child] = 0
+                continue
+            new_lba_map[child] = current_offset // self.params.sector_size
+            dst.write(data)
+            padding = (-len(data)) & (self.params.sector_size - 1)
+            if padding:
+                dst.write(b'\x00' * padding)
+            current_offset += len(data) + padding
+
+            if idx % 50 == 0:
+                pct = int((idx / self.params.total_entries) * 90)
+                task_handle.progress.emit(
+                    pct, f'Writing file {idx}/{self.params.total_entries}'
+                )
+        # Verify the TOC
+        new_toc = self._build_toc(root.children, staged_set, new_lba_map)
+        new_sig = struct.unpack_from('<I', new_toc, 0)[0]
+        if new_sig != self.params.signature: # Honestly could probably just overwrite the signature to force it to match
+            raise ValueError(
+                f'TOC signature mismatch. Expected {hex(self.params.signature)} got: {hex(new_sig)}. Entry 0 LBA self-reference reconstruction failed.'
+            )
+        dst.seek(self.params.toc_offset)
+        dst.write(new_toc)
+
+
+    def _rebuild_iso_fs(
+        self,
+        dst,
+        root:  VfsNode,
+        staged_set: set[VfsNode],
+        slimmed_rebuild_requested: bool,
+        task_handle: TaskHandle
+    ) -> None:
+        '''Rebuilds the ISO filesystem (the section of the ISO before the TOC)'''
+        if self.pvd is None:
+            raise ValueError('PVD not found during rebuild.')
+        # Copy everything up to the PVD
+        dst.write(src(0, self.pvd.lba * self.params.sector_size))
+        # Copy the PVD as a pre-allocation (will need to rewrite this with new lbas and sizes)
+        root_dir_offset = dst.tell()
+        dst.write(b'\x00' * self.pvd.file_size)
+        # Write the PVD entries (iso fs) to disk, in physical order not index order
+        iso_nodes = [child for child in root.children if not child.is_boundary]
+        iso_nodes.sort(key=lambda node: node.offset)
+        new_lba_map: dict[VfsNode, int] = {}
+        new_size_map: dict[VfsNode, int] = {}
+
+        for node in iso_nodes:
+            task_handle.checkpoint()
+            current_lba = dst.tell() / self.params.sector_size
+            new_lba_map[node] = current_lba
+            if node in staged_set and node.pending_data is not None:
+                data = node.pending_data
+            else:
+                data = self.get_raw_node(node)
+            dst.write(data)
+            new_lba_map[node] = current_lba
+            new_size_map[node] = len(data)
+            padding = (-len(data)) & (self.params.sector_size - 1)
+            if padding:
+                dst.write(b'\x00' * padding)
+        current_offset = dst.tell()
+        if slimmed_rebuild_requested:
+            new_toc_offset = current_offset
+            self.params.toc_offset = new_toc_offset
+            elf_node = next((n for n in iso_nodes if n.name.startswith('SLUS') or n.name.startswith('SLPM')), None)
+            if elf_node and self.toc_location != -1:
+                hi_val = (new_toc_offset >> 16) & 0xFFFF
+                lo_val = new_toc_offset & 0xFFFF
+
+                elf_new_offset = new_lba_map[elf_node] * self.params.sector_size
+                dst.seek(elf_new_offset + self.toc_location - 4)
+                dst.write(struct.pack('<H', hi_val))
+                dst.seek(elf_new_offset + self.toc_location + 4)
+                dst.write(struct.pack('<H', lo_val))
+            dst.seek(0, 2) # seek EOF
+        else:
+            if current_offset < self.params.toc_offset:
+                src.seek(current_offset)
+                self._stream_copy(src, dst, self.params.toc_offset - current_offset)
+            else:
+                logger.warning('ISO data exceeded original TOC offset. Forcing slimmed build behavior.')
+                self.params.toc_offset = current_offset
+        self._update_root_dir(src, dst, root_dir_offset, iso_nodes, new_lba_map, new_size_map)
+
+    def _update_root_dir(
+        self,
+        src,
+        dst,
+        root_dir_offset: int,
+        iso_nodes: list[VfsNode],
+        lba_map: dict[VfsNode, int],
+        size_map: dict[VfsNode, int]) -> None:
+        if not self.pvd:
+            raise ValueError('PVD not found')
+        src.seek(self.pvd.lba * self.params.sector_size)
+        dir_data = bytearray(src.read(self.pvd.file_size))
+        bytes_read = 0
+        while bytes_read < self.pvd.file_size:
+            entry_length = dir_data[bytes_read]
+            if not entry_length:
+                bytes_read += 1
+                continue
+            name_len = dir_data[bytes_read + 32]
+            raw_name = dir_data[bytes_read + 33:bytes_read + 33 + name_len]
+
+            if raw_name not in (b'\x00', b'\x01'):
+                file_name = raw_name.decode('ascii', errors='replace').split(';')[0]
+                name, sep, ext = file_name.rpartition('.')
+                matching_node = next((n for n in iso_nodes if n.name == name and n.extension == sep + ext), None)
+                if matching_node:
+                    new_lba = lba_map.get(matching_node, 0)
+                    new_size = size_map.get(matching_node, 0)
+                    struct.pack_into('<I', dir_data, bytes_read + 2, new_lba)
+                    struct.pack_into('>I', dir_data, bytes_read + 6, new_lba)
+                    struct.pack_into('<I', dir_data, bytes_read + 10, new_size)
+                    struct.pack_into('>I', dir_data, bytes_read + 14, new_size)
+            bytes_read += entry_length
+        dst.seek(root_dir_offset)
+        dst.write(dir_data)
+        dst.seek(0, 2)
+
+    def _stream_copy(self, src, dst, length: int, chunk_size: int = 1024 * 1024):
         """Helper for writing out one segment or node at a time"""
         bytes_left = length
         while bytes_left > 0:
-            chunk = source_handle.read(min(bytes_left, chunk_size))
+            chunk = src.read(min(bytes_left, chunk_size))
             if not chunk:
                 break
-            output_obj.write(chunk)
+            dst.write(chunk)
             bytes_left -= len(chunk)
 
     def _build_toc(
@@ -481,13 +590,19 @@ class IsoHandler(PhysicalHandler):
         return 'Unknown'
 
     def verify_iso_integrity(self, task_handle: TaskHandle) -> str:
-        '''Read SYSTEM.CNF for the release version'''
-        # Check hash against known hashes
-        with open(self.path, 'rb') as fh:
-            hasher = xxhash.xxh128()
-            while chunk := fh.read(16 * 1024 * 1024):  # read in 16MB chunks
-                task_handle.checkpoint()
-                hasher.update(chunk)
+        '''
+        Hash the ISO with xxhash and compare against known hashes.
+        BlockDevice natively handles the pre-allocation of a zero-copy buffer.
+        '''
+        file_size = getattr(self.source, 'size', 0)
+        hasher = xxhash.xxh128()
+        chunk_size = (16 * 1024 * 1024) # 16MB chunks
+        bytes_read = 0
+        while (chunk := self.handle.pread(size=chunk_size, offset=bytes_read)):
+            task_handle.checkpoint()
+            hasher.update(chunk)
+            bytes_read += len(chunk)
+            task_handle.progress.emit(int(bytes_read / file_size * 100))
         digest = hasher.hexdigest()
         build = _KNOWN_BUILDS.get(digest, f'Modified/Unknown: {digest}')
         return build

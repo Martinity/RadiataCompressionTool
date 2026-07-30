@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Callable, Any, TYPE_CHECKING, NamedTuple
 from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool
 from core.contracts import LeafHandler, ContainerHandler
+from core.native.block_device import BlockDevice
 if TYPE_CHECKING:
     from core.node import VfsNode
     from core.contracts import BaseHandler, PhysicalHandler
@@ -221,7 +222,7 @@ class TaskHandle(QObject):
     _id_generator = itertools.count(1)
 
     state_changed = pyqtSignal(str)           # State name
-    progress      = pyqtSignal(int, str)      # (percentage, message)
+    progress      = pyqtSignal(int)           # (percentage)
     finished      = pyqtSignal(bool, object)  # (success, payload)
     log_message   = pyqtSignal(str)           # log output
 
@@ -460,16 +461,12 @@ class Actions:
     ### ISO Specific actions
     @staticmethod
     def load_iso(
-        handler_class: type,
-        path:          Path,
+        handler:       IsoHandler,
         task_handle:   TaskHandle,
     ) -> object:
         '''Read the TOC and split the disk into it's physical files'''
         try:
-            handler = handler_class(path, None)
-            task_handle.checkpoint()
             root = handler.get_file_tree()
-            handler.release_handle()
             return LoadIsoResult(True, handler, root)
         except ValueError as e:
             return str(e)
@@ -482,23 +479,31 @@ class Actions:
         staged_nodes: list[VfsNode],
         output_path:  Path,
         task_handle:  TaskHandle,
+        slimmed_rebuild_requested: bool,
     ) -> ActionResult:
         from core.navigator import ExpansionTimeoutError
         try:
             task_handle.log_message.emit('Starting ISO build sequence...')
-            task_handle.progress.emit(0, 'Starting Pass 1...')
-            task_handle.log_message.emit('Precomputing Datacenter...')
+            task_handle.progress.emit(0)
+            task_handle.log_message.emit('Starting Pass 1, Precomputing Datacenter...')
 
             extra_targets: list[VfsNode] = navigator.precompute_datacenter(staged_nodes, task_handle)
             all_staged:    list[VfsNode] = list(staged_nodes) + extra_targets
             task_handle.log_message.emit(f'Pass 1 complete - {len(extra_targets)} datacenter target(s) cached and queued')
 
-            task_handle.progress.emit(0, 'Starting Pass2...')
-            task_handle.log_message.emit('Performing VFS rollup...')
+            task_handle.progress.emit(0)
+            task_handle.log_message.emit('Starting Pass 2, Performing VFS rollup...')
 
             physical_staged_nodes = navigator.rollup_nodes(all_staged, task_handle)
-            task_handle.progress.emit(0, 'Writing sectors to disk...')
-            success = handler.rebuild_node(root_node, physical_staged_nodes, output_path, task_handle)
+            task_handle.progress.emit(0)
+            task_handle.log_message.emit('Writing sectors to disk...')
+            success = handler.rebuild_node(
+                root_node,
+                physical_staged_nodes,
+                output_path,
+                task_handle,
+                slimmed_rebuild_requested,
+            )
 
             if success:
                 task_handle.log_message.emit('ISO Build Successful.')
@@ -527,6 +532,7 @@ class Actions:
         handler:      IsoHandler,
         task_handle:  TaskHandle,
     ) -> str:
+        task_handle.progress.emit(0)
         task_handle.log_message.emit('Verifying ISO...')
         result = handler.verify_iso_integrity(task_handle)
         task_handle.log_message.emit(f'ISO verified, build: {result}')
@@ -542,7 +548,7 @@ class Actions:
         action_name:  str = 'Export'
     ) -> ActionResult:
         try:
-            task_handle.log_message.emit(f'Resolving data chain for {node.hierarchical_id_str}')
+            task_handle.log_message.emit(f'Exporting {node.name}{node.extension}...')
             data = navigator.unwrap_chain(node)
             if not data:
                 raise ValueError('Resolved data is empty')
@@ -578,7 +584,6 @@ class Actions:
         try:
             task_handle.log_message.emit(f'Importing {import_path.name}...')
             data = import_path.read_bytes()
-            task_handle.log_message.emit(f'Loaded {len(data)} bytes from {import_path.name}')
             return ActionResult(
                 action_name=action_name,
                 node=node,

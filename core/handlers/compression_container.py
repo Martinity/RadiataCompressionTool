@@ -37,7 +37,7 @@ class CompressorHandler(ContainerHandler):
         self.handler_parent = parent
         self.raw_source = memoryview(self.handle.read())
         self._cached_tree: VfsNode | None = None
-    
+
     def get_file_tree(self) -> VfsNode:
         '''Return a node for the compressed file (cached after first build)'''
         if self._cached_tree is not None:
@@ -51,7 +51,7 @@ class CompressorHandler(ContainerHandler):
             header_view = self.raw_source[current_offset: current_offset + 16]
             if len(header_view) < 16 or header_view[:3] not in [b'SLZ', b'SLE']:
                 break
-            
+
             header = bytes(header_view)
             header_obj = self.SlzHeader(
                 magic='SLZ' if header[:3] == b'SLZ' else 'SLE',
@@ -83,7 +83,7 @@ class CompressorHandler(ContainerHandler):
                 current_offset += aligned_size
             else:
                 current_offset += header_obj.next_file_offset if header_obj.next_file_offset > 0 else (header_obj.compressed_size + 16)
-            
+
             root.append_child(node)
             chunk_idx += 1
         self._cached_tree = root
@@ -94,7 +94,7 @@ class CompressorHandler(ContainerHandler):
         if not node.compressed_header:
             logger.warning(f'No compressed header found for {node.name}')
             return b''
-        
+
         compressed_size = node.compressed_header.compressed_size
         compressed_view = self.raw_source[node.offset : node.offset + compressed_size + 16]
 
@@ -171,7 +171,7 @@ class CompressorHandler(ContainerHandler):
         elif action_name == 'Properties':
             return self.get_properties(node)
         return None
-    
+
     def get_buffer_data(self, node: VfsNode) -> memoryview:
         '''Specialized extraction for composite buffer nodes.'''
         target = node
@@ -181,7 +181,7 @@ class CompressorHandler(ContainerHandler):
             else:
                 logger.error(f'Cannot extract buffer: No compression metadata {node.name}')
                 return memoryview(b'')
-            
+
         continuous_buffer = bytearray()
         current_offset = target.offset
 
@@ -204,10 +204,10 @@ class CompressorHandler(ContainerHandler):
             current_offset += next_file
 
         return memoryview(continuous_buffer)
-    
+
 ###------------------------------------ Compressor ------------------------------------------###
-        
-class RadiCompressor():
+
+class RadiCompressor:
     '''Compressor class for all compression related processing.'''
 
     ###-------------------------- Parameters -----------------------###
@@ -231,7 +231,7 @@ class RadiCompressor():
         rle_short_max: int = 0
         rle_long_min: int = 0
         rle_long_max: int = 0
-        
+
     MODES: dict[int, CompressorMode] = {
         0: CompressorMode(name='STORE', mode = 0),
 
@@ -239,22 +239,22 @@ class RadiCompressor():
             name='LZSS', mode=1, window_size=4096, length_base=3,
             min_match=3, max_match=18
         ),
-        
+
         2: CompressorMode(
             name="LZSS+RLE", mode=2, window_size=4096, length_base=3,
             min_match=3, max_match=17, rle_enabled=True,
             rle_threshold=0xF0, rle_short_min=4, rle_short_max=18,
-            rle_long_min=19, rle_long_max=274            
+            rle_long_min=19, rle_long_max=274
         ),
 
         3: CompressorMode(
             name="LZSS16", mode=3, window_size=8192, literal_size=2,
             flag_bits=16, length_base=2, min_match=4, max_match=34,
-            word_aligned=True            
+            word_aligned=True
         )
     }
 
-    SCRAMBLE_KEY = [0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7, 
+    SCRAMBLE_KEY = [0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7,
                     0xE7, 0xD5, 0x1E, 0x4B, 0x7B, 0xA4, 0x1C, 0x7D]
 
     def __init__(self, data: memoryview, target_mode: int = 3, target_is_encrypted: bool = False, is_final_payload: bool = True):
@@ -310,7 +310,7 @@ class RadiCompressor():
     def _hash3(self, pos) -> int:
         '''get hash for byte'''
         return ((self.data[pos] << 10) ^ (self.data[pos+1] << 5) ^ self.data[pos+2]) & (self.hash_size - 1)
-    
+
     def _find_best_match(self, pos, n, head, prev) -> tuple[int, int]:
         '''Search the hash chain for best match'''
         max_length = min(self.mode.max_match, n - pos)
@@ -365,7 +365,7 @@ class RadiCompressor():
             next_file_offset = len(self.data) + 16 if not self.is_final_payload else 0
             header = self._encode_header(len(self.data), len(self.data), next_file_offset)
             return header + self.data
-            
+
         compressed = bytearray()
         i = 0
         original_size = len(self.data)
@@ -455,9 +455,9 @@ class RadiCompressor():
 
         next_file_offset = len(compressed) + 16 if not self.is_final_payload else 0
         header = self._encode_header(len(compressed), original_size, next_file_offset)
-        
+
         if self.is_encrypted: # Convert SLEs back to SLE
-            compressed = self._scramble_slz_payload(compressed)
+            compressed = self._scramble_slz_payload(bytes(compressed))
             header = header[:2] + b'E' + header[3:]
 
         return bytes(header + compressed)
@@ -478,7 +478,7 @@ class RadiCompressor():
             modified_byte = (scrambled_byte + mod_value) & 0xFF
             scrambled.append(modified_byte)
             mod_value = (mod_value + 0x03) & 0xFF
-        
+
         return bytes(scrambled)
 
     ###------------------------- Decompress --------------------------###
@@ -490,7 +490,7 @@ class RadiCompressor():
 
         if self.mode.name == 'STORE': # STORE mode
             return bytes(self.data[16:])
-        
+
         compressed_size = int.from_bytes(self.data[4:8], 'little')
         expected_size = int.from_bytes(self.data[8:12], 'little')
 
@@ -505,7 +505,7 @@ class RadiCompressor():
 
         pos = 16
         decompressed = bytearray()
-        
+
         flags = 0
         bits_remaining = 0
         def get_next_flag_bit() -> int:
@@ -537,7 +537,7 @@ class RadiCompressor():
             max_size = 64
         current_flags = []
         # loop over compressed payload and stop when hit expected size (else 0s from flag will pad EOF)
-        while pos < max_size:        
+        while pos < max_size:
             is_literal = (get_next_flag_bit() == 1)
             current_flags.append(1 if is_literal else 0)
             if len(current_flags) == self.mode.flag_bits:
@@ -564,7 +564,7 @@ class RadiCompressor():
                             raise EOFError("Ran out of self.data for long RLE fill")
                         fill = self.data[pos] # fill is byte 3
                         pos += 1
-                    decompressed.extend(bytes([fill]) * length) 
+                    decompressed.extend(bytes([fill]) * length)
                 else: # LZSS triggered
                     length_code = (byte2 >> 4) & 0x0F
                     offset_low = byte1

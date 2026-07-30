@@ -37,10 +37,15 @@ Here is a visual breakdown of the widget hierarchy with ISO loading/rebuild as e
 """
 
 from __future__ import annotations
+from imaplib import IMAP4_stream
 from sre_compile import SUCCESS
 
 import logging
 import threading
+import platform
+import json
+import subprocess
+import os
 from enum import IntEnum
 from pathlib import Path
 
@@ -54,14 +59,14 @@ from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardIt
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenuBar,
     QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QTextEdit,
-    QTreeView, QVBoxLayout, QWidget,
+    QTreeView, QVBoxLayout, QWidget, QTabWidget, QLineEdit, QComboBox
 )
 from ui.editor_page import EditorPage
 from ui.file_browser_page import FileBrowserBehavior, FileBrowserPage
 from ui.settings import AppSettings
 from ui.staging_page import StagingPage
 from ui.theme_manager import ThemeManager
-from utilities import get_resource_path
+from utilities import get_resource_path, ToastProgressBar
 
 logger = logging.getLogger(f'radiata.{__name__}')
 
@@ -124,6 +129,7 @@ class MainWindow(QMainWindow):
             self.metadata_store,
             self.app_settings,
         )
+        self.toast_progress_bar = ToastProgressBar(self)
         self._setup_statusbar()
         self._connect_signals()
         self._restore_layout()
@@ -162,7 +168,6 @@ class MainWindow(QMainWindow):
         """
         if threading.get_ident() != self._main_thread_id:
             logger.error('_on_worker_log ran off the main thread!')
-        self.status_bar.showMessage(msg, 0)
 
     def _connect_signals(self) -> None:
         """Routes main window state signals between UI pages or dispatcher"""
@@ -177,9 +182,8 @@ class MainWindow(QMainWindow):
         self.dispatcher.rebuild_log.connect(self.rebuild_page.append_log)
         self.dispatcher.rebuild_complete.connect(self.on_rebuild_complete)
         self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(f'Build: {build}'))
-        self.dispatcher.io_progress.connect(lambda val, msg: self.status_bar.showMessage(msg))
-        self.dispatcher.io_complete.connect(self._handle_io_completion)
 
+        self.dispatcher.action_progress.connect(self.toast_progress_bar.show_progress)
         self.dispatcher.file_browser_log.connect(self.workspace_page.append_log)
 
     ###------------------------------- Appearance ----------------------------------###
@@ -221,6 +225,12 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self.app_settings.theme_name = theme_name
 
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        '''Repositions the toast progress bar when the window is resized.'''
+        super().resizeEvent(event)
+        if hasattr(self, 'toast_progress_bar') and self.toast_progress_bar.isVisible():
+            self.toast_progress_bar._reposition()
+
     ###----------------------------------- ISO ----------------------------------###
 
     def attempt_load_iso(self, path: Path) -> None:
@@ -256,7 +266,9 @@ class MainWindow(QMainWindow):
     def _on_iso_loaded(self, success: bool, result: VfsNode | str) -> None:
         self.welcome_page.set_loading(False)
         if not success:
-            QMessageBox.critical(self, 'Load Error', f'Failed to load ISO:\n{result}')
+            msg = f'Failed to load ISO:\n{result}'
+            QMessageBox.critical(self, 'Load Error', msg)
+            logger.error(msg)
             self.status_bar.clearMessage()
             return
         has_iso = isinstance(result, VfsNode)
@@ -277,12 +289,6 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, 'Build Failed', message)
         self.stack.setCurrentWidget(self.workspace_page)
-
-    def _handle_io_completion(self, success: bool, msg: str):
-        if success:
-            self.status_bar.showMessage(msg, 5000)
-        else:
-            QMessageBox.warning(self, 'Task Error', msg)
 
     ###------------------------------------- Lifecycle --------------------------------------###
 
@@ -321,7 +327,6 @@ class WelcomePage(QWidget):
         self.button.setObjectName('BtnLarge')
         self.set_loading(False)
         self.button.clicked.connect(self.open_file_dialog)
-
         layout.addWidget(subtitle)
         layout.addWidget(self.button)
 
@@ -331,6 +336,12 @@ class WelcomePage(QWidget):
         if path:
             self.settings.last_iso_dir = str(Path(path).parent)
             self.request_open.emit(Path(path))
+        # dialog = DeviceOrIsoDialog(self, last_dir=self.settings.last_iso_dir or "")
+        # if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
+        #     path = dialog.selected_path
+        #     if path.is_file() or path.is_dir():
+        #         self.settings.last_iso_dir = str(path if path.is_dir() else path.parent)
+        #     self.request_open.emit(path)
 
     def set_loading(self, is_loading: bool) -> None:
         if is_loading:
@@ -339,6 +350,175 @@ class WelcomePage(QWidget):
         else:
             self.button.setText('Open ISO')
             self.button.setEnabled(True)
+
+
+class DeviceOrIsoDialog(QDialog):
+    '''
+    A custom file dialog that allows the user to select either an existing ISO file
+    from the filesystem or a raw physical block device/optical drive.
+    Cross-platform compatible.
+    Still need to figure out permissions for accessing block devices.
+    '''
+    source_selected = pyqtSignal(Path)
+
+    def __init__(self, parent=None, last_dir: str = '') -> None:
+        super().__init__(parent)
+        self.setWindowTitle('Select ISO image or Physical Drive')
+        self.resize(600, 400)
+        self.last_dir = last_dir
+        self.selected_path: Path | None = None
+        layout = QVBoxLayout(self)
+        self._warning_banner(layout)
+        # Tabs for selecting between the two types of media inputs
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._create_iso_tab(), 'ISO Image File')
+        self.tabs.addTab(self._create_device_tab(), 'Physical Block Device')
+        layout.addWidget(self.tabs)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btn_confirm = QPushButton('Select')
+        self.btn_confirm.setObjectName('BtnLarge')
+        self.btn_confirm.clicked.connect(self._on_confirm)
+        self.btn_cancel = QPushButton('Cancel')
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(self.btn_confirm)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def _warning_banner(self, layout: QVBoxLayout) -> None:
+        '''
+        Considering that only extra permissions are only required for block devices,
+        this should be moved to show on the device tab only.
+        '''
+        is_elevated = self._check_elevation()
+        if not is_elevated:
+            banner = QLabel(
+                'Interfacing directly with block devices requires elevated permissions.'
+                'Run as Administrator on Windows or use sudo/root on Linux/macOS.'
+            )
+            banner.setWordWrap(True)
+            layout.addWidget(banner)
+
+    def _check_elevation(self) -> bool:
+        if platform.system() =='Windows':
+            try:
+                import ctypes
+                return ctypes.windll.shell32.IsUserAnAdmin() != 0
+            except Exception:
+                return False
+        else:
+            return os.geteuid() == 0
+
+    def _create_iso_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(QLabel('Select a .iso file:'))
+        h_layout = QHBoxLayout()
+        self.iso_path_input = QLineEdit()
+        self.iso_path_input.setPlaceholderText('Path to .iso file')
+        if self.last_dir:
+            self.iso_path_input.setText(self.last_dir)
+        browse_btn = QPushButton('Browse...')
+        browse_btn.clicked.connect(self._browse_iso)
+        h_layout.addWidget(self.iso_path_input)
+        h_layout.addWidget(browse_btn)
+        layout.addLayout(h_layout)
+        return widget
+
+    def _create_device_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(QLabel('Select a physical optical drive or block device:'))
+        self.device_combo = QComboBox()
+        self._populate_device_combo()
+        layout.addWidget(self.device_combo)
+        refresh_btn = QPushButton('Refresh Device List')
+        refresh_btn.clicked.connect(self._populate_device_combo)
+        layout.addWidget(refresh_btn)
+        return widget
+
+    def _browse_iso(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            'Select ISO',
+            self.last_dir,
+            'ISO Files (*.iso);;All Files (*)'
+        )
+        if path:
+            self.iso_path_input.setText(path)
+
+    def _populate_device_combo(self) -> None:
+        self.device_combo.clear()
+        system = platform.system()
+        try:
+            if system == 'Windows':
+                # This is a terrible approach to this and should be improved in the future
+                # GetLogicalDrives(), GetDriveType() or Win32_CDROMDrive parsing are candidates
+                for i in range(8):
+                    device_path = f'\\\\.\\PhysicalDrive{i}'
+                    self.device_combo.addItem(f'Physical Drive {i} ({device_path})', userData=device_path)
+                for letter in ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']:
+                    device_path = f'\\\\.\\{letter}'
+                    self.device_combo.addItem(f'{letter} Drive ({device_path})', userData=device_path)
+            elif system == 'Linux':
+                result = subprocess.run(
+                    ['lsblk', 'J', '-o', 'NAME,SIZE,TYPE,PATH,MOUNTPOINT'],
+                    capture_output=True, text=True, check=True,
+                )
+                data = json.loads(result.stdout)
+                for device in data.get('blockdevices', []):
+                    self._parse_lsblk_node(device)
+            elif system == 'Darwin':
+
+                result = subprocess.run(
+                    ['diskutil', 'list', '-plist'],
+                    capture_output=True, check=True,
+                )
+                if result.stdout:
+                    import plistlib
+                    plist = plistlib.loads(result.stdout)
+                    # Enumerate the devices from the plist
+                    # for device in plist.get('Devices', []):
+                    #     self._parse_diskutil_node(device)
+                else:
+                    # Fallback enumeration *not safe*, use plist if available
+                    self.device_combo.addItem('/dev/rdisk0', userData='/dev/rdisk0')
+                    self.device_combo.addItem('/dev/rdisk1', userData='/dev/rdisk1')
+                    self.device_combo.addItem('/dev/rdisk2', userData='/dev/rdisk2')
+        except Exception as e:
+            self.device_combo.addItem(f'Error enumerating devices: {e}', userData='')
+        if self.device_combo.count() == 0:
+            self.device_combo.addItem('No devices found', userData='')
+
+    def _parse_lsblk_node(self, device: dict) -> None:
+        path  = device.get('path') or f"/dev/{device.get('name')}"
+        size  = device.get('size', '')
+        dtype = device.get('type', '')
+        mount = device.get('mountpoint' , '')
+        label = f'{path} - {dtype} ({size})'
+        if mount:
+            label += f' [Mounted: {mount}]'
+        self.device_combo.addItem(label, userData=path)
+        # for child in device.get('children', []):
+        #     self._parse_lsblk_node(child)
+
+    def _on_confirm(self) -> None:
+        if self.tabs.currentIndex() == 0:
+            path_str = self.iso_path_input.text().strip()
+            if not path_str:
+                QMessageBox.warning(self, 'Invalid Path', 'Please specify a valid ISO')
+                return
+            self.selected_path = Path(path_str)
+        else:
+            path_str = self.device_combo.currentData()
+            if not path_str:
+                QMessageBox.warning(self, 'Invalid Device', 'Please select a valid device')
+                return
+            self.selected_path = Path(path_str)
+        self.source_selected.emit(self.selected_path)
+        self.accept()
 
 
 ###------------------------------------- Rebuilding Page -----------------------------------###
@@ -566,6 +746,7 @@ class MainMenuBar:
         self.verify_hash.setEnabled(False)
         self.window.welcome_page.set_loading(False)
         self.window.stack.setCurrentIndex(AppPage.WELCOME)
+        self.window.status_bar.clearMessage()
 
     def _handle_exit(self) -> None:
         QApplication.quit()

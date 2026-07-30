@@ -8,6 +8,7 @@ from typing import Any, Callable, NamedTuple, TYPE_CHECKING
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import pyqtSignal
 from core.node import VfsNode
+from core.native.block_device import BlockDevice
 if TYPE_CHECKING:
     from core.workers import TaskHandle
 
@@ -30,7 +31,7 @@ class BaseHandler(abc.ABC):
     A Handler acts as a translator between raw binary data and the VfsNode
     hierarchy. It is responsible for 'unpacking' a format's internal structure
     and 'repacking' modifications back into a valid binary stream.
-    
+
     Lifecycle:
         1. Instantiated by a Worker or Navigator with source bytes.
         2. get_file_tree() maps internal entries to VfsNodes.
@@ -39,7 +40,7 @@ class BaseHandler(abc.ABC):
     def __init__(self, parent_node: VfsNode | None = None) -> None:
         '''Initialize the root handle and provide generic resource management'''
         self.parent_node = parent_node
-        self.handle: io.IOBase | None = None
+        self.handle: io.IOBase | BlockDevice | None = None
         self.owns_handle: bool = False
         self.task_handle: TaskHandle | None = None
 
@@ -58,7 +59,7 @@ class BaseHandler(abc.ABC):
 
     def close(self):
         '''Close the stream if owned by this instance'''
-        if self.owns_handle and self.handle and not self.handle.closed:
+        if self.owns_handle and self.handle and not getattr(self.handle, 'closed', False):
             try:
                 self.handle.close()
             except Exception as e:
@@ -111,16 +112,19 @@ class BaseHandler(abc.ABC):
 ###------------------------------------------ Specialized Handler Contracts ----------------------------------------###
 
 class PhysicalHandler(BaseHandler):
-    '''Used exclusively for physical disk archives (e.g. ISO)
-    - Source must be a physical Path
+    '''Specialized ISO/BlockDevice handler
+    Currently only used for disk images if new sources are added the BlockDevice needs to match the device alignment.
+    BlockDevice is stateless and thread-safe.
+    - Source must be a BlockDevice
     - Manages file-handles directly
     - Scanning and maintaining top-level tree structures
     '''
-    def __init__(self, source_path: Path, parent_node: VfsNode | None = None) -> None:
+    def __init__(self, source: BlockDevice, parent_node: VfsNode | None = None) -> None:
         super().__init__(parent_node)
-        self.path        = source_path
-        self.handle      = open(source_path, 'rb')
+        self.source: BlockDevice = source
+        self.handle: BlockDevice = self.source
         self.owns_handle = True
+
 
     def release_handle(self) -> None:
         '''
@@ -129,16 +133,17 @@ class PhysicalHandler(BaseHandler):
         '''
         if self.handle and not self.handle.closed:
             self.handle.close()
-        self.handle = None
+        self.handle = None  # type: ignore dereference for safety
         self.owns_handle = False
 
     @abc.abstractmethod
     def rebuild_node(
         self,
-        node:         VfsNode,
+        root:         VfsNode,
         staged_nodes: list[VfsNode],
         output_path:  Path,
         task_handle:  TaskHandle,
+        slimmed_rebuild_requested: bool,
     ) -> bool:
         '''Rebuild and write a collection of nodes to disk. Returns True on success'''
 
@@ -187,7 +192,7 @@ class LeafHandler(BaseHandler):
 class _ABCMetaQtMeta(type(QWidget), abc.ABCMeta): # type: ignore
     '''Merge PyQt6 widget metaclass with ABC metaclass'''
 
-class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
+class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta): # type: ignore
     '''
     Minimum required implementation for a mutable editor:
 
@@ -216,7 +221,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         self._is_dirty:         bool           = False
         self._original_payload: Any            = None
         self._pending_data:     Any            = None
-        self._data_resolver:    Callable[['VfsNode'], bytes] | None = None
+        self._data_resolver:    Callable[[VfsNode], bytes] | None = None
 
     def __repr__(self) -> str:
         node_name = self.current_node.name if self.current_node else "None"
