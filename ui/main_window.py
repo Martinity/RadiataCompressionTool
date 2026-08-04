@@ -37,8 +37,6 @@ Here is a visual breakdown of the widget hierarchy with ISO loading/rebuild as e
 """
 
 from __future__ import annotations
-from imaplib import IMAP4_stream
-from sre_compile import SUCCESS
 
 import logging
 import threading
@@ -66,7 +64,7 @@ from ui.file_browser_page import FileBrowserBehavior, FileBrowserPage
 from ui.settings import AppSettings
 from ui.staging_page import StagingPage
 from ui.theme_manager import ThemeManager
-from utilities import get_resource_path, ToastProgressBar
+from utilities import get_resource_path, ToastProgressBar, human_size
 
 logger = logging.getLogger(f'radiata.{__name__}')
 
@@ -239,7 +237,7 @@ class MainWindow(QMainWindow):
         ISO processing happens on a background thread.
         If dispatcher returns without a handle the ISO failed to load and the UI resets.
         """
-        self.app_settings.last_iso_dir = str(path.parent)
+        self.app_settings.last_iso_dir = str(path)
         self.status_bar.showMessage(f'Loading {path.name}...')
         self.welcome_page.set_loading(True)
         task_handle = self.dispatcher.load_source(path)
@@ -331,17 +329,13 @@ class WelcomePage(QWidget):
         layout.addWidget(self.button)
 
     def open_file_dialog(self) -> None:
-        start_dir = self.settings.last_iso_dir or ''
-        path, _ = QFileDialog.getOpenFileName(self, 'Open ISO', start_dir, 'ISO Files (*.iso);;All Files (*)')
-        if path:
-            self.settings.last_iso_dir = str(Path(path).parent)
-            self.request_open.emit(Path(path))
-        # dialog = DeviceOrIsoDialog(self, last_dir=self.settings.last_iso_dir or "")
-        # if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
-        #     path = dialog.selected_path
-        #     if path.is_file() or path.is_dir():
-        #         self.settings.last_iso_dir = str(path if path.is_dir() else path.parent)
-        #     self.request_open.emit(path)
+        '''Open the custom ISO/device dialog'''
+        dialog = DeviceOrIsoDialog(self, last_dir=self.settings.last_iso_dir or "")
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
+            path = dialog.selected_path
+            if path.is_file() or path.is_dir():
+                self.settings.last_iso_dir = str(path)
+            self.request_open.emit(path)
 
     def set_loading(self, is_loading: bool) -> None:
         if is_loading:
@@ -363,7 +357,7 @@ class DeviceOrIsoDialog(QDialog):
 
     def __init__(self, parent=None, last_dir: str = '') -> None:
         super().__init__(parent)
-        self.setWindowTitle('Select ISO image or Physical Drive')
+        self.setWindowTitle('Select ISO image or Optical Drive')
         self.resize(600, 400)
         self.last_dir = last_dir
         self.selected_path: Path | None = None
@@ -372,15 +366,19 @@ class DeviceOrIsoDialog(QDialog):
         # Tabs for selecting between the two types of media inputs
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_iso_tab(), 'ISO Image File')
-        self.tabs.addTab(self._create_device_tab(), 'Physical Block Device')
+        self.tabs.addTab(self._create_device_tab(), 'Physical Disk')
         layout.addWidget(self.tabs)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
+
         self.btn_confirm = QPushButton('Select')
         self.btn_confirm.setObjectName('BtnLarge')
         self.btn_confirm.clicked.connect(self._on_confirm)
+
         self.btn_cancel = QPushButton('Cancel')
         self.btn_cancel.clicked.connect(self.reject)
+
         btn_layout.addWidget(self.btn_confirm)
         btn_layout.addWidget(self.btn_cancel)
         layout.addLayout(btn_layout)
@@ -400,14 +398,9 @@ class DeviceOrIsoDialog(QDialog):
             layout.addWidget(banner)
 
     def _check_elevation(self) -> bool:
-        if platform.system() =='Windows':
-            try:
-                import ctypes
-                return ctypes.windll.shell32.IsUserAnAdmin() != 0
-            except Exception:
-                return False
-        else:
-            return os.geteuid() == 0
+        if platform.system() != 'Windows' and self.selected_path:
+            return os.access(self.selected_path, os.R_OK)
+        return True
 
     def _create_iso_tab(self) -> QWidget:
         widget = QWidget()
@@ -454,24 +447,24 @@ class DeviceOrIsoDialog(QDialog):
         system = platform.system()
         try:
             if system == 'Windows':
-                # This is a terrible approach to this and should be improved in the future
-                # GetLogicalDrives(), GetDriveType() or Win32_CDROMDrive parsing are candidates
-                for i in range(8):
-                    device_path = f'\\\\.\\PhysicalDrive{i}'
-                    self.device_combo.addItem(f'Physical Drive {i} ({device_path})', userData=device_path)
-                for letter in ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']:
-                    device_path = f'\\\\.\\{letter}'
-                    self.device_combo.addItem(f'{letter} Drive ({device_path})', userData=device_path)
+                # bitmask of active logical drives
+                import ctypes, string
+                bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+                for i, letter in enumerate(string.ascii_uppercase):
+                    if bitmask & (1 << i):
+                        drive_root = f'{letter}:\\'
+                        if ctypes.windll.kernel32.GetDriveTypeW(drive_root) == 5:
+                            device_path = f'\\\\.\\{letter}:'
+                            self.device_combo.addItem(f'{letter} Optical Drive ({device_path})', userData=device_path)
             elif system == 'Linux':
                 result = subprocess.run(
-                    ['lsblk', 'J', '-o', 'NAME,SIZE,TYPE,PATH,MOUNTPOINT'],
+                    ['lsblk', '-J', '-o', 'NAME,SIZE,TYPE,PATH,MOUNTPOINT'],
                     capture_output=True, text=True, check=True,
                 )
                 data = json.loads(result.stdout)
                 for device in data.get('blockdevices', []):
                     self._parse_lsblk_node(device)
             elif system == 'Darwin':
-
                 result = subprocess.run(
                     ['diskutil', 'list', '-plist'],
                     capture_output=True, check=True,
@@ -479,42 +472,68 @@ class DeviceOrIsoDialog(QDialog):
                 if result.stdout:
                     import plistlib
                     plist = plistlib.loads(result.stdout)
-                    # Enumerate the devices from the plist
-                    # for device in plist.get('Devices', []):
-                    #     self._parse_diskutil_node(device)
-                else:
-                    # Fallback enumeration *not safe*, use plist if available
-                    self.device_combo.addItem('/dev/rdisk0', userData='/dev/rdisk0')
-                    self.device_combo.addItem('/dev/rdisk1', userData='/dev/rdisk1')
-                    self.device_combo.addItem('/dev/rdisk2', userData='/dev/rdisk2')
+                    for device in plist.get('AllDisksAndPartitions', []):
+                        self._parse_diskutil_node(device)
         except Exception as e:
             self.device_combo.addItem(f'Error enumerating devices: {e}', userData='')
         if self.device_combo.count() == 0:
-            self.device_combo.addItem('No devices found', userData='')
+            self.device_combo.addItem('No Optical Drive found.', userData='')
 
     def _parse_lsblk_node(self, device: dict) -> None:
+        dtype = device.get('type', '')
+        if dtype != 'rom':
+            return
         path  = device.get('path') or f"/dev/{device.get('name')}"
         size  = device.get('size', '')
-        dtype = device.get('type', '')
         mount = device.get('mountpoint' , '')
-        label = f'{path} - {dtype} ({size})'
+        label = f'{path} - {dtype.upper()} ({size})'
         if mount:
             label += f' [Mounted: {mount}]'
+        if dtype == 'rom':
+            label = f'[Optical Drive] {path} ({size})'
         self.device_combo.addItem(label, userData=path)
-        # for child in device.get('children', []):
-        #     self._parse_lsblk_node(child)
+
+    def _parse_diskutil_node(self, device: dict) -> None:
+        dev_id = device.get('DeviceIdentifier', '')
+        if not dev_id:
+            return
+        # Filter out non-optical drive devices
+        try:
+            info_proc = subprocess.run(['diskutil', 'info', '-plist', dev_id], capture_output=True, text=True)
+            import plistlib
+            info_plist = plistlib.loads(info_proc.stdout)
+            if not info_plist.get('OpticalDrive'):
+                return
+        except Exception:
+            return
+
+        # Construct raw disk path
+        path = f'/dev/r{dev_id}'
+        size_bytes = device.get('Size', 0)
+        if size_bytes > 0:
+            size = human_size(size_bytes)
+        else:
+            size = 'Unknown Size'
+        # Plist structures
+        volume_name = device.get('VolumeName', '')
+        label = f'[Optical Drive] {path} ({size})'
+        if volume_name:
+            label += f' - {volume_name}'
+        self.device_combo.addItem(label, userData=path)
 
     def _on_confirm(self) -> None:
+        if not self._check_elevation():
+            raise PermissionError('Insufficient permissions for optical drive access.')
         if self.tabs.currentIndex() == 0:
             path_str = self.iso_path_input.text().strip()
             if not path_str:
-                QMessageBox.warning(self, 'Invalid Path', 'Please specify a valid ISO')
+                QMessageBox.warning(self, 'Invalid Path', 'Please specify a valid ISO file.')
                 return
             self.selected_path = Path(path_str)
         else:
             path_str = self.device_combo.currentData()
             if not path_str:
-                QMessageBox.warning(self, 'Invalid Device', 'Please select a valid device')
+                QMessageBox.warning(self, 'Invalid Device', 'Please select a valid optical drive.')
                 return
             self.selected_path = Path(path_str)
         self.source_selected.emit(self.selected_path)

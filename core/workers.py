@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 import itertools
+import time
 from pathlib import Path
 from enum import auto, Enum
 from dataclasses import dataclass
@@ -70,7 +71,7 @@ class ActionResult:
 @dataclass
 class EditorPayload:
     '''Result structured for editors. Carries node, data'''
-    node: 'VfsNode'
+    node: VfsNode
     data: Any
 
 class LoadIsoResult(NamedTuple):
@@ -126,9 +127,9 @@ class TaskCoordinator(QObject):
         # discard the returned handle.  Keyed by id(handle) so the cleanup
         # lambda captures only an int — no direct reference to the handle —
         # which avoids a permanent retention cycle.
-        self._active_handles: dict[int, 'TaskHandle'] = {}
+        self._active_handles: dict[int, TaskHandle] = {}
 
-    def _retain_handle(self, handle: 'TaskHandle') -> None:
+    def _retain_handle(self, handle: TaskHandle) -> None:
         '''Store *handle* and schedule its removal when finished fires.'''
         handle_id = id(handle)
         self._active_handles[handle_id] = handle
@@ -242,6 +243,8 @@ class TaskHandle(QObject):
         self._state     = 'pending'
         self._lock      = threading.Lock()
         self._cancel_token = threading.Event()
+        self._start_time: float | None = None
+        self._end_time: float | None = None
 
     @property
     def state(self) -> str:
@@ -249,6 +252,7 @@ class TaskHandle(QObject):
             return self._state
 
     def _transition(self, target: str) -> None:
+        '''Transition to the specified state, updating end time if completed/failed/cancelled'''
         current_thread = threading.current_thread()
         with self._lock:
             valid = self._VALID_TRANSITIONS.get(self._state, set())
@@ -259,10 +263,28 @@ class TaskHandle(QObject):
                 )
                 return
             self._state = target
+            log_entry = None
+            # Start timer when moving to running
+            if target == 'running':
+                self._start_time = time.perf_counter()
+
+            # End timer and generate completion message when entering terminal states
+            elif target in ('completed', 'failed', 'cancelled') and self._start_time is not None and self._end_time is None:
+                self._end_time = time.perf_counter()
+                dur = self._end_time - self._start_time
+                if (mins := dur // 60):
+                    secs = dur % 60
+                    dur_str = f'{int(mins)}m {secs:.2f}s'
+                else:
+                    dur_str = f'{dur:.2f}s'
+                log_entry = f'Task #{self.task_id} ({self.task_name}) Thread: "{current_thread.name}" -> {target} in {dur_str}'
         self.state_changed.emit(target)
-        logger.debug(
-            f'<Task #{self.task_id} ({self.task_name}) Thread: "{current_thread.name}"> -> {target}'
-        )
+        if log_entry:
+            logger.debug(log_entry)
+        else:
+            logger.debug(
+                f'<Task #{self.task_id} ({self.task_name}) Thread: "{current_thread.name}"> -> {target}'
+            )
 
     ### from main thread
     def cancel(self) -> None:
@@ -280,7 +302,7 @@ class TaskHandle(QObject):
         self.state_changed.emit(target)
         logger.debug(
             f'<Task #{self.task_id} ({self.task_name})> '
-            f'CANCEL requested view Thread "{current_thread.name}" -> {target}'
+            f'CANCEL requested for Thread "{current_thread.name}" -> {target}'
         )
 
     ### from background thread
@@ -300,18 +322,20 @@ class TaskHandle(QObject):
     def complete(self, result: object) -> None:
         if self.is_cancelling():
             self._transition('cancelled')
-            self.finished.emit(False, 'Task cancelled by user.')
+            self.finished.emit(False, f'Task #{self.task_id} ({self.task_name}) cancelled.')
         else:
             self._transition('completed')
             self.finished.emit(True, result)
+        self.progress.emit(100)
 
     def fail(self, error: Exception | str) -> None:
         if self.is_cancelling():
             self._transition('cancelled')
-            self.finished.emit(False, 'Task cancelled by user during failure')
+            self.finished.emit(False, f'Task #{self.task_id} ({self.task_name}) cancelled.')
         else:
             self._transition('failed')
             self.finished.emit(False, str(error))
+        self.progress.emit(100)
 
 ###---------------------------------------- Actions --------------------------------------###
 
@@ -327,10 +351,10 @@ class Actions:
     ### Editor
     @staticmethod
     def prepare_editor(
-        handler_class:     type['BaseHandler'],
-        node:             'VfsNode',
-        navigator:        'VfsNavigator',
-        task_handle:       TaskHandle
+        handler_class: type[BaseHandler],
+        node:          VfsNode,
+        navigator:     VfsNavigator,
+        task_handle:   TaskHandle
     ) -> EditorPayload:
         '''
         Unwraps the node and calls handler.prepare_editor_data() on a background thread.
@@ -350,17 +374,17 @@ class Actions:
             )
         with handler_class(raw_bytes, node.parent) as handler:
             handler.task_handle = task_handle
-            setattr(handler, 'datacenter_header', header_bytes)
+            handler.datacenter_header = header_bytes
             result = handler.prepare_editor_data(node, raw_bytes)
         logger.debug(f'prepare_editor: {node.name} -> {type(result).__name__} from {handler_class.__name__}')
         return EditorPayload(node=node, data=result)
 
     @staticmethod
     def decode_editor_data(
-        handler_class:     type['BaseHandler'],
-        node:             'VfsNode',
-        payload:           Any,
-        task_handle:       TaskHandle
+        handler_class: type[BaseHandler],
+        node:          VfsNode,
+        payload:       Any,
+        task_handle:   TaskHandle
     ) -> bytes:
         '''
         Takes a complex UI payload and routes it through the node's handler
@@ -381,9 +405,9 @@ class Actions:
     ### Entry point for all node actions
     @staticmethod
     def dispatch(
-        action_def: 'ActionDef',
-        node:       'VfsNode',
-        navigator:  'VfsNavigator',
+        action_def:  ActionDef,
+        node:        VfsNode,
+        navigator:   VfsNavigator,
         task_handle: TaskHandle,
         **kwargs,
     ) -> ActionResult:
@@ -478,8 +502,8 @@ class Actions:
         navigator:    VfsNavigator,
         staged_nodes: list[VfsNode],
         output_path:  Path,
-        task_handle:  TaskHandle,
         slimmed_rebuild_requested: bool,
+        task_handle:  TaskHandle,
     ) -> ActionResult:
         from core.navigator import ExpansionTimeoutError
         try:
@@ -501,8 +525,8 @@ class Actions:
                 root_node,
                 physical_staged_nodes,
                 output_path,
-                task_handle,
                 slimmed_rebuild_requested,
+                task_handle,
             )
 
             if success:

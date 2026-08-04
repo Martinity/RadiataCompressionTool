@@ -1,5 +1,5 @@
 /**
- * Cross-platform block device OS I/O API wrapper for ISO 9660 alignment.
+ * Cross-platform block device OS I/O API wrapper built specifically for PhysicalHandler.
  * Ensures that memory is sector aligned with VirtualAlloc/posix_memalign.
  * uint64_t used to ensure 64-bit alignment on all platforms.
  * Reads are stateless and thread-safe meaning that the python context manager overhead on every

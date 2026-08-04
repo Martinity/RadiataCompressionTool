@@ -44,7 +44,8 @@ class VfsNode:
         self.target: tuple[int,...] | None = target         # Header HID for unpacking datacenter
 
         self.extension = extension                          # extension from override saved in radi_metadata
-        self.compressed_header: CompressorHandler.SlzHeader | None = None        # SLZ source header
+        self.parent_header: object | None = None            # Original header of the parent node used for rebuilding children
+        self.logical_id: int | None = None                  # Logical ID from the TOC used for ISO rebuilding
 
         self._id_path: tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
 
@@ -276,8 +277,8 @@ class ModTracker(QObject):
     node_unstaged = pyqtSignal(VfsNode)
     node_reverted = pyqtSignal(VfsNode)
 
-    state_changed     = pyqtSignal(int, int) # format: (unstaged_count, staged_count)
-    rebuild_initiated = pyqtSignal(list)
+    state_changed     = pyqtSignal(int, int)   # (unstaged_count, staged_count)
+    rebuild_initiated = pyqtSignal(list, bool) # (staged_nodes, slimmed)
 
     def __init__(self) -> None:
         super().__init__()
@@ -329,12 +330,12 @@ class ModTracker(QObject):
         self.node_reverted.emit(node)
         self._emit_state()
 
-    def confirm_and_rebuild(self) -> None:
+    def confirm_and_rebuild(self, slimmed: bool = False) -> None:
         '''Triggered by Confirm button in staging page'''
         if not self.rebuild_queue:
             return
         staged_nodes = list(self.rebuild_queue)
-        self.rebuild_initiated.emit(staged_nodes)
+        self.rebuild_initiated.emit(staged_nodes, slimmed)
 
     def clear(self) -> None:
         '''Clear state when closing an ISO'''

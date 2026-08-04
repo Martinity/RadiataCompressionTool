@@ -74,7 +74,7 @@ class CompressorHandler(ContainerHandler):
                 extension=ext,
                 parent=root,
             )
-            node.compressed_header = header_obj
+            node.parent_header = header_obj
 
             if inline_header[0:4] == b'1bcb': # bcb size + sector aligned to find next bcb
                 sector_size = 0x800
@@ -91,11 +91,11 @@ class CompressorHandler(ContainerHandler):
 
     def get_raw_node(self, node: VfsNode) -> bytes:
         '''Return a specific raw node'''
-        if not node.compressed_header:
+        if not node.parent_header:
             logger.warning(f'No compressed header found for {node.name}')
             return b''
 
-        compressed_size = node.compressed_header.compressed_size
+        compressed_size = node.parent_header.compressed_size
         compressed_view = self.raw_source[node.offset : node.offset + compressed_size + 16]
 
         compressor = RadiCompressor(compressed_view)

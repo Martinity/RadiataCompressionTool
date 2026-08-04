@@ -1,12 +1,25 @@
-"""PhysicalHandler ISO related processing. Extraction, rebuilding, TOC parsing, disk verification"""
+"""
+PhysicalHandler ISO related processing. Extraction, rebuilding, TOC parsing, disk verification
+
+Currently filesystems are static (non-mutable). If in the future adding and removing files
+is added then this will need some serious refactoring. I think the smarter approach would be
+to create some object representations of the filesystems and have the rebuild process
+translate the nodes into the appropriate format for the ISO, similar to how RootDirectoryStructure works.
+
+Something to look more closely at in the future is the assignment of logical IDs to nodes.
+Currently I am aware of overlays getting ID 0, but for other types of new files research is needed.
+"""
 
 from __future__ import annotations
 
+import sys
+import abc
 import logging
+import array
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Callable, BinaryIO, Any
 
 import xxhash
 from core.contracts import PhysicalHandler
@@ -17,11 +30,23 @@ from core.native.block_device import BlockDevice
 
 logger = logging.getLogger(f'radiata.{__name__}')
 
+###------------------------------------- Constants -------------------------------------###
+
 _KNOWN_BUILDS: dict[str, str] = {
     '7ee1ab6550739833f757ccc9db23cc36': 'Prototype',
     'afb46b880ee88e93b1f2ccb417e02977': 'USA release',
     'f5fbce42d0d943c01e506c7f7d7e24e2': 'JPN release',
 }
+
+###------------------------------------- Structs -------------------------------------###
+
+def pack_both_endian_32(val):
+    '''LBA and File Size root directory structs'''
+    return struct.pack('<I', val) + struct.pack('>I', val)
+
+def pack_both_endian_16(val):
+    '''Volume Sequence Numbers for root directory structs'''
+    return struct.pack('<H', val) + struct.pack('>H', val)
 
 @dataclass(frozen=True)
 class RootDirectoryStructure:
@@ -55,6 +80,7 @@ class RootDirectoryStructure:
             file_name = '..'
         else:
             file_name = raw_name.decode('ascii', errors='replace').split(';')[0]
+        logger.debug(f'file_name: {file_name}')
         return cls(
             entry_length=entry_length,
             extended_attribute=ext_attr,
@@ -67,6 +93,303 @@ class RootDirectoryStructure:
             filename_length=name_len,
             file_name=file_name,
         )
+
+    def to_bytes(self) -> bytes:
+        '''Convert a RootDirectoryStructure into its binary representation.'''
+        # Handle file names
+        if self.file_name == '.':
+            name = b'\x00'
+        elif self.file_name == '..':
+            name = b'\x01'
+        else:
+            name = self.file_name.encode('ascii', errors='replace') + b';1'
+        # Calculate lengths
+        name_len    = len(name)
+        name_padding = 1 if name_len & 1 else 0 # ISO 9660 name alignment
+        system_use = 14 if self.file_name not in ('.', '..') else 0 # Sony CDVDGEN system use area
+        record_len  = 33 + name_len + name_padding + system_use
+        if record_len & 1:
+            record_len += 1
+        data        = bytearray(record_len)
+        data[0]     = record_len
+        data[1]     = self.extended_attribute
+        lba         = self.lba // 0x800
+        data[2:10]  = pack_both_endian_32(lba)
+        data[10:18] = pack_both_endian_32(self.file_size)
+        data[18:25] = self.date[:7]
+        data[25]    = self.flag
+        data[26]    = 0
+        data[27]    = self.interleave_gap
+        data[28:32] = pack_both_endian_16(self.volume_sequence_number)
+        data[32]    = name_len
+        data[33:33 + name_len] = name
+        return bytes(data)
+
+
+class DiskRegion(abc.ABC):
+    '''One contiguous region of the final disk image.'''
+    start_offset: int = 0
+    @property
+    @abc.abstractmethod
+    def size(self) -> int:
+        '''Byte size of the region'''
+    def label(self) -> str:
+        '''Human-readable iditification for logging/progress.'''
+        return self.__class__.__name__
+    def write_to(self, dst: BinaryIO) -> int:
+        '''Write contents directly to the destination stream, return number of bytes written.'''
+
+@dataclass(slots=True)
+class RawCopyRegion(DiskRegion):
+    '''A raw copy of a region from the source disk image.'''
+    source_offset: int
+    length:        int
+    name:          str
+    src_handle:    BlockDevice
+    @property
+    def size(self) -> int:
+        return self.length
+    def label(self) -> str:
+        return self.name or f'RawCopy@{self.source_offset:#x}'
+    def write_to(self, dst: BinaryIO) -> int:
+        chunk_size = 24 * 1024 * 1024 # 24MB chunks
+        bytes_left = self.length
+        curent_offset = self.source_offset
+        while bytes_left > 0:
+            read_size = min(chunk_size, bytes_left)
+            chunk = self.src_handle.pread(curent_offset, read_size)
+            dst.write(chunk)
+            bytes_left -= read_size
+            curent_offset += read_size
+        return self.length
+
+@dataclass(slots=True)
+class StagedDataRegion(DiskRegion):
+    '''Modified data region that has been staged for writing to the disk image.'''
+    node:        VfsNode
+    sector_size: int
+    @property
+    def size(self) -> int:
+        if self.node.pending_data is None: return 0
+        raw = len(self.node.pending_data)
+        return raw + ((-raw) & (self.sector_size - 1))
+    def label(self) -> str:
+        return f'Staged:{self.node.name}'
+    def write_to(self, dst: BinaryIO) -> int:
+        if self.node.pending_data is None: return 0
+        dst.write(self.node.pending_data)
+        padding = self.size - len(self.node.pending_data)
+        if padding:
+            dst.write(b'\x00' * padding)
+        return self.size
+
+@dataclass(slots=True)
+class ZeroFillRegion(DiskRegion):
+    '''Padding region filled with zero bytes.'''
+    length: int
+    name:   str = 'padding'
+    @property
+    def size(self) -> int:
+        return self.length
+    def label(self) -> str:
+        return self.name
+    def write_to(self, dst: BinaryIO) -> int:
+        dst.write(b'\x00' * self.length)
+        return self.length
+
+@dataclass(slots=True)
+class SentinelRegion(DiskRegion):
+    '''A genuinely empty region used as a sentinel pointer.'''
+    node: VfsNode
+    @property
+    def size(self) -> int:
+        return 0
+    def label(self) -> str:
+        return f'Sentinel:{self.node.name}'
+    def write_to(self, dst: BinaryIO) -> int:
+        return 0
+
+@dataclass(slots=True)
+class TocRegion(DiskRegion):
+    '''A final scrambled TOC region.'''
+    total_entries: int
+    sector_size:   int
+    signature:     int
+    scramble_fn:   Callable[list[int], list[int]]
+    entries:       list[tuple[VfsNode, DiskRegion | None]] = field(default_factory=list)
+                            # Node, Self-reference or sentinel
+    @property
+    def size(self) -> int:
+        return self.total_entries * 3 * 4
+    def label(self) -> str:
+        return 'TOC'
+    def write_to(self, dst: BinaryIO,) -> int:
+        flat = [0] * (self.total_entries * 3)
+        for i, (node, region) in enumerate(self.entries[:self.total_entries]):
+            if region is None or isinstance(region, SentinelRegion):
+                flat[i] = -1
+                flat[self.total_entries + i] = 0
+            else:
+                flat[i] = region.start_offset // self.sector_size
+                flat[self.total_entries + i] = region.size // self.sector_size
+            flat[2 * self.total_entries + i] = getattr(node, 'logical_id', 0)
+        scrambled = self.scramble_fn(flat)
+        toc_array = array.array('I', (x & 0xFFFFFFFF for x in scrambled))
+        actual_sig = toc_array[0]
+        if actual_sig != self.signature:
+            logger.warning(
+                f'TOC signature mismatch: expected {hex(self.signature)}, got {hex(actual_sig)}. '
+                f'Entry 0 self-reference reconstruction failed, manually overwritting with correct signature.'
+            )
+            toc_array[0] = self.signature
+        if sys.byteorder != 'little':
+            toc_array.byteswap()
+        dst.write(toc_array.tobytes())
+        return len(toc_array.tobytes())
+
+@dataclass(slots=True)
+class RootDirectoryRegion(DiskRegion):
+    '''Represents the root directory region of an ISO filesystem.'''
+    fixed_size: int
+    original_bytes: bytes = b''
+    front_section_entries: list[tuple[VfsNode, DiskRegion]] = field(default_factory=list)
+    @property
+    def size(self) -> int:
+        return self.fixed_size
+    def label(self) -> str:
+        return 'RootDirectory'
+    def write_to(self, dst: BinaryIO) -> int:
+        if not self.original_bytes:
+            raise ValueError('original_bytes must be set before writing')
+        output = bytearray()
+        bytes_read = 0
+        while bytes_read < self.fixed_size:
+            entry_length = self.original_bytes[bytes_read]
+            if not entry_length:
+                bytes_read += 1
+                continue
+            record_slice = self.original_bytes[bytes_read : bytes_read + entry_length]
+            record = RootDirectoryStructure.from_bytes(bytes(record_slice))
+
+            if record.file_name in ('.', '..'):
+                output.extend(record_slice)
+            else:
+                name, sep, ext = record.file_name.rpartition('.')
+                match = next(((n, r) for n, r in self.front_section_entries if n.name == name and n.extension == sep + ext), None)
+                if match:
+                    node, region = match
+                    updated_record = RootDirectoryStructure(
+                        entry_length=record.entry_length,
+                        extended_attribute=record.extended_attribute,
+                        lba=region.start_offset,
+                        file_size=len(node.pending_data) if node.pending_data is not None else node.size,
+                        date=record.date,
+                        flag=record.flag,
+                        interleave_gap=record.interleave_gap,
+                        volume_sequence_number=record.volume_sequence_number,
+                        filename_length=record.filename_length,
+                        file_name=record.file_name,
+                    )
+                    output.extend(updated_record.to_bytes())
+            bytes_read += entry_length
+        if len(output) < self.fixed_size:
+            output.extend(b'\x00' * (self.fixed_size - len(output)))
+        dst.write(output)
+        return len(output)
+
+@dataclass(slots=True)
+class ExecutablePatchRegion(DiskRegion):
+    '''Specifically for slimmed rebuild.
+    I feel like having to do it this way shows that the system is not the best design.'''
+    node:           VfsNode
+    src_handle:     BlockDevice
+    sector_size:    int
+    new_toc_offset: int = -1
+    @property
+    def size(self) -> int:
+        if self.node.pending_data is not None:
+            raw = len(self.node.pending_data)
+            return (raw + ((-raw) & (self.sector_size - 1)))
+        return self.node.size
+    def write_to(self, dst: BinaryIO) -> int:
+        logger.debug(f'Writing executable patch region: {self.node.name}')
+        if self.node.pending_data is not None:
+            data = bytearray(self.node.pending_data)
+            padding = self.size - len(data)
+        else:
+            data = bytearray(self.src_handle.pread(self.node.offset, self.node.size))
+            padding = self.size - len(data)
+        if self.new_toc_offset != -1:
+            separator  = b'\x2D\x20\x20\x02'
+            static_lui = b'\x02\x3C'
+            static_ori = b'\x42\x34'
+            pos = 0
+            while pos < (len(data) - 8):
+                pos = data.find(separator, pos)
+                if pos == -1:
+                    break
+                if pos % 4 != 0:
+                    pos += 1
+                    continue
+                # LUI/ORI neighbor check
+                if (data[pos - 2 : pos] == static_lui and data[pos + 6 : pos + 8 ] == static_ori):
+                    hi_val = (self.new_toc_offset >> 16) & 0xFFFF
+                    lo_val = self.new_toc_offset & 0xFFFF
+
+                    data[pos - 4 : pos - 2] = struct.pack('<H', hi_val)
+                    data[pos + 4 : pos + 6] = struct.pack('<H', lo_val)
+                    logger.debug(f'Found TOC offsets @ {pos}, new offset {self.new_toc_offset}')
+                    break
+                pos += 4
+        dst.write(data)
+        if padding > 0:
+            dst.write(b'\x00' * padding)
+        return len(data) + padding
+
+###------------------------------ Rebuild Layout ------------------------------------###
+
+class DiskLayoutPlanner:
+    '''
+    Pass1: accumulate regions in disk order
+    resolve_offsets(): assign every region's start_offset by cumulative sum.
+    pass2: write_all() emits every region's bytes sequentially
+    '''
+    def __init__(self) -> None:
+        self.regions: list[DiskRegion] = []
+        self._resolved: bool = False
+
+    def add(self, region: DiskRegion) -> DiskRegion:
+        '''Append and return the region so callers can hold a reference for cross-referencing'''
+        if self._resolved:
+            raise RuntimeError('Cannot add regions after resolve_offsets() has been called')
+        self.regions.append(region)
+        return region
+
+    def resolve_offsets(self) -> None:
+        '''The lba_map concept collapsed into a simple cumulative offset calculation'''
+        cursor = 0
+        for region in self.regions:
+            region.start_offset = cursor
+            cursor += region.size
+        self._resolved = True
+        logger.debug(f'DiskLayoutPlanner: resolved {len(self.regions)} regions, total size {cursor:#x}')
+
+    def total_size(self) -> int:
+        return sum(r.size for r in self.regions)
+
+    def write_all(self, dst: BinaryIO, task_handle: TaskHandle, progress_every: int = 1) -> None:
+        '''one pass - strict sequential write'''
+        if not self._resolved:
+            raise RuntimeError('resolve_offsets() must be called before write_all().')
+        total = len(self.regions)
+        for i, region in enumerate(self.regions):
+            task_handle.checkpoint()
+            region.write_to(dst)
+            # task_handle.log_message.emit(f'Current position: {dst.tell():#x}')
+            if i % progress_every == 0:
+                pct = int((i / total) * 100) if total else 100
+                task_handle.progress.emit(pct)
+        logger.info(f'DiskLayoutPlanner: wrote {total} regions ({self.total_size():,} bytes)')
 
 
 ###------------------------------ ISO HANDLER ------------------------------------###
@@ -87,26 +410,22 @@ class IsoHandler(PhysicalHandler):
         total_entries:          int = 0x1200
         sector_size:            int = 0x800
         iso_9660_pvd:           int = 16
-        root_dir_record_offset: int = 0x9C
+        pvd_byte_offset: int = 0x9C
 
     def __init__(self, source: BlockDevice, parent=None):
         """Initialize iso properties"""
         super().__init__(source, parent_node=parent)
         logger.info(f'IsoHandler initialized for {source.name}')
-
         self.params            = self.IsoParameters()
         self.toc: list         = []
         self.toc_location      = -1
         self.pvd: RootDirectoryStructure | None = None
         self.cnf: tuple[int, int] | None = None
+        self.system_areas      = VfsNode()
 
     def get_raw_node(self, node: VfsNode) -> bytes:
-        """Called for the raw data of a physical node with a private handle"""
-        data = self.handle.pread(node.offset, node.size)
-        logger.debug(
-            f'Read {len(data) // self.params.sector_size} sectors from offset {hex(node.offset)}'
-        )
-        return data
+        """Public call for the raw data of a physical node"""
+        return self.handle.pread(node.offset, node.size)
 
     ###------------------------------------ Extract ISO ------------------------------------###
 
@@ -126,13 +445,15 @@ class IsoHandler(PhysicalHandler):
 
         root = VfsNode(name='root')
         # Read descriptor volume for root dir location
-        offset = (self.params.iso_9660_pvd * self.params.sector_size) + self.params.root_dir_record_offset
+        offset = (self.params.iso_9660_pvd * self.params.sector_size) + self.params.pvd_byte_offset
         pvd_len = self.handle.pread(offset, 1)[0]
+        self.system_areas.append_child(VfsNode(name='System Area 1', offset=0, size=offset))
         self.pvd = RootDirectoryStructure.from_bytes(self.handle.pread(offset, pvd_len))
-
+        self.system_areas.append_child(VfsNode(name='System Area 2', offset=offset + pvd_len, size=self.pvd.lba))
         # Read root dir for files
         bytes_read = 0
         root_dir_view = memoryview(self.handle.pread(self.pvd.lba, self.pvd.file_size))
+        logger.debug(f'PVD file size: {self.pvd.file_size}')
         while bytes_read < self.pvd.file_size:
             entry_length = root_dir_view[bytes_read]
             bytes_read  += 1
@@ -174,6 +495,20 @@ class IsoHandler(PhysicalHandler):
                 'ISO needs IOPRP300, SYSTEM, and SLUS/SLPM for proper execution.'
             )
 
+        # Root directory to end of ISO filesystem system areas - for rebuilding
+        physical_files = sorted(root.children, key=lambda n: n.offset)
+        pos = self.pvd.lba + self.pvd.file_size
+        for node in physical_files:
+            gap = node.offset - pos
+            if gap > 0:
+                gap_node = VfsNode(
+                    name=f'AreaBefore{node.name}',
+                    size=gap,
+                    offset=pos,
+                )
+                self.system_areas.append_child(gap_node)
+            pos = max(pos, node.offset + node.size)
+
         return root
 
     def _get_vfs_dir(self, toc: list[dict[str, Any]]) -> VfsNode:
@@ -197,6 +532,7 @@ class IsoHandler(PhysicalHandler):
                     parent=root,
                 )
                 sentinel.is_hidden = True
+                sentinel.logical_id = entry['logical_id']
                 root.append_child(sentinel)
                 continue
             # Valid nodes
@@ -209,6 +545,7 @@ class IsoHandler(PhysicalHandler):
                 target=None,
             )
             node.is_physical = True
+            node.logical_id = entry['logical_id']
             root.append_child(node)
             if disk_index in [0, 5]:  # Hide file system nodes
                 node.is_hidden = True
@@ -231,7 +568,7 @@ class IsoHandler(PhysicalHandler):
         return iso_root
 
     ###----------------------------- TOC Parsing ---------------------------------###
-    #
+
     def _locate_toc_offset(self, root: VfsNode) -> None:
         """
         Locate the TOC offset and update the IsoParameters.
@@ -267,19 +604,20 @@ class IsoHandler(PhysicalHandler):
                 break
             pos += 4
         if toc_offset == 0:
-            raise ValueError('Failed to locate TOC offset in main ELF.')
+            raise ValueError('Could not locate TOC offset in main ELF.')
         self.toc_location = pos # To be reused for ISO rebuilding to change the TOC offset
         self.params.toc_offset = toc_offset
+        logger.debug(f'Toc location: {self.toc_location:#x}, Toc offset: {toc_offset:#x}')
 
     def _load_toc(self) -> memoryview:
         """Locate the TOC."""
         # Check for radiata ISO
         offset = self.params.toc_offset * self.params.sector_size
         toc_view = memoryview(self.handle.pread(offset, self.params.total_entries * 3 * 4))
-        if self.params.signature != int.from_bytes(toc_view[:4], 'little'):
-            raise ValueError(
-                f'Not a Radiata Stories TOC. Got TOC signature: {int.from_bytes(toc_view[:4], 'little')} Expected: {hex(self.params.signature)}'
-            )
+        # if self.params.signature != int.from_bytes(toc_view[:4], 'little'):
+        #     raise ValueError(
+        #         f'Not a Radiata Stories TOC. Got TOC signature: {int.from_bytes(toc_view[:4], 'little'):#x} Expected: {hex(self.params.signature)}'
+        #     )
         return toc_view
 
     def _process_toc(self, scrambled_toc: memoryview) -> list[dict[str, Any]]:
@@ -312,264 +650,146 @@ class IsoHandler(PhysicalHandler):
         root:         VfsNode,
         staged_nodes: list[VfsNode],
         output_path:  Path,
-        task_handle:  TaskHandle,
         slimmed_rebuild_requested: bool,
+        task_handle:  TaskHandle,
     ) -> bool:
-        """
-        Rebuild the iso file system and the games virtual filesystem independently.
+        '''
+        Rebuilds the ISO using DiskLayoutPlanner sequentially.
+        slimmed_rebuild_requested shifts the TOC location hardcode sector.
 
-        Starts with the iso file system (front of the disk) before rebuilding the virtual filesystem.
-        If the slimmed_rebuild_requested flag is set the toc location hardcode is moved to the next
-        available sector after the iso file system.
-
-        The virtual filesystem is rebuilt after the iso file system to preserve physical ordering and aliasing.
-        """
-        src_path: Path = self.source.path
+        Because the tool currently doesn't support mutable file systems the way the first
+        three areas are built is redundant and can be collapsed into one copy. I wrote it
+        this way to be easier to expand to adding/removing files in the future.
+        '''
+        src_path = self.handle.path
         if output_path.resolve() == src_path.resolve():
             raise ValueError('Cannot overwrite source ISO')
-        # Split the staged nodes into two sets, one for ISO and VFS
-        staged_iso_set = set()
-        staged_vfs_set = set()
-        for child in root.children:
-            if child in staged_nodes and child.is_boundary is False:
-                staged_iso_set.add(child)
-            elif child in staged_nodes and child.is_boundary is True:
-                staged_vfs_set.add(child)
-                staged_nodes.remove(child)
-        for node in staged_nodes:
-            staged_vfs_set.add(node)
-        # locate the boundary node - could change to next((child for child in root.children if child.is_boundary), None)
-        vfs_root = root.children[-1] if root.children[-1].is_boundary else None
+        if self.pvd is None:
+            raise ValueError('PVD not found')
+        staged_set = set(staged_nodes)
+        vfs_root = root.children[-1] if root.children[-1].is_boundary else self._locate_boundary(root)
         if vfs_root is None:
             raise ValueError('No boundary node found')
+        # Merge VFS nodes with system areas (padding and sony disk markers)
+        iso_nodes = [child for child in root.children if not child.is_boundary]
+        iso_nodes += [child for child in self.system_areas.children[2:]]
+        iso_nodes.sort(key=lambda node: node.offset)
         try:
-            with (
-                open(output_path, 'wb') as dst,
-            ):  # open private handle
-                task_handle.progress.emit(0)
-                task_handle.log_message.emit('Starting to write ISO to disk...')
-                self._rebuild_iso_fs(dst, root, staged_iso_set, slimmed_rebuild_requested, task_handle)
-                self._rebuild_vfs(dst, vfs_root, staged_vfs_set, task_handle)
-            task_handle.progress.emit(100)
+            planner = DiskLayoutPlanner()
+            ### System Area 1 - start to PVD
+            sys_area_1_len = (self.params.iso_9660_pvd * self.params.sector_size) + self.params.pvd_byte_offset
+            planner.add(RawCopyRegion(self.system_areas.children[0].offset, self.system_areas.children[0].size, 'System Area', self.handle))
+            logger.debug(f'System Area 1: {planner.total_size()//2048}')
+            ### PVD - a single record pointing to the root directory
+            pvd_record_region = RawCopyRegion(
+                source_offset=sys_area_1_len,
+                length=self.pvd.entry_length,
+                name='PVD Record',
+                src_handle=self.handle
+            )
+            planner.add(pvd_record_region)
+            logger.debug(f'PVD: {planner.total_size()//2048}')
+            ### System Area 2 - between PVD and root directory
+            pvd_end = sys_area_1_len + self.pvd.entry_length
+            planner.add(RawCopyRegion(pvd_end, self.pvd.lba - pvd_end, 'System Area 2', self.handle))
+            logger.debug(f'System Area 2: {planner.total_size()//2048}')
+            ### Root Directory - Root directory records
+            original_dir_bytes = self.handle.pread(self.pvd.lba, self.pvd.file_size)
+            root_dir_region = RootDirectoryRegion(
+                fixed_size=self.pvd.file_size,
+                original_bytes=original_dir_bytes
+            )
+            planner.add(root_dir_region)
+            logger.debug(f'Root Directory: {planner.total_size()//2048}')
+            ### ISO filesystem - root directory records files
+            exec_patch_region = None
+            for node in iso_nodes:
+                logger.debug(f'{node.name}: {(node.offset + node.size)//2048:#x}')
+                if not node.name.endswith(('IOPRP300', 'SLUS_212', 'SLPM_658', 'SYSTEM')): # Only write valid runtime files
+                    continue
+                if node.name.startswith('AreaBefore'):
+                    region = RawCopyRegion(node.offset, node.size, node.name, self.handle)
+                    planner.add(region)
+                    continue
+                if node.name.startswith('SLUS') or node.name.startswith('SLPM'):
+                    logger.debug(f'Found executable: {node.name}, setting exec_patch_region')
+                    exec_patch_region = ExecutablePatchRegion(node, self.handle, self.params.sector_size)
+                    planner.add(exec_patch_region)
+                    root_dir_region.front_section_entries.append((node, exec_patch_region))
+                    continue
+                elif node in staged_set and node.pending_data is not None:
+                    region = StagedDataRegion(node, self.params.sector_size)
+                else:
+                    region = RawCopyRegion(node.offset, node.size, node.name, self.handle)
+                planner.add(region)
+                root_dir_region.front_section_entries.append((node, region))
+            logger.debug(f'ISO filesystem: {planner.total_size()//2048}, TOC offset: {int(self.params.toc_offset)}')
+            ### System Area 4 - (slimmed_requested dependent) End of ISO filesystem to VFS TOC
+            current_size = planner.total_size()
+            if current_size > self.params.toc_offset * self.params.sector_size:
+                raise ValueError(
+                    f'ISO filesystem exceeded hardcoded TOC offset! '
+                    f'({current_size:#x} > {self.params.toc_offset:#x})'
+                )
+            if not slimmed_rebuild_requested:
+                padding = (self.params.toc_offset * self.params.sector_size) - current_size
+                if padding > 0:
+                    planner.add(ZeroFillRegion(padding, 'TOC_offset_Padding'))
+            else:
+                ### Slimmed rebuild - no Area 4 padding + elf patch
+                padding = (-current_size) & (self.params.sector_size - 1)
+                if padding > 0:
+                    planner.add(ZeroFillRegion(padding, 'TOC_alignment_padding'))
+                    current_size += padding
+                new_toc_sector = current_size // self.params.sector_size
+                if exec_patch_region:
+                    exec_patch_region.new_toc_offset = new_toc_sector
+                    logger.debug(f'Slimmed rebuild: Patched executable TOC offset to {new_toc_sector:#x}')
+                else:
+                    raise ValueError(f'Could not patch executable TOC offset - exec_patch_region {type(exec_patch_region)}')
+            ### TOC - table of contents for the VFS of the game data
+            toc_region = TocRegion(
+                total_entries=self.params.total_entries, # to modify total entries main ELF needs to be patched
+                sector_size=self.params.sector_size,
+                signature=self.params.signature,
+                scramble_fn=self._scramble
+            )
+            planner.add(toc_region)
+            ### Virtual File System - Game data
+            for idx, child in enumerate(vfs_root.children):
+                if idx == 0: # self-reference
+                    toc_region.entries.append((child, None))
+                    continue
+                orig_lba = self.toc[idx]['lba'] if idx < len(self.toc) else 0
+                if (child.size == -1 and child not in staged_set) or orig_lba == -1: # Sentinel
+                    region = SentinelRegion(child)
+                    toc_region.entries.append((child, region))
+                    continue
+                # Data nodes
+                if child in staged_set and child.pending_data is not None:
+                    region = StagedDataRegion(child, self.params.sector_size)
+                else:
+                    region = RawCopyRegion(child.offset, child.size, child.name, self.handle)
+                toc_region.entries.append((child, region))
+                planner.add(region)
+            ### Resolve
+            task_handle.log_message.emit(f'Resolving physical disk layout offsets for {len(planner.regions)} regions.')
+            planner.resolve_offsets()
+            ### Write
+            with open(output_path, 'wb') as dst:
+                task_handle.log_message.emit('Starting sequential write...')
+                planner.write_all(dst, task_handle)
             return True
 
         except Exception as e:
             logger.error(f'Rebuild failed: {e}', exc_info=True)
-            if output_path.exists() and output_path != self.source:
+            if output_path.exists() and output_path != src_path:
                 try:
                     output_path.unlink()
                     logger.info(f'Removed partial output: {output_path.name}')
-                except OSError as err:
-                    logger.error(f'Could not remove partial output: {err}')
+                except OSError as unlink_error:
+                    logger.error(f'Failed to remove partial output: {unlink_error}', exc_info=True)
             return False
-
-
-    def _rebuild_vfs(
-        self,
-        dst,
-        root: VfsNode,
-        staged_set: set[VfsNode],
-        task_handle: TaskHandle,
-    ) -> None:
-        '''Rebuilds the virtual filesystem (the section of the ISO after the TOC)'''
-
-        toc_lba = self.params.toc_offset // self.params.sector_size
-        toc_size = self.params.total_entries * 3 * 4
-        # Copy pre-TOC
-        src.seek(0)
-        self._stream_copy(src, dst, self.params.toc_offset)
-        # Reserve TOC space
-        dst.write(b'\x00' * toc_size)
-        # Start sequential build
-        new_lba_map: dict[VfsNode, int] = {}
-        current_offset = self.params.toc_offset + toc_size
-        for idx, child in enumerate(root.children):
-            task_handle.checkpoint()
-            orig_lba = self.toc[idx]['lba'] if idx < len(self.toc) else 0
-            # TOC self-reference, built in _build_toc
-            if idx == 0:
-                new_lba_map[child] = toc_lba
-                continue
-            # NULL entries
-            if child.size == 0 and not (
-                child in staged_set and child.pending_data is not None
-            ):
-                new_lba_map[child] = 0
-                continue
-            # Sentinel entries
-            if orig_lba == -1:
-                new_lba_map[child] = orig_lba
-            # Entries with data
-            data = (
-                child.pending_data
-                if child in staged_set and child.pending_data is not None
-                else self._read_node_from(src, child)
-            )
-            if not data:
-                logger.warning(f'No data for {child.name} (idx {idx})')
-                new_lba_map[child] = 0
-                continue
-            new_lba_map[child] = current_offset // self.params.sector_size
-            dst.write(data)
-            padding = (-len(data)) & (self.params.sector_size - 1)
-            if padding:
-                dst.write(b'\x00' * padding)
-            current_offset += len(data) + padding
-
-            if idx % 50 == 0:
-                pct = int((idx / self.params.total_entries) * 90)
-                task_handle.progress.emit(
-                    pct, f'Writing file {idx}/{self.params.total_entries}'
-                )
-        # Verify the TOC
-        new_toc = self._build_toc(root.children, staged_set, new_lba_map)
-        new_sig = struct.unpack_from('<I', new_toc, 0)[0]
-        if new_sig != self.params.signature: # Honestly could probably just overwrite the signature to force it to match
-            raise ValueError(
-                f'TOC signature mismatch. Expected {hex(self.params.signature)} got: {hex(new_sig)}. Entry 0 LBA self-reference reconstruction failed.'
-            )
-        dst.seek(self.params.toc_offset)
-        dst.write(new_toc)
-
-
-    def _rebuild_iso_fs(
-        self,
-        dst,
-        root:  VfsNode,
-        staged_set: set[VfsNode],
-        slimmed_rebuild_requested: bool,
-        task_handle: TaskHandle
-    ) -> None:
-        '''Rebuilds the ISO filesystem (the section of the ISO before the TOC)'''
-        if self.pvd is None:
-            raise ValueError('PVD not found during rebuild.')
-        # Copy everything up to the PVD
-        dst.write(src(0, self.pvd.lba * self.params.sector_size))
-        # Copy the PVD as a pre-allocation (will need to rewrite this with new lbas and sizes)
-        root_dir_offset = dst.tell()
-        dst.write(b'\x00' * self.pvd.file_size)
-        # Write the PVD entries (iso fs) to disk, in physical order not index order
-        iso_nodes = [child for child in root.children if not child.is_boundary]
-        iso_nodes.sort(key=lambda node: node.offset)
-        new_lba_map: dict[VfsNode, int] = {}
-        new_size_map: dict[VfsNode, int] = {}
-
-        for node in iso_nodes:
-            task_handle.checkpoint()
-            current_lba = dst.tell() / self.params.sector_size
-            new_lba_map[node] = current_lba
-            if node in staged_set and node.pending_data is not None:
-                data = node.pending_data
-            else:
-                data = self.get_raw_node(node)
-            dst.write(data)
-            new_lba_map[node] = current_lba
-            new_size_map[node] = len(data)
-            padding = (-len(data)) & (self.params.sector_size - 1)
-            if padding:
-                dst.write(b'\x00' * padding)
-        current_offset = dst.tell()
-        if slimmed_rebuild_requested:
-            new_toc_offset = current_offset
-            self.params.toc_offset = new_toc_offset
-            elf_node = next((n for n in iso_nodes if n.name.startswith('SLUS') or n.name.startswith('SLPM')), None)
-            if elf_node and self.toc_location != -1:
-                hi_val = (new_toc_offset >> 16) & 0xFFFF
-                lo_val = new_toc_offset & 0xFFFF
-
-                elf_new_offset = new_lba_map[elf_node] * self.params.sector_size
-                dst.seek(elf_new_offset + self.toc_location - 4)
-                dst.write(struct.pack('<H', hi_val))
-                dst.seek(elf_new_offset + self.toc_location + 4)
-                dst.write(struct.pack('<H', lo_val))
-            dst.seek(0, 2) # seek EOF
-        else:
-            if current_offset < self.params.toc_offset:
-                src.seek(current_offset)
-                self._stream_copy(src, dst, self.params.toc_offset - current_offset)
-            else:
-                logger.warning('ISO data exceeded original TOC offset. Forcing slimmed build behavior.')
-                self.params.toc_offset = current_offset
-        self._update_root_dir(src, dst, root_dir_offset, iso_nodes, new_lba_map, new_size_map)
-
-    def _update_root_dir(
-        self,
-        src,
-        dst,
-        root_dir_offset: int,
-        iso_nodes: list[VfsNode],
-        lba_map: dict[VfsNode, int],
-        size_map: dict[VfsNode, int]) -> None:
-        if not self.pvd:
-            raise ValueError('PVD not found')
-        src.seek(self.pvd.lba * self.params.sector_size)
-        dir_data = bytearray(src.read(self.pvd.file_size))
-        bytes_read = 0
-        while bytes_read < self.pvd.file_size:
-            entry_length = dir_data[bytes_read]
-            if not entry_length:
-                bytes_read += 1
-                continue
-            name_len = dir_data[bytes_read + 32]
-            raw_name = dir_data[bytes_read + 33:bytes_read + 33 + name_len]
-
-            if raw_name not in (b'\x00', b'\x01'):
-                file_name = raw_name.decode('ascii', errors='replace').split(';')[0]
-                name, sep, ext = file_name.rpartition('.')
-                matching_node = next((n for n in iso_nodes if n.name == name and n.extension == sep + ext), None)
-                if matching_node:
-                    new_lba = lba_map.get(matching_node, 0)
-                    new_size = size_map.get(matching_node, 0)
-                    struct.pack_into('<I', dir_data, bytes_read + 2, new_lba)
-                    struct.pack_into('>I', dir_data, bytes_read + 6, new_lba)
-                    struct.pack_into('<I', dir_data, bytes_read + 10, new_size)
-                    struct.pack_into('>I', dir_data, bytes_read + 14, new_size)
-            bytes_read += entry_length
-        dst.seek(root_dir_offset)
-        dst.write(dir_data)
-        dst.seek(0, 2)
-
-    def _stream_copy(self, src, dst, length: int, chunk_size: int = 1024 * 1024):
-        """Helper for writing out one segment or node at a time"""
-        bytes_left = length
-        while bytes_left > 0:
-            chunk = src.read(min(bytes_left, chunk_size))
-            if not chunk:
-                break
-            dst.write(chunk)
-            bytes_left -= len(chunk)
-
-    def _build_toc(
-        self,
-        children: list[VfsNode],
-        staged_set: set[VfsNode],
-        lba_map: dict[VfsNode, int],
-    ) -> bytes:
-        """Scan Nodes to build new toc"""
-        total = self.params.total_entries
-        toc = [0] * (total * 3)
-
-        for i, child in enumerate(children):
-            if i >= total:
-                break
-
-            if i == 0:  # filter out toc entry (self reference)
-                toc[i] = self.params.signature ^ self.params.seed
-            else:
-                toc[i] = lba_map.get(child, 0)
-
-            if child in staged_set and child.pending_data:  # use new or existing data
-                size_bytes = len(child.pending_data)
-            else:
-                size_bytes = child.size
-
-            toc[total + i] = (
-                0 if size_bytes == 0 else -(-size_bytes // self.params.sector_size)
-            )
-            toc[2 * total + i] = self.toc[i]['logical_id']
-
-        scrambled = self._scramble(toc)
-        return struct.pack(f'<{total * 3}I', *scrambled)
 
     ###---------------------------------- Utility -------------------------------------------###
 
@@ -596,8 +816,9 @@ class IsoHandler(PhysicalHandler):
         '''
         file_size = getattr(self.source, 'size', 0)
         hasher = xxhash.xxh128()
-        chunk_size = (16 * 1024 * 1024) # 16MB chunks
+        chunk_size = (24 * 1024 * 1024) # 24MB chunks seemed to load the fastest I have tested
         bytes_read = 0
+        raise RuntimeError('Test failed.')
         while (chunk := self.handle.pread(size=chunk_size, offset=bytes_read)):
             task_handle.checkpoint()
             hasher.update(chunk)
@@ -607,7 +828,7 @@ class IsoHandler(PhysicalHandler):
         build = _KNOWN_BUILDS.get(digest, f'Modified/Unknown: {digest}')
         return build
 
-    def _scramble(self, flat_toc: list) -> list:
+    def _scramble(self, flat_toc: list[int]) -> list[int]:
         """scramble or unscramble the toc"""
         total = self.params.total_entries
         key = self.params.seed
@@ -623,9 +844,8 @@ class IsoHandler(PhysicalHandler):
 
         return scramble
 
-    def _check_pk(self, header: bytes) -> str:
-        offset_header = int.from_bytes(header[0x10:0x14], 'little')
-        pk3_magic = 0x004E000
-        if offset_header % pk3_magic == 0:  # header is pk3 divisible
-            return '.pk3'  # pk3 header
-        return 'bin'
+    def _locate_boundary(self, node: VfsNode) -> VfsNode | None:
+        '''Manually locate the boundary node'''
+        for child in node.children:
+            if child.is_boundary:
+                return child

@@ -70,10 +70,18 @@ class Dispatcher(QObject):
         '''Relay tracker signals to UI'''
         self.tracker.node_modified.connect(self.node_changed.emit)
         self.tracker.node_reverted.connect(self.node_changed.emit)
-        self.tracker.rebuild_initiated.connect(self.rebuild_requested.emit)
+        self.tracker.rebuild_initiated.connect(self._rebuild_relay)
         self.tracker.state_changed.connect(self._relay_tracking_state)
 
         self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection) # type: ignore this is valid
+
+    def _rebuild_relay(self, staged_nodes: list[VfsNode], slimmed: bool) -> None:
+        '''
+        Pass-through to save the slimmed state. Really I should redo the
+        rebuild signalling logic, this is just stupid.
+        '''
+        self.slimmed_requested = slimmed
+        self.rebuild_requested.emit(staged_nodes)
 
     def set_metadata_store(self, store: NodeMetadataStore) -> None:
         self._metadata_store = store
@@ -274,8 +282,9 @@ class Dispatcher(QObject):
             self.nav,
             staged_nodes,
             output_path,
+            self.slimmed_requested,
         )
-        task_handle.progress.connect(lambda pct, _msg: self.rebuild_progress.emit(pct))
+        task_handle.progress.connect(lambda pct: self.rebuild_progress.emit(pct))
         task_handle.log_message.connect(self.rebuild_log.emit)
         task_handle.finished.connect(self._on_rebuild_finished)
 
@@ -468,6 +477,9 @@ class Dispatcher(QObject):
             return '.bin'
 
         header: bytes = self.get_node_data(node)[:0x30]
+        if len(header.replace(b'\x00', b'')) < 16:
+            logger.debug(f'Header too short: {len(header.replace(b"\\x00", b""))} bytes, node {node.name} ({node.hierarchical_id_str})')
+            return
         ext = lookup_extension(header, _check_pk(header))
         node.extension = ext
         if auto_save and self._metadata_store is not None:

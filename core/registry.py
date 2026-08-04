@@ -276,10 +276,31 @@ class Registry:
 
     @classmethod
     def get_handler(cls, source: VfsNode | Path) -> type[BaseHandler] | None:
-        '''Return handler class for source type'''
+        '''
+        Return the first matching handler for the source.
+        Performs platform-specific checks for physical drives to force IsoHandler.
+        '''
         if isinstance(source, Path):
-            p = cls._handler_by_ext.get(source.suffix.lower())
-            return p[0].handler_class if p else None
+            import platform
+            path_str = str(source)
+            is_physical_drive = False
+            if platform.system() == 'Windows':
+                is_physical_drive = path_str.startswith(r'\\\\.\\')
+            else:
+                try:
+                    is_physical_drive = source.exists() and (source.is_block_device() or source.is_char_device())
+                except OSError:
+                    pass  # Permissions errors are logged to the ui or features should be already disabled
+            if is_physical_drive:
+                # Force IsoHandler for physical drives
+                p = cls._handler_by_ext.get('.iso')
+                return p[0].handler_class if p else None
+            if source.is_file():
+                # Identify standard Path file extensions
+                p = cls._handler_by_ext.get(source.suffix.lower())
+                return p[0].handler_class if p else None
+            # Not a valid Path
+            return None
         profile = cls.get_handler_profile(source)
         return profile.handler_class if profile else None
 

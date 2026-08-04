@@ -142,9 +142,9 @@ class PhysicalHandler(BaseHandler):
         root:         VfsNode,
         staged_nodes: list[VfsNode],
         output_path:  Path,
-        task_handle:  TaskHandle,
         slimmed_rebuild_requested: bool,
-    ) -> bool:
+        task_handle:  TaskHandle,
+    ) -> bool:  # type: ignore
         '''Rebuild and write a collection of nodes to disk. Returns True on success'''
 
 class ContainerHandler(BaseHandler):

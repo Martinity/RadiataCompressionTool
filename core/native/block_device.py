@@ -1,128 +1,33 @@
 '''
-Block device + ctypes bindings. Mimics standard python io api, allowing for pure python fallback.
+Block device + ctypes bindings. Custom built for iso handling including stateless thread-safe read-only access.
 
-Three tier resolution (inspired by a GOAT):
-    1. Precompiled library
-    2. Compiled on demand first run
-    3. IOBase pure python fallback (no physical media support)
+Uses the NativeRegistry to load the prebuilt library or compile it on demand.
 '''
-
 from __future__ import annotations
-from asyncio import Handle
-from logging.handlers import MemoryHandler
 
-import os
 import sys
-import io
 import ctypes
-from pathlib import Path
-import platform
-import subprocess
 import threading
-import shutil
 import weakref
+from pathlib import Path
+from core.native.native_registry import NativeRegistry, NativeLibrary
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
-
-_SOURCE_NAME = 'block_device.c'
-_BUILD_DIR_NAME = '.block_device_build'
 
 _lib: ctypes.CDLL | None = None
 _load_attempted = False
 _lock = threading.Lock()
 
-##--------------------------------- BUILD ------------------------------------###
+###--------------------------------- C-Types Bindings ---------------------------------###
 
-def _native_root() -> Path:
-    return Path(__file__).resolve().parent
+_LIBRARY_DEF = NativeLibrary(
+    name='block_device',
+    root_dir=Path(__file__).resolve().parent,
+    sources=['block_device.c'],
+)
 
-def _library_name() -> str:
-    if sys.platform.startswith('win'):
-        return 'block_device.dll'
-    if sys.platform == 'darwin':
-        return 'libblock_device.dylib'
-    return 'libblock_device.so'
-
-def _platform_tag() -> tuple[str, str]:
-    if sys.platform.startswith('win'):
-        osname = 'windows'
-    elif sys.platform == 'darwin':
-        osname = 'macos'
-    else:
-        osname = 'linux'
-    return osname, platform.machine().lower()
-
-
-def _prebuilt_lib_paths() -> list[Path]:
-    name = _library_name()
-    osname, arch = _platform_tag()
-    dirs: list[Path] = []
-    meipass = getattr(sys, '_MEIPASS', None)
-    if meipass:
-        base = Path(meipass)
-        dirs += [base / 'native', base]
-    root = _native_root()
-    dirs += [root / 'prebuilt' / f'{osname}-{arch}', root / 'prebuilt' / osname]
-    return [d / name for d in dirs]
-
-def _find_c_compiler() -> str | None:
-    if sys.platform.startswith('win'):
-        return shutil.which('gcc')
-    return shutil.which('cc') or shutil.which('gcc') or shutil.which('clang')
-
-def _build_command(compiler: str, source_path: Path, output_path: Path) -> list[str]:
-    platform_flags = ['-static-libgcc'] if sys.platform.startswith('win') else ['-fPIC']
-    return [
-        compiler,
-        '-shared',
-        '-O2',
-        '-std=c99',
-        '-Wall',
-        '-Wextra',
-        *platform_flags,
-        '-o',
-        str(output_path),
-        str(source_path)
-    ]
-
-def _build_needed(library_path: Path, source_path: Path, force: bool) -> bool:
-    if force or not library_path.exists():
-        return True
-    return source_path.stat().st_mtime > library_path.stat().st_mtime
-
-def _ensure_built(force_rebuild: bool = False) -> Path:
-    root = _native_root()
-    source_path = root / _SOURCE_NAME
-    build_dir = root / _BUILD_DIR_NAME
-    library_path = build_dir / _library_name()
-
-    if not source_path.exists():
-        raise FileNotFoundError(f'Missing block device source: {source_path}')
-    if not _build_needed(library_path, source_path, force_rebuild):
-        return library_path
-    compiler = _find_c_compiler()
-    if not compiler:
-        raise RuntimeError(
-            'No C Compiler found on PATH (install Xcode CLT on macOS, '
-            'build-essential on Linux, or MinGW/MYSYS2 on Windows). '
-            'Not all features are supported in pure python.'
-        )
-    build_dir.mkdir(exist_ok=True)
-    staged_source = build_dir / _SOURCE_NAME
-    shutil.copyfile(source_path, staged_source)
-    if library_path.exists():
-        library_path.unlink()
-    cmd = _build_command(compiler, staged_source, library_path)
-    result = subprocess.run(cmd, cwd=build_dir, text=True, capture_output=True, check=False)
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout).strip()
-        raise RuntimeError(f'Failed to build native block device:\n{details}')
-    return library_path
-
-def _bind(library_path: Path) -> ctypes.CDLL:
-    lib = ctypes.CDLL(str(library_path))
-
+def _bindings(lib: ctypes.CDLL) -> ctypes.CDLL:
     # alloc_aligned_buffer(size_t size, uint32_t alignment) -> void*
     lib.alloc_aligned_buffer.argtypes = [ctypes.c_size_t, ctypes.c_uint32]
     lib.alloc_aligned_buffer.restype = ctypes.c_void_p
@@ -153,36 +58,23 @@ def _bind(library_path: Path) -> ctypes.CDLL:
 
     return lib
 
-def _load_native() -> ctypes.CDLL:
-    for cand in _prebuilt_lib_paths():
-        if cand.exists():
-            try:
-                lib = _bind(cand)
-                logger.info('Native BlockDevice loaded (prebuilt): %s', cand)
-                return lib
-            except Exception as e:
-                logger.warning('Failed to load prebuilt native BlockDevice: %s', cand.name, e)
-
-    if not getattr(sys, 'frozen', False):
-        try:
-            library_path = _ensure_built()
-            lib = _bind(library_path)
-            logger.info('Native BlockDevice compiled and loaded: %s', library_path.name)
-            return lib
-        except Exception as e:
-            logger.warning('Cound not build native block device: %s', e)
-    raise RuntimeError('Failed to load or build native BlockDevice library.')
-
 def get_block_device_lib() -> ctypes.CDLL:
     global _lib, _load_attempted
+    if _load_attempted:
+        if _lib is None:
+            raise RuntimeError('Native BlockDevice library is unavailable.')
+        return _lib
     with _lock:
         if _load_attempted:
             if _lib is None:
                 raise RuntimeError('Native BlockDevice library is unavailable.')
             return _lib
         _load_attempted = True
-        _lib = _load_native()
+        _lib = NativeRegistry.load(_LIBRARY_DEF, _bindings)
+        if _lib is None:
+            raise RuntimeError('Failed to load or build native BlockDevice library.')
         return _lib
+
 
 ###------------------------------------- BlockDevice -----------------------------------###
 
@@ -219,6 +111,7 @@ class BlockDevice:
         self.closed = False
         self._tls = threading.local()
 
+        # Not completely thread-safe, but good enough for reporting read stats
         self.scratch_reads = 0
         self.large_reads = 0
 
@@ -229,6 +122,10 @@ class BlockDevice:
             self._tls.buf = ThreadLocalAlignedBuffer(self._lib)
         return self._tls.buf
 
+    def _requires_large_read(self, offset: int, size: int, capacity: int) -> bool:
+        '''Calculate if the read requires a large buffer (beyond the thread-local scratch buffer).'''
+        return (size + (offset & (self.sector_size - 1)) + self.sector_size - 1) & ~(self.sector_size - 1) > capacity
+
     def pread(self, offset: int, size: int) -> bytes:
         '''Stateless, thread-safe, and zero-allocation read.'''
         if self.closed or not self._dev_handle:
@@ -238,7 +135,7 @@ class BlockDevice:
             return b''
         # Fetch the thread-local scratch buffer
         tls_buf = self._scratch_buffer
-        if (size + (offset & (self.sector_size - 1)) + self.sector_size - 1) & ~(self.sector_size - 1) > tls_buf.capacity: # dynamic buffer fallback
+        if self._requires_large_read(offset, size, tls_buf.capacity): # dynamic buffer fallback
             return self._pread_large(offset, size)
         skip_val = ctypes.c_size_t(0)
         # Get the slice
@@ -278,7 +175,70 @@ class BlockDevice:
                 raise OSError('Large read failed.')
             raw_data = ctypes.string_at(temp_buf, bytes_read)
             self.large_reads += 1
-            return raw_data[skip_bytes : skip_bytes + size]
+            available = max(0, bytes_read - skip_bytes)
+            available = min(available, size)
+            return raw_data[skip_bytes : skip_bytes + available]
+        finally:
+            self._lib.free_aligned_buffer(temp_buf)
+
+    def pread_view(self, offset: int, size: int) -> memoryview:
+        '''
+        Zero-copy memoryview read using the scratch buffer.
+        !!! Buffer is overwritten on subsequent read (on the same thread). !!!
+        Can't read more than the scratch capacity.
+        '''
+        if self.closed or not self._dev_handle:
+            raise ValueError('I/O operation on closed BlockDevice.')
+        size = min(size, self._size - offset)
+        if size <= 0:
+            return memoryview(b'')
+        tls_buf = self._scratch_buffer
+        if self._requires_large_read(offset, size, tls_buf.capacity):
+            raise BufferError(
+                f'Requested read size {size} exceeds scratch buffer capacity {tls_buf.capacity}. '
+                'Use pread()[pread_large] or read_into() instead.'
+            )
+        skip_val = ctypes.c_size_t(0)
+        available = self._lib.read_slice(
+            self._dev_handle, offset, size, tls_buf.ptr, tls_buf.capacity, ctypes.byref(skip_val)
+        )
+        if available < 0:
+            raise OSError(f'Failed to read {size} bytes at offset {offset}')
+        self.scratch_reads += 1
+        c_array = (ctypes.c_char * available).from_address(tls_buf.ptr + skip_val.value)
+        return memoryview(c_array)
+
+
+    def readinto(self, buffer: memoryview | bytearray, offset: int) -> int:
+        '''Zero-copy read into a pre-allocated python memoryview buffer.'''
+        if self.closed or not self._dev_handle:
+            raise ValueError('I/O operation on closed BlockDevice')
+        size = min(len(buffer), getattr(self, '_size', 0) - offset)
+        if size <= 0:
+            return 0
+        tls_buf = self._scratch_buffer
+        # Fast path, read into scratchpad
+        if not self._requires_large_read(offset, size, tls_buf.capacity):
+            self.scratch_reads += 1
+            buffer[:size] = self.pread_view(offset, size)
+            return size
+        # Slow path, read into temp aligned C-buffer
+        skip_bytes = offset & (self.sector_size - 1)
+        aligned_offset = offset - skip_bytes
+        aligned_size = (size + skip_bytes + self.sector_size - 1) & ~(self.sector_size - 1)
+        temp_buf = self._lib.alloc_aligned_buffer(aligned_size, self.sector_size)
+        if not temp_buf:
+            raise MemoryError('Failed to allocate large aligned buffer')
+        try:
+            bytes_read = self._lib.read_sectors(self._dev_handle, aligned_offset, temp_buf, aligned_size)
+            if bytes_read < 0:
+                raise OSError(f'Large read failed: {bytes_read}')
+            available = max(0, bytes_read - skip_bytes)
+            available = min(available, size)
+            self.large_reads += 1
+            c_array = (ctypes.c_char * available).from_address(temp_buf + skip_bytes)
+            buffer[:available] = c_array
+            return available
         finally:
             self._lib.free_aligned_buffer(temp_buf)
 
@@ -290,11 +250,13 @@ class BlockDevice:
         if not self.closed and getattr(self, '_dev_handle', None):
             self._lib.close_device(self._dev_handle)
             self._dev_handle = None
+            self.closed = True
         logger.debug(
             f'Closed: {self.closed}, _dev_handle: {self._dev_handle}.\n'
             f'    Scratch reads: {self.scratch_reads}, Large reads: {self.large_reads}'
         )
 
+    @property
     def name(self) -> str:
         '''Same functionality as Path.name'''
         return str(self.path.name)

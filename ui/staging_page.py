@@ -6,6 +6,7 @@ from core.node import ModTracker, VfsNode
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -210,6 +211,7 @@ class StagingPage(QWidget):
         self.dispatcher = dispatcher
         self.tracker: ModTracker = self.dispatcher.tracker
         self._selected_node: VfsNode | None = None
+        self.slimmed_requested = False
         self._setup_ui()
         self._connect_signals()
         self._setup_shortcuts()
@@ -282,10 +284,9 @@ class StagingPage(QWidget):
         action_bar = QHBoxLayout()
         action_bar.setContentsMargins(6, 6, 6, 6)
         self.btn_back = QPushButton('< Back')
-        self.slim_toggle = QPushButton('Slimmed Rebuild')
-        self.slim_toggle.setCheckable(True)
+        self.slim_toggle = QCheckBox('Slimmed Rebuild')
         self.slim_toggle.setToolTip(
-            'Removes padding from empty disk sectors.\nMeant for digital only rebuilds.'
+            'Removes all non-essential disk data.\nMeant for digital use only.'
         )
         self.btn_confirm = QPushButton('Build New ISO')
         self.btn_confirm.setObjectName('BtnImportant')
@@ -293,6 +294,7 @@ class StagingPage(QWidget):
         action_bar.addWidget(self.btn_back)
         action_bar.addStretch()
         action_bar.addWidget(self.slim_toggle)
+        action_bar.addSpacing(24)
         action_bar.addWidget(self.btn_confirm)
         top_layout.addLayout(action_bar)
 
@@ -314,10 +316,14 @@ class StagingPage(QWidget):
         self.btn_revert_all.clicked.connect(self._on_revert_all)
 
         self.tracker.state_changed.connect(self.refresh_lists)
-        self.btn_confirm.clicked.connect(self.tracker.confirm_and_rebuild)
+        self.btn_confirm.clicked.connect(lambda: self.tracker.confirm_and_rebuild(self.slimmed_requested))
+        self.slim_toggle.stateChanged.connect(self._on_slim_toggled)
 
         self.unstaged_list.currentItemChanged.connect(self._on_item_changed)
         self.staged_list.currentItemChanged.connect(self._on_item_changed)
+
+    def _on_slim_toggled(self) -> None:
+        self.slimmed_requested = self.slim_toggle.isChecked()
 
     def _setup_shortcuts(self) -> None:
         QShortcut(QKeySequence.StandardKey.Cancel, self).activated.connect(self.request_workspace.emit)
