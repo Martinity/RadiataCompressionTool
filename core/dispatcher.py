@@ -512,7 +512,7 @@ class Dispatcher(QObject):
         self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
         if handler is not None:
             # I think doing this on mainthread is fine since when this fires it is not possible for there to be any node registration
-            build = handler.get_build(root)  # type: ignore
+            build = handler.get_region(root)  # type: ignore
             QTimer.singleShot(0, lambda: self.iso_verified.emit(build))
         # self._migrate_targets_if_needed()   # Uncomment for building metadata from scratch
 

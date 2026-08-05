@@ -91,9 +91,8 @@ class CompressorHandler(ContainerHandler):
 
     def get_raw_node(self, node: VfsNode) -> bytes:
         '''Return a specific raw node'''
-        if not node.parent_header:
-            logger.warning(f'No compressed header found for {node.name}')
-            return b''
+        if not isinstance(node.parent_header, CompressorHandler.SlzHeader):
+            raise TypeError(f'Expected SlzHeader, got {type(node.parent_header)} for {node.name} ({node.hierarchical_id_str})')
 
         compressed_size = node.parent_header.compressed_size
         compressed_view = self.raw_source[node.offset : node.offset + compressed_size + 16]
@@ -107,13 +106,15 @@ class CompressorHandler(ContainerHandler):
             raise RuntimeError(f'No active task manager for {self.__class__.__name__}.')
         new_compressed_file = b''
         for i, child in enumerate(node.children):
+            if not isinstance(child.parent_header, CompressorHandler.SlzHeader):
+                raise TypeError(f'Expected SlzHeader, got {type(child.parent_header)} for {child.name} ({child.hierarchical_id_str})')
             is_final_payload = i == len(node.children) - 1
-            if child in staged_nodes and child.compressed_header: # Modified child
+            if child in staged_nodes and child.parent_header: # Modified child
                 if child.pending_data is None:
                     continue
                 raw_bytes = child.pending_data
-                target_mode = child.compressed_header.mode
-                is_encrypted = child.compressed_header.magic == 'SLE'
+                target_mode = child.parent_header.mode
+                is_encrypted = child.parent_header.magic == 'SLE'
 
                 if raw_bytes[0:4] == b'1bcb':
                     is_final_payload = True # mark (is_final_payload = true) so (next_file_offset = 0). There may be more payloads
@@ -125,8 +126,8 @@ class CompressorHandler(ContainerHandler):
                 new_compressed_file += compressed_output + (b'\00' * padding_size)
 
             else: # Unmodified child
-                compressed_size = child.compressed_header.compressed_size
-                next_file_offset = child.compressed_header.next_file_offset
+                compressed_size = child.parent_header.compressed_size
+                next_file_offset = child.parent_header.next_file_offset
                 chunk_size = next_file_offset if next_file_offset > 0 else (compressed_size + 16)
                 original_chunk = bytearray(self.raw_source[child.offset:child.offset + chunk_size])
                 if is_final_payload and next_file_offset != 0:
@@ -141,9 +142,9 @@ class CompressorHandler(ContainerHandler):
             node = self.get_file_tree()
         lines = ["Compressed File Properties:"]
         for child in node.children:
-            if not child.compressed_header:
+            if not isinstance(child.parent_header, CompressorHandler.SlzHeader):
                 continue
-            c = child.compressed_header
+            c = child.parent_header
             next_file_str = (
                 None
                 if not c.next_file_offset
@@ -175,8 +176,8 @@ class CompressorHandler(ContainerHandler):
     def get_buffer_data(self, node: VfsNode) -> memoryview:
         '''Specialized extraction for composite buffer nodes.'''
         target = node
-        if not hasattr(target, 'compressed_header'):
-            if node.parent and hasattr(node.parent, 'compressed_header'):
+        if not hasattr(target, 'parent_header'):
+            if node.parent and hasattr(node.parent, 'parent_header'):
                 target = node.parent
             else:
                 logger.error(f'Cannot extract buffer: No compression metadata {node.name}')
@@ -191,7 +192,10 @@ class CompressorHandler(ContainerHandler):
                 break
 
             header = bytes(header_view)
-            compressed_size = int.from_bytes(target.compressed_header[4:8], 'little')
+            if target.parent_header is CompressorHandler.SlzHeader:
+                compressed_size = int.from_bytes(target.parent_header.compressed_size, 'little')
+            else:
+                compressed_size = int.from_bytes(header[4:8], 'little')
             next_file = int.from_bytes(header[12:16], 'little')
 
             chunk_view = self.raw_source[current_offset : current_offset + compressed_size + 16]

@@ -82,6 +82,8 @@ class FpsChainHandler(ContainerHandler):
         previous_size = 0
         new_node = bytearray()
         for i, child in enumerate(node.children): # Calculate new header and copy payload
+            if not isinstance(child.parent_header, bytes):
+                raise TypeError(f'Expected bytes for parent header, got {type(child.parent_header)}')
             self.task_handle.checkpoint()
             is_last = (i == len(node.children) - 1)
             payload = (
@@ -89,7 +91,7 @@ class FpsChainHandler(ContainerHandler):
                 if child in staged_set and child.pending_data is not None
                 else bytes(self.data[child.offset + 16 : child.offset + child.size])
             )
-            new_node += self._build_header(child.compressed_header[:4], payload, previous_size, is_last)
+            new_node += self._build_header(child.parent_header[:4], payload, previous_size, is_last)
             new_node += payload
 
             previous_size = len(payload)

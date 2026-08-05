@@ -4,8 +4,10 @@ import threading
 from typing import Any, Callable, TYPE_CHECKING
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget, QMessageBox, QApplication
-from PyQt6.QtGui import QShortcut, QKeySequence
+from PyQt6.QtGui import QShortcut
 from PyQt6 import sip
+
+from ui.settings import Shortcut, Shortcuts
 
 from core.workers import TaskHandle
 if TYPE_CHECKING:
@@ -171,6 +173,7 @@ class EditorPage(QWidget):
         bar.setContentsMargins(10, 5, 10, 5)
 
         self._back_btn = QPushButton('Back')
+        self._back_btn.setToolTip(Shortcuts.text(Shortcut.BACK))
         self._back_btn.clicked.connect(self._on_back)
 
         self._editor_title = QLabel('Editor')
@@ -182,9 +185,9 @@ class EditorPage(QWidget):
         self.btn_save   = QPushButton('Save')
         self.btn_save.setObjectName('BtnImportant')
 
-        self.btn_undo.setToolTip(QKeySequence(QKeySequence.StandardKey.Undo).toString())
-        self.btn_redo.setToolTip(QKeySequence(QKeySequence.StandardKey.Redo).toString())
-        self.btn_save.setToolTip(QKeySequence(QKeySequence.StandardKey.Save).toString())
+        self.btn_undo.setToolTip(Shortcuts.text(Shortcut.UNDO))
+        self.btn_redo.setToolTip(Shortcuts.text(Shortcut.REDO))
+        self.btn_save.setToolTip(Shortcuts.text(Shortcut.SAVE))
 
         self.btn_undo.clicked.connect(self._on_undo)
         self.btn_redo.clicked.connect(self._on_redo)
@@ -207,16 +210,16 @@ class EditorPage(QWidget):
         self._set_toolbar_enabled(False)
 
     def _setup_shortcuts(self) -> None:
-        self._back_shortcut = QShortcut(QKeySequence.StandardKey.Cancel, self)
+        self._back_shortcut = QShortcut(Shortcuts.sequence(Shortcut.BACK), self)
         self._back_shortcut.activated.connect(self._back_btn.click)
 
-        self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        self.save_shortcut = QShortcut(Shortcuts.sequence(Shortcut.SAVE), self)
         self.save_shortcut.activated.connect(self._on_save)
 
-        self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self.undo_shortcut = QShortcut(Shortcuts.sequence(Shortcut.UNDO), self)
         self.undo_shortcut.activated.connect(self._on_undo)
 
-        self.redo_shortcut = QShortcut(QKeySequence.StandardKey.Redo, self)
+        self.redo_shortcut = QShortcut(Shortcuts.sequence(Shortcut.REDO), self)
         self.redo_shortcut.activated.connect(self._on_redo)
 
     def load_editor(self, session: EditorSession) -> None:

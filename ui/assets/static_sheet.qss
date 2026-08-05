@@ -5,7 +5,7 @@ QMainWindow, QWidget {
     font-family: {FONT_SANS};
     font-weight: {BASE_FONT_WEIGHT};
     border: none;
-}  
+}
 
 QTreeView, QListView, QTableView, QListWidget, QTreeWidget {
     background-color: {BG_SURFACE};
@@ -243,4 +243,30 @@ QToolTip {
 
 #SurfacePanel {
     background-color: {BG_SURFACE};
+}
+
+QTabWidget {
+    background-color: {BG_SURFACE};
+    color: {TEXT};
+    border: none;
+}
+QTabWidget::pane {
+    border: none;
+    background-color: {BG_SURFACE};
+}
+QTabWidget QTabBar {
+    background-color: {BG_SURFACE};
+    border: none;
+}
+QTabWidget QTabBar::tab {
+    background-color: {BG_HOVER};
+    color: {TEXT};
+    border: none;
+    padding: 8px 16px;
+}
+QTabWidget QTabBar::tab:selected {
+    background-color: {INTERACTIVE};
+}
+QTabWidget QTabBar::tab:hover:!selected {
+    background-color: {INTERACTIVE_HOVER};
 }

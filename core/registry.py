@@ -410,8 +410,19 @@ def discover_all() -> None:
     all_errors = handler_errors + editor_errors
 
     if all_errors:
+        import traceback
         error_count = len(all_errors)
-        error_details = '\n'.join(f'    {mod}: {err}' for mod, err in all_errors)
+
+        # Use python traceback to get detailed discovery registration errors.
+        detailed_errors = []
+        for mod, err in all_errors:
+            if getattr(err, '__traceback__', None):
+                tb_lines = traceback.format_exception(type(err), err, err.__traceback__)
+                tb_str = ''.join(tb_lines).replace('\n', '\n      ').strip()
+                detailed_errors.append(f'    {mod}:\n      {tb_str}')
+            else:
+                detailed_errors.append(f'    {mod}: {err}')
+        error_details = '\n'.join(detailed_errors)
         fatal_msg = f'Application startup failed at discovery. Discovered {error_count} plugin errors:\n{error_details}'
         logger.critical(fatal_msg)
         raise RuntimeError(fatal_msg)

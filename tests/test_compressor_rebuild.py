@@ -16,7 +16,7 @@ def test_banked_rebuild_is_sector_aligned():
     payload = b'1bcb' + b'\x00' * 2000                  # decompressed payload w/ banked magic
     container = RadiCompressor(memoryview(payload), target_mode=1, is_final_payload=True).compress()
     root = VfsNode(); child = VfsNode(name='0000', parent=root); root.children.append(child)
-    child.compressed_header = CompressorHandler.SlzHeader('SLZ', 1, len(container)-16, len(payload), 0)
+    child.parent_header = CompressorHandler.SlzHeader('SLZ', 1, len(container)-16, len(payload), 0)
     child.offset = 0
     child.pending_data = payload
     h = _make_handler(container)

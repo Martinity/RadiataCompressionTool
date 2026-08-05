@@ -4,7 +4,7 @@ When the zoom level changes it will reload only this.
 
 QMainWindow, QWidget, QTreeView, QListView, QTableView, QListWidget,
 QHeaderView::section, QPushButton, QLabel, QTextEdit, QLineEdit,
-#TextMono, #BtnSurface, #BtnDanger, #BtnImportant, #Popup {
+#TextMono, #BtnSurface, #BtnDanger, #BtnImportant, #Popup, QToolTip  {
     font-size: {FONT_SIZE};
 }
 

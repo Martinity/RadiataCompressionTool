@@ -8,8 +8,9 @@ from PyQt6.QtWidgets import (
     QWidget, QMenu, QApplication, QLineEdit, QFrame
 )
 from PyQt6.QtCore import Qt, QModelIndex, pyqtSignal, QItemSelectionModel
-from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction, QUndoCommand, QUndoStack, QClipboard
+from PyQt6.QtGui import QShortcut, QColor, QBrush, QAction, QUndoCommand, QUndoStack, QClipboard
 
+from ui.settings import Shortcut, Shortcuts
 from core.contracts import BaseEditor
 from core.handlers.generic_binary_leaf import GenericBinaryHandler
 from core.registry import Registry
@@ -124,8 +125,8 @@ class HexEditorWidget(BaseEditor):
         return frame
 
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence.StandardKey.Copy, self).activated.connect(lambda: self._copy('hex'))
-        QShortcut(QKeySequence.StandardKey.Find, self).activated.connect(self.search_input.setFocus)
+        QShortcut(Shortcuts.sequence(Shortcut.COPY), self).activated.connect(lambda: self._copy('hex'))
+        QShortcut(Shortcuts.sequence(Shortcut.FIND), self).activated.connect(self.search_input.setFocus)
 
     def show_error(self, message: str) -> None:
         '''Swap to the editor page in the stack and display error.'''
@@ -192,6 +193,12 @@ class HexEditorWidget(BaseEditor):
         self.table_view.setModel(None)
         self.model = None
         super().cleanup()
+
+    def set_dirty(self, state: bool) -> None:
+        '''Ensure the undo stack aligns with external forced clean states'''
+        if not state and not self.undo_stack.isClean():
+            self.undo_stack.setClean()
+        super().set_dirty(state)
 
     # ------------------------------------------------------------------
     # Selection helpers

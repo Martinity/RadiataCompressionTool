@@ -11,7 +11,6 @@ One possible improvement to search legibility is to remove the metadata that is 
 removed game files.
 '''
 from __future__ import annotations
-from cmath import e
 
 import json
 import threading

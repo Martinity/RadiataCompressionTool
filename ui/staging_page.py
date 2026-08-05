@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from core.node import ModTracker, VfsNode
+from ui.settings import Shortcut, Shortcuts
+
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QKeySequence, QShortcut
+from PyQt6.QtGui import QBrush, QColor, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -204,7 +206,7 @@ class HexDiffPanel(QWidget):
 class StagingPage(QWidget):
     """UI for managing the filesystem vs Staging Area"""
 
-    request_workspace = pyqtSignal()
+    request_file_browser = pyqtSignal()
 
     def __init__(self, dispatcher, parent=None) -> None:
         super().__init__(parent)
@@ -284,6 +286,7 @@ class StagingPage(QWidget):
         action_bar = QHBoxLayout()
         action_bar.setContentsMargins(6, 6, 6, 6)
         self.btn_back = QPushButton('< Back')
+        self.btn_back.setToolTip(Shortcuts.text(Shortcut.BACK))
         self.slim_toggle = QCheckBox('Slimmed Rebuild')
         self.slim_toggle.setToolTip(
             'Removes all non-essential disk data.\nMeant for digital use only.'
@@ -307,7 +310,7 @@ class StagingPage(QWidget):
         root.addWidget(v_split)
 
     def _connect_signals(self) -> None:
-        self.btn_back.clicked.connect(self.request_workspace.emit)
+        self.btn_back.clicked.connect(self.request_file_browser.emit)
         self.btn_stage.clicked.connect(self._on_stage)
         self.btn_stage_all.clicked.connect(self._on_stage_all)
         self.btn_unstage.clicked.connect(self._on_unstage)
@@ -326,7 +329,7 @@ class StagingPage(QWidget):
         self.slimmed_requested = self.slim_toggle.isChecked()
 
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence.StandardKey.Cancel, self).activated.connect(self.request_workspace.emit)
+        QShortcut(Shortcuts.sequence(Shortcut.BACK), self).activated.connect(self.request_file_browser.emit)
 
     def refresh_lists(self) -> None:
         """Modifies the list of modified nodes"""

@@ -156,8 +156,8 @@ class ContainerHandler(BaseHandler):
     '''
     def __init__(self, source_data: bytes, parent_node: VfsNode | None = None) -> None:
         super().__init__(parent_node)
-        self.handle      = io.BytesIO(source_data)
-        self.owns_handle = True
+        self.handle: io.BytesIO = io.BytesIO(source_data)
+        self.owns_handle        = True
 
 class LeafHandler(BaseHandler):
     '''Used for individual, isolated file objects (e.g. IO)
@@ -187,7 +187,7 @@ class LeafHandler(BaseHandler):
         self.handle.seek(0)
         return self.handle.read()
 
-###---------------------------------------------- Widget contract ----------------------------------------------###
+###---------------------------------------------- Editor contract ----------------------------------------------###
 
 class _ABCMetaQtMeta(type(QWidget), abc.ABCMeta): # type: ignore
     '''Merge PyQt6 widget metaclass with ABC metaclass'''
@@ -307,6 +307,8 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta): # type: ignore
 
     def set_dirty(self, state: bool):
         '''Track node changes'''
+        if self._is_dirty == state: # Prevent inf recursion
+            return
         self._is_dirty = state
         self.dataChanged.emit(state)
 

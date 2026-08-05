@@ -1,11 +1,6 @@
 """
 PhysicalHandler ISO related processing. Extraction, rebuilding, TOC parsing, disk verification
 
-Currently filesystems are static (non-mutable). If in the future adding and removing files
-is added then this will need some serious refactoring. I think the smarter approach would be
-to create some object representations of the filesystems and have the rebuild process
-translate the nodes into the appropriate format for the ISO, similar to how RootDirectoryStructure works.
-
 Something to look more closely at in the future is the assignment of logical IDs to nodes.
 Currently I am aware of overlays getting ID 0, but for other types of new files research is needed.
 """
@@ -80,7 +75,6 @@ class RootDirectoryStructure:
             file_name = '..'
         else:
             file_name = raw_name.decode('ascii', errors='replace').split(';')[0]
-        logger.debug(f'file_name: {file_name}')
         return cls(
             entry_length=entry_length,
             extended_attribute=ext_attr,
@@ -93,37 +87,6 @@ class RootDirectoryStructure:
             filename_length=name_len,
             file_name=file_name,
         )
-
-    def to_bytes(self) -> bytes:
-        '''Convert a RootDirectoryStructure into its binary representation.'''
-        # Handle file names
-        if self.file_name == '.':
-            name = b'\x00'
-        elif self.file_name == '..':
-            name = b'\x01'
-        else:
-            name = self.file_name.encode('ascii', errors='replace') + b';1'
-        # Calculate lengths
-        name_len    = len(name)
-        name_padding = 1 if name_len & 1 else 0 # ISO 9660 name alignment
-        system_use = 14 if self.file_name not in ('.', '..') else 0 # Sony CDVDGEN system use area
-        record_len  = 33 + name_len + name_padding + system_use
-        if record_len & 1:
-            record_len += 1
-        data        = bytearray(record_len)
-        data[0]     = record_len
-        data[1]     = self.extended_attribute
-        lba         = self.lba // 0x800
-        data[2:10]  = pack_both_endian_32(lba)
-        data[10:18] = pack_both_endian_32(self.file_size)
-        data[18:25] = self.date[:7]
-        data[25]    = self.flag
-        data[26]    = 0
-        data[27]    = self.interleave_gap
-        data[28:32] = pack_both_endian_16(self.volume_sequence_number)
-        data[32]    = name_len
-        data[33:33 + name_len] = name
-        return bytes(data)
 
 
 class DiskRegion(abc.ABC):
@@ -138,6 +101,7 @@ class DiskRegion(abc.ABC):
         return self.__class__.__name__
     def write_to(self, dst: BinaryIO) -> int:
         '''Write contents directly to the destination stream, return number of bytes written.'''
+        return 0
 
 @dataclass(slots=True)
 class RawCopyRegion(DiskRegion):
@@ -152,15 +116,14 @@ class RawCopyRegion(DiskRegion):
     def label(self) -> str:
         return self.name or f'RawCopy@{self.source_offset:#x}'
     def write_to(self, dst: BinaryIO) -> int:
-        chunk_size = 24 * 1024 * 1024 # 24MB chunks
+        chunk_size = 32 * 1024 * 1024 # 32MB chunks
         bytes_left = self.length
-        curent_offset = self.source_offset
+        current_offset = self.source_offset
         while bytes_left > 0:
             read_size = min(chunk_size, bytes_left)
-            chunk = self.src_handle.pread(curent_offset, read_size)
-            dst.write(chunk)
+            dst.write(self.src_handle.pread_view(current_offset, read_size))
             bytes_left -= read_size
-            curent_offset += read_size
+            current_offset += read_size
         return self.length
 
 @dataclass(slots=True)
@@ -214,10 +177,9 @@ class TocRegion(DiskRegion):
     '''A final scrambled TOC region.'''
     total_entries: int
     sector_size:   int
-    signature:     int
-    scramble_fn:   Callable[list[int], list[int]]
+    scramble_fn:   Callable[[list[int]], list[int]]
     entries:       list[tuple[VfsNode, DiskRegion | None]] = field(default_factory=list)
-                            # Node, Self-reference or sentinel
+                      # ^^ Node, Self-reference or sentinel ^^
     @property
     def size(self) -> int:
         return self.total_entries * 3 * 4
@@ -235,13 +197,6 @@ class TocRegion(DiskRegion):
             flat[2 * self.total_entries + i] = getattr(node, 'logical_id', 0)
         scrambled = self.scramble_fn(flat)
         toc_array = array.array('I', (x & 0xFFFFFFFF for x in scrambled))
-        actual_sig = toc_array[0]
-        if actual_sig != self.signature:
-            logger.warning(
-                f'TOC signature mismatch: expected {hex(self.signature)}, got {hex(actual_sig)}. '
-                f'Entry 0 self-reference reconstruction failed, manually overwritting with correct signature.'
-            )
-            toc_array[0] = self.signature
         if sys.byteorder != 'little':
             toc_array.byteswap()
         dst.write(toc_array.tobytes())
@@ -266,41 +221,37 @@ class RootDirectoryRegion(DiskRegion):
         while bytes_read < self.fixed_size:
             entry_length = self.original_bytes[bytes_read]
             if not entry_length:
+                output.append(0)
                 bytes_read += 1
                 continue
-            record_slice = self.original_bytes[bytes_read : bytes_read + entry_length]
+            record_slice = bytearray(self.original_bytes[bytes_read : bytes_read + entry_length])
             record = RootDirectoryStructure.from_bytes(bytes(record_slice))
+            bytes_read += entry_length
 
-            if record.file_name in ('.', '..'):
-                output.extend(record_slice)
-            else:
+            if record.file_name not in ('.', '..'):
                 name, sep, ext = record.file_name.rpartition('.')
                 match = next(((n, r) for n, r in self.front_section_entries if n.name == name and n.extension == sep + ext), None)
                 if match:
                     node, region = match
-                    updated_record = RootDirectoryStructure(
-                        entry_length=record.entry_length,
-                        extended_attribute=record.extended_attribute,
-                        lba=region.start_offset,
-                        file_size=len(node.pending_data) if node.pending_data is not None else node.size,
-                        date=record.date,
-                        flag=record.flag,
-                        interleave_gap=record.interleave_gap,
-                        volume_sequence_number=record.volume_sequence_number,
-                        filename_length=record.filename_length,
-                        file_name=record.file_name,
-                    )
-                    output.extend(updated_record.to_bytes())
-            bytes_read += entry_length
+                    new_lba =  region.start_offset // 0x800
+                    new_size = len(node.pending_data) if node.pending_data is not None else node.size
+                    record_slice[2:10] = pack_both_endian_32(new_lba)
+                    record_slice[10:18] = pack_both_endian_32(new_size)
+                    output.extend(record_slice)
+            else:
+                output.extend(record_slice)
         if len(output) < self.fixed_size:
             output.extend(b'\x00' * (self.fixed_size - len(output)))
+        elif len(output) > self.fixed_size:
+            output = output[:self.fixed_size]
         dst.write(output)
         return len(output)
 
 @dataclass(slots=True)
-class ExecutablePatchRegion(DiskRegion):
-    '''Specifically for slimmed rebuild.
-    I feel like having to do it this way shows that the system is not the best design.'''
+class BinaryPatchRegion(DiskRegion):
+    '''
+    Special case for a region that needs to be mutated during the rebuild process.
+    '''
     node:           VfsNode
     src_handle:     BlockDevice
     sector_size:    int
@@ -308,17 +259,15 @@ class ExecutablePatchRegion(DiskRegion):
     @property
     def size(self) -> int:
         if self.node.pending_data is not None:
-            raw = len(self.node.pending_data)
-            return (raw + ((-raw) & (self.sector_size - 1)))
+            return len(self.node.pending_data)
         return self.node.size
     def write_to(self, dst: BinaryIO) -> int:
-        logger.debug(f'Writing executable patch region: {self.node.name}')
         if self.node.pending_data is not None:
             data = bytearray(self.node.pending_data)
-            padding = self.size - len(data)
         else:
-            data = bytearray(self.src_handle.pread(self.node.offset, self.node.size))
-            padding = self.size - len(data)
+            data = bytearray(self.node.size)
+            if self.node.size != self.src_handle.readinto(data, self.node.offset):
+                raise ValueError(f'Expected {self.node.size} bytes, got {len(data)}')
         if self.new_toc_offset != -1:
             separator  = b'\x2D\x20\x20\x02'
             static_lui = b'\x02\x3C'
@@ -338,13 +287,10 @@ class ExecutablePatchRegion(DiskRegion):
 
                     data[pos - 4 : pos - 2] = struct.pack('<H', hi_val)
                     data[pos + 4 : pos + 6] = struct.pack('<H', lo_val)
-                    logger.debug(f'Found TOC offsets @ {pos}, new offset {self.new_toc_offset}')
                     break
                 pos += 4
         dst.write(data)
-        if padding > 0:
-            dst.write(b'\x00' * padding)
-        return len(data) + padding
+        return len(data)
 
 ###------------------------------ Rebuild Layout ------------------------------------###
 
@@ -372,24 +318,24 @@ class DiskLayoutPlanner:
             region.start_offset = cursor
             cursor += region.size
         self._resolved = True
-        logger.debug(f'DiskLayoutPlanner: resolved {len(self.regions)} regions, total size {cursor:#x}')
 
     def total_size(self) -> int:
         return sum(r.size for r in self.regions)
 
-    def write_all(self, dst: BinaryIO, task_handle: TaskHandle, progress_every: int = 1) -> None:
+    def write_all(self, dst: BinaryIO, task_handle: TaskHandle, progress_every: int = 1) -> int:
         '''one pass - strict sequential write'''
         if not self._resolved:
             raise RuntimeError('resolve_offsets() must be called before write_all().')
-        total = len(self.regions)
+        total_bytes = self.total_size()
+        bytes_written = 0
+        total_regions = len(self.regions)
         for i, region in enumerate(self.regions):
             task_handle.checkpoint()
-            region.write_to(dst)
-            # task_handle.log_message.emit(f'Current position: {dst.tell():#x}')
-            if i % progress_every == 0:
-                pct = int((i / total) * 100) if total else 100
+            bytes_written += region.write_to(dst)
+            if i % progress_every == 0 or i == total_regions - 1:
+                pct = int((bytes_written / total_bytes) * 100) if total_bytes else 100
                 task_handle.progress.emit(pct)
-        logger.info(f'DiskLayoutPlanner: wrote {total} regions ({self.total_size():,} bytes)')
+        return bytes_written
 
 
 ###------------------------------ ISO HANDLER ------------------------------------###
@@ -405,7 +351,6 @@ class IsoHandler(PhysicalHandler):
     class IsoParameters:
         """Hardcoded disk parameters"""
         seed:                   int = 0x13578642
-        signature:              int = 0x27D51556  # raw scrambled TOC self-reference
         toc_offset:             int = -1
         total_entries:          int = 0x1200
         sector_size:            int = 0x800
@@ -416,12 +361,11 @@ class IsoHandler(PhysicalHandler):
         """Initialize iso properties"""
         super().__init__(source, parent_node=parent)
         logger.info(f'IsoHandler initialized for {source.name}')
-        self.params            = self.IsoParameters()
-        self.toc: list         = []
-        self.toc_location      = -1
+        self.params                      = self.IsoParameters()
+        self.toc: list[dict[str, Any]]  = []
         self.pvd: RootDirectoryStructure | None = None
         self.cnf: tuple[int, int] | None = None
-        self.system_areas      = VfsNode()
+        self.system_areas                = VfsNode()
 
     def get_raw_node(self, node: VfsNode) -> bytes:
         """Public call for the raw data of a physical node"""
@@ -459,12 +403,6 @@ class IsoHandler(PhysicalHandler):
             bytes_read  += 1
             if not entry_length:
                 break
-            # Check for sector padding between entries (probably pointless...)
-            if entry_length == 0:
-                padding_to_skip = (-bytes_read) & (self.params.sector_size - 1)
-                if padding_to_skip < self.params.sector_size:
-                    bytes_read += padding_to_skip
-                continue
             record_slice = root_dir_view[bytes_read - 1 : bytes_read - 1 + entry_length]
             bytes_read += entry_length - 1
             record = RootDirectoryStructure.from_bytes(record_slice.tobytes())
@@ -604,21 +542,15 @@ class IsoHandler(PhysicalHandler):
                 break
             pos += 4
         if toc_offset == 0:
-            raise ValueError('Could not locate TOC offset in main ELF.')
-        self.toc_location = pos # To be reused for ISO rebuilding to change the TOC offset
+            raise ValueError(f'Could not locate TOC offset in {child.name} (size {len(elf_bytes)}@{child.offset//2048}).')
         self.params.toc_offset = toc_offset
-        logger.debug(f'Toc location: {self.toc_location:#x}, Toc offset: {toc_offset:#x}')
+        logger.debug(f'Toc location: {pos:#x}, Toc offset: {toc_offset:#x}')
 
     def _load_toc(self) -> memoryview:
         """Locate the TOC."""
         # Check for radiata ISO
         offset = self.params.toc_offset * self.params.sector_size
-        toc_view = memoryview(self.handle.pread(offset, self.params.total_entries * 3 * 4))
-        # if self.params.signature != int.from_bytes(toc_view[:4], 'little'):
-        #     raise ValueError(
-        #         f'Not a Radiata Stories TOC. Got TOC signature: {int.from_bytes(toc_view[:4], 'little'):#x} Expected: {hex(self.params.signature)}'
-        #     )
-        return toc_view
+        return self.handle.pread_view(offset, self.params.total_entries * 3 * 4)
 
     def _process_toc(self, scrambled_toc: memoryview) -> list[dict[str, Any]]:
         """Unscramble and structure the TOC data"""
@@ -679,7 +611,6 @@ class IsoHandler(PhysicalHandler):
             ### System Area 1 - start to PVD
             sys_area_1_len = (self.params.iso_9660_pvd * self.params.sector_size) + self.params.pvd_byte_offset
             planner.add(RawCopyRegion(self.system_areas.children[0].offset, self.system_areas.children[0].size, 'System Area', self.handle))
-            logger.debug(f'System Area 1: {planner.total_size()//2048}')
             ### PVD - a single record pointing to the root directory
             pvd_record_region = RawCopyRegion(
                 source_offset=sys_area_1_len,
@@ -688,11 +619,9 @@ class IsoHandler(PhysicalHandler):
                 src_handle=self.handle
             )
             planner.add(pvd_record_region)
-            logger.debug(f'PVD: {planner.total_size()//2048}')
             ### System Area 2 - between PVD and root directory
             pvd_end = sys_area_1_len + self.pvd.entry_length
             planner.add(RawCopyRegion(pvd_end, self.pvd.lba - pvd_end, 'System Area 2', self.handle))
-            logger.debug(f'System Area 2: {planner.total_size()//2048}')
             ### Root Directory - Root directory records
             original_dir_bytes = self.handle.pread(self.pvd.lba, self.pvd.file_size)
             root_dir_region = RootDirectoryRegion(
@@ -700,11 +629,9 @@ class IsoHandler(PhysicalHandler):
                 original_bytes=original_dir_bytes
             )
             planner.add(root_dir_region)
-            logger.debug(f'Root Directory: {planner.total_size()//2048}')
             ### ISO filesystem - root directory records files
             exec_patch_region = None
             for node in iso_nodes:
-                logger.debug(f'{node.name}: {(node.offset + node.size)//2048:#x}')
                 if not node.name.endswith(('IOPRP300', 'SLUS_212', 'SLPM_658', 'SYSTEM')): # Only write valid runtime files
                     continue
                 if node.name.startswith('AreaBefore'):
@@ -712,8 +639,7 @@ class IsoHandler(PhysicalHandler):
                     planner.add(region)
                     continue
                 if node.name.startswith('SLUS') or node.name.startswith('SLPM'):
-                    logger.debug(f'Found executable: {node.name}, setting exec_patch_region')
-                    exec_patch_region = ExecutablePatchRegion(node, self.handle, self.params.sector_size)
+                    exec_patch_region = BinaryPatchRegion(node, self.handle, self.params.sector_size)
                     planner.add(exec_patch_region)
                     root_dir_region.front_section_entries.append((node, exec_patch_region))
                     continue
@@ -723,7 +649,6 @@ class IsoHandler(PhysicalHandler):
                     region = RawCopyRegion(node.offset, node.size, node.name, self.handle)
                 planner.add(region)
                 root_dir_region.front_section_entries.append((node, region))
-            logger.debug(f'ISO filesystem: {planner.total_size()//2048}, TOC offset: {int(self.params.toc_offset)}')
             ### System Area 4 - (slimmed_requested dependent) End of ISO filesystem to VFS TOC
             current_size = planner.total_size()
             if current_size > self.params.toc_offset * self.params.sector_size:
@@ -732,26 +657,27 @@ class IsoHandler(PhysicalHandler):
                     f'({current_size:#x} > {self.params.toc_offset:#x})'
                 )
             if not slimmed_rebuild_requested:
-                padding = (self.params.toc_offset * self.params.sector_size) - current_size
+                new_toc_lba = 494979
+                padding = (new_toc_lba * self.params.sector_size) - current_size
                 if padding > 0:
                     planner.add(ZeroFillRegion(padding, 'TOC_offset_Padding'))
             else:
-                ### Slimmed rebuild - no Area 4 padding + elf patch
+                ### Slimmed rebuild - no Area 4 padding
                 padding = (-current_size) & (self.params.sector_size - 1)
                 if padding > 0:
                     planner.add(ZeroFillRegion(padding, 'TOC_alignment_padding'))
                     current_size += padding
-                new_toc_sector = current_size // self.params.sector_size
-                if exec_patch_region:
-                    exec_patch_region.new_toc_offset = new_toc_sector
-                    logger.debug(f'Slimmed rebuild: Patched executable TOC offset to {new_toc_sector:#x}')
-                else:
-                    raise ValueError(f'Could not patch executable TOC offset - exec_patch_region {type(exec_patch_region)}')
+                new_toc_lba = current_size // self.params.sector_size
+            ### Elf TOC patch
+            if exec_patch_region:
+                exec_patch_region.new_toc_offset = new_toc_lba
+                task_handle.log_message.emit(f'Patching executable TOC offset to {new_toc_lba:#x}...')
+            else:
+                raise ValueError(f'Could not patch executable TOC offset - exec_patch_region {type(exec_patch_region)}')
             ### TOC - table of contents for the VFS of the game data
             toc_region = TocRegion(
                 total_entries=self.params.total_entries, # to modify total entries main ELF needs to be patched
                 sector_size=self.params.sector_size,
-                signature=self.params.signature,
                 scramble_fn=self._scramble
             )
             planner.add(toc_region)
@@ -772,13 +698,15 @@ class IsoHandler(PhysicalHandler):
                     region = RawCopyRegion(child.offset, child.size, child.name, self.handle)
                 toc_region.entries.append((child, region))
                 planner.add(region)
+            '''There is a possibility that a post VFS system area is required but not in my early game testing.'''
             ### Resolve
             task_handle.log_message.emit(f'Resolving physical disk layout offsets for {len(planner.regions)} regions.')
             planner.resolve_offsets()
             ### Write
             with open(output_path, 'wb') as dst:
                 task_handle.log_message.emit('Starting sequential write...')
-                planner.write_all(dst, task_handle)
+                new_size = planner.write_all(dst, task_handle)
+            task_handle.log_message.emit(f'Wrote {new_size:,} bytes to {output_path.name}')
             return True
 
         except Exception as e:
@@ -793,21 +721,14 @@ class IsoHandler(PhysicalHandler):
 
     ###---------------------------------- Utility -------------------------------------------###
 
-    def get_build(self, root: VfsNode) -> str:
-        """Return the str name of the build inferred from the ISO level files"""
+    def get_region(self, root: VfsNode) -> str:
+        """Return the str name of the region inferred from the ISO level files"""
         iso_file_names = {child.name for child in root.children}
-
         if 'SLPM_658' in iso_file_names:
-            return 'JPN release'
-        if 'SLUS_212' in iso_file_names:
-            if 'DEV9' in iso_file_names:
-                return 'Prototype'
-            return 'USA release'
-        logger.warning(
-            f'Unknown build registered. Could not locate SLPM_658 or SLUS_212. '
-            f'ISO contents: {iso_file_names}'
-        )
-        return 'Unknown'
+            return 'Region: JPN'
+        elif 'SLUS_212' in iso_file_names:
+            return 'Region: USA'
+        return 'Region: Unknown'
 
     def verify_iso_integrity(self, task_handle: TaskHandle) -> str:
         '''
@@ -818,15 +739,14 @@ class IsoHandler(PhysicalHandler):
         hasher = xxhash.xxh128()
         chunk_size = (24 * 1024 * 1024) # 24MB chunks seemed to load the fastest I have tested
         bytes_read = 0
-        raise RuntimeError('Test failed.')
-        while (chunk := self.handle.pread(size=chunk_size, offset=bytes_read)):
+        while (chunk := self.handle.pread_view(size=chunk_size, offset=bytes_read)):
             task_handle.checkpoint()
             hasher.update(chunk)
             bytes_read += len(chunk)
             task_handle.progress.emit(int(bytes_read / file_size * 100))
         digest = hasher.hexdigest()
         build = _KNOWN_BUILDS.get(digest, f'Modified/Unknown: {digest}')
-        return build
+        return 'Build: ' + build
 
     def _scramble(self, flat_toc: list[int]) -> list[int]:
         """scramble or unscramble the toc"""

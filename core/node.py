@@ -44,7 +44,7 @@ class VfsNode:
         self.target: tuple[int,...] | None = target         # Header HID for unpacking datacenter
 
         self.extension = extension                          # extension from override saved in radi_metadata
-        self.parent_header: object | None = None            # Original header of the parent node used for rebuilding children
+        self.parent_header: CompressorHandler.SlzHeader | bytes | None = None    # Original header of the parent node used for rebuilding children
         self.logical_id: int | None = None                  # Logical ID from the TOC used for ISO rebuilding
 
         self._id_path: tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)

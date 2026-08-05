@@ -52,30 +52,30 @@ from core.metadata_manager import NodeMetadataStore
 from core.node import VfsNode
 from core.version import __version__
 from core.workers import TaskHandle
-from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardItemModel, QKeySequence
+from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint
+from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenuBar,
     QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QTextEdit,
-    QTreeView, QVBoxLayout, QWidget, QTabWidget, QLineEdit, QComboBox
+    QTreeView, QVBoxLayout, QWidget, QTabWidget, QLineEdit, QComboBox, QSizePolicy
 )
 from ui.editor_page import EditorPage
 from ui.file_browser_page import FileBrowserBehavior, FileBrowserPage
-from ui.settings import AppSettings
+from ui.settings import AppSettings, Shortcuts, Shortcut
 from ui.staging_page import StagingPage
 from ui.theme_manager import ThemeManager
-from utilities import get_resource_path, ToastProgressBar, human_size
+from utilities import get_resource_path, human_size
 
 logger = logging.getLogger(f'radiata.{__name__}')
 
 
 # Enums for page stack idx
 class AppPage(IntEnum):
-    WELCOME   = 0
-    WORKSPACE = 1
-    STAGING   = 2
-    REBUILD   = 3
-    EDITOR    = 4
+    WELCOME     = 0
+    FILEBROWSER = 1
+    STAGING     = 2
+    REBUILD     = 3
+    EDITOR      = 4
 
 
 ###---------------------------------------------- Main Window ----------------------------------------###
@@ -105,29 +105,29 @@ class MainWindow(QMainWindow):
         self.metadata_store.load()
         self.dispatcher.set_metadata_store(self.metadata_store)
         # Setup View
-        self.stack           = QStackedWidget()
-        self.welcome_page    = WelcomePage(self.app_settings)
-        self.workspace_page  = FileBrowserPage(self.metadata_store)
-        self.staging_page    = StagingPage(self.dispatcher)
-        self.rebuild_page    = RebuildStatusPage()
-        self.editor_page     = EditorPage()
+        self.stack              = QStackedWidget()
+        self.welcome_page       = WelcomePage(self.app_settings)
+        self.file_browser_page  = FileBrowserPage(self.metadata_store)
+        self.staging_page       = StagingPage(self.dispatcher)
+        self.rebuild_page       = RebuildStatusPage()
+        self.editor_page        = EditorPage()
         self._setup_ui()
 
         # Behavior controllers
         self.controller = FileBrowserBehavior(
-            self.workspace_page,
+            self.file_browser_page,
             self.editor_page,
             self.dispatcher,
             self.metadata_store,
         )
         self.menu_manager = MainMenuBar(
             self,
-            self.workspace_page,
+            self.file_browser_page,
             self.dispatcher,
             self.metadata_store,
             self.app_settings,
         )
-        self.toast_progress_bar = ToastProgressBar(self)
+        self.toast = Toast(self)
         self._setup_statusbar()
         self._connect_signals()
         self._restore_layout()
@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         """Initializes the central widget stack and default window properties."""
         self.setCentralWidget(self.stack)
         self.stack.addWidget(self.welcome_page)
-        self.stack.addWidget(self.workspace_page)
+        self.stack.addWidget(self.file_browser_page)
         self.stack.addWidget(self.staging_page)
         self.stack.addWidget(self.rebuild_page)
         self.stack.addWidget(self.editor_page)
@@ -157,7 +157,7 @@ class MainWindow(QMainWindow):
         return bar
 
     def _setup_statusbar(self) -> None:
-        self.status_bar.showMessage('Ready', 3000)
+        self.status_bar.showMessage('Ready')
 
     def _on_worker_log(self, msg: str) -> None:
         """
@@ -170,19 +170,19 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         """Routes main window state signals between UI pages or dispatcher"""
         self.welcome_page.request_open.connect(self.attempt_load_iso)
-        self.workspace_page.btn_review.clicked.connect(lambda: self.stack.setCurrentIndex(AppPage.STAGING))
-        self.staging_page.request_workspace.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
-        self.editor_page.back_requested.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
+        self.file_browser_page.btn_review.clicked.connect(lambda: self.stack.setCurrentIndex(AppPage.STAGING))
+        self.staging_page.request_file_browser.connect(lambda: self.stack.setCurrentIndex(AppPage.FILEBROWSER))
+        self.editor_page.back_requested.connect(lambda: self.stack.setCurrentIndex(AppPage.FILEBROWSER))
 
         self.dispatcher.iso_loaded.connect(self._on_iso_loaded)
         self.dispatcher.rebuild_requested.connect(self.start_rebuild)
         self.dispatcher.rebuild_progress.connect(self.rebuild_page.update_progress)
         self.dispatcher.rebuild_log.connect(self.rebuild_page.append_log)
         self.dispatcher.rebuild_complete.connect(self.on_rebuild_complete)
-        self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(f'Build: {build}'))
+        self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(build))
 
-        self.dispatcher.action_progress.connect(self.toast_progress_bar.show_progress)
-        self.dispatcher.file_browser_log.connect(self.workspace_page.append_log)
+        self.dispatcher.action_progress.connect(self.toast.show_progress)
+        self.dispatcher.file_browser_log.connect(self.file_browser_page.append_log)
 
     ###------------------------------- Appearance ----------------------------------###
     def _restore_layout(self) -> None:
@@ -191,11 +191,11 @@ class MainWindow(QMainWindow):
         if s.geometry:
             self.restoreGeometry(s.geometry)
         if s.h_splitter:
-            self.workspace_page.h_splitter.restoreState(s.h_splitter)
+            self.file_browser_page.h_splitter.restoreState(s.h_splitter)
         if s.v_splitter:
-            self.workspace_page.v_splitter.restoreState(s.v_splitter)
+            self.file_browser_page.v_splitter.restoreState(s.v_splitter)
         self._apply_theme()
-        self.workspace_page.log_console.setVisible(s.show_log_console)
+        self.file_browser_page.log_console.setVisible(s.show_log_console)
         logging.getLogger('radiata').setLevel(
             logging.DEBUG if self.app_settings.verbose_logging else logging.INFO
         )
@@ -223,11 +223,11 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self.app_settings.theme_name = theme_name
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None: # type: ignore
         '''Repositions the toast progress bar when the window is resized.'''
         super().resizeEvent(event)
-        if hasattr(self, 'toast_progress_bar') and self.toast_progress_bar.isVisible():
-            self.toast_progress_bar._reposition()
+        if self.toast.progress.isVisible():
+            self.toast._reposition()
 
     ###----------------------------------- ISO ----------------------------------###
 
@@ -273,8 +273,8 @@ class MainWindow(QMainWindow):
         if not has_iso:
             return
         self.controller.init_file_tree(result)
-        self.stack.setCurrentIndex(AppPage.WORKSPACE)
-        self.workspace_page.setFocus()
+        self.stack.setCurrentIndex(AppPage.FILEBROWSER)
+        self.file_browser_page.setFocus()
         self.menu_manager.open_action.setEnabled(not has_iso)
         self.menu_manager.close_action.setEnabled(has_iso)
         self.menu_manager.verify_hash.setEnabled(has_iso)
@@ -286,7 +286,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, 'Success', message)
         else:
             QMessageBox.critical(self, 'Build Failed', message)
-        self.stack.setCurrentWidget(self.workspace_page)
+        self.stack.setCurrentWidget(self.file_browser_page)
 
     ###------------------------------------- Lifecycle --------------------------------------###
 
@@ -294,8 +294,8 @@ class MainWindow(QMainWindow):
         """Saves current UI layout parameters before destroying the window."""
         s = self.app_settings
         s.geometry = self.saveGeometry()
-        s.h_splitter = self.workspace_page.h_splitter.saveState()
-        s.v_splitter = self.workspace_page.v_splitter.saveState()
+        s.h_splitter = self.file_browser_page.h_splitter.saveState()
+        s.v_splitter = self.file_browser_page.v_splitter.saveState()
         s.sync()
         self.dispatcher.close()
         return super().closeEvent(a0)
@@ -315,56 +315,58 @@ class WelcomePage(QWidget):
         super().__init__(parent)
         self.settings = settings
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(50, 50, 50, 50)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch()
 
         subtitle = QLabel('Select a Radiata Stories ISO')
         subtitle.setObjectName('TextSubtitle')
-
-        self.button = QPushButton()
-        self.button.setObjectName('BtnLarge')
-        self.set_loading(False)
-        self.button.clicked.connect(self.open_file_dialog)
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
-        layout.addWidget(self.button)
 
-    def open_file_dialog(self) -> None:
-        '''Open the custom ISO/device dialog'''
-        dialog = DeviceOrIsoDialog(self, last_dir=self.settings.last_iso_dir or "")
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
-            path = dialog.selected_path
-            if path.is_file() or path.is_dir():
-                self.settings.last_iso_dir = str(path)
-            self.request_open.emit(path)
+        self.device_widget = DeviceOrIsoDialog(
+            parent=self,
+            last_dir=self.settings.last_iso_dir or ''
+        )
+        self.device_widget.source_selected.connect(self._on_source_selected)
+        layout.addWidget(self.device_widget, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch()
+
+        self.set_loading(False)
+
+    def _on_source_selected(self, path: Path) -> None:
+        if path.is_file() or path.is_dir():
+            self.settings.last_iso_dir = str(path)
+        self.request_open.emit(path)
 
     def set_loading(self, is_loading: bool) -> None:
         if is_loading:
-            self.button.setText('Loading...')
-            self.button.setEnabled(False)
+            self.device_widget.btn_confirm.setText('Loading...')
+            self.device_widget.btn_confirm.setEnabled(False)
         else:
-            self.button.setText('Open ISO')
-            self.button.setEnabled(True)
+            self.device_widget.btn_confirm.setText('Open ISO')
+            self.device_widget.btn_confirm.setEnabled(True)
 
 
-class DeviceOrIsoDialog(QDialog):
+class DeviceOrIsoDialog(QWidget):
     '''
-    A custom file dialog that allows the user to select either an existing ISO file
-    from the filesystem or a raw physical block device/optical drive.
+    A custom file dialog widget that allows the user to select either an existing ISO file
+    from the pc's file browser or a physical block device/optical drive.
     Cross-platform compatible.
-    Still need to figure out permissions for accessing block devices.
     '''
     source_selected = pyqtSignal(Path)
 
     def __init__(self, parent=None, last_dir: str = '') -> None:
         super().__init__(parent)
-        self.setWindowTitle('Select ISO image or Optical Drive')
-        self.resize(600, 400)
         self.last_dir = last_dir
         self.selected_path: Path | None = None
+        self.setFixedWidth(600)
+        self.setFixedHeight(300)
+        self.setObjectName('SurfaceTabPanel')
         layout = QVBoxLayout(self)
-        self._warning_banner(layout)
         # Tabs for selecting between the two types of media inputs
         self.tabs = QTabWidget()
+        self.tabs.setObjectName('SurfaceTabPanel')
+        self.tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.tabs.addTab(self._create_iso_tab(), 'ISO Image File')
         self.tabs.addTab(self._create_device_tab(), 'Physical Disk')
         layout.addWidget(self.tabs)
@@ -372,30 +374,12 @@ class DeviceOrIsoDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        self.btn_confirm = QPushButton('Select')
+        self.btn_confirm = QPushButton()
         self.btn_confirm.setObjectName('BtnLarge')
         self.btn_confirm.clicked.connect(self._on_confirm)
 
-        self.btn_cancel = QPushButton('Cancel')
-        self.btn_cancel.clicked.connect(self.reject)
-
         btn_layout.addWidget(self.btn_confirm)
-        btn_layout.addWidget(self.btn_cancel)
         layout.addLayout(btn_layout)
-
-    def _warning_banner(self, layout: QVBoxLayout) -> None:
-        '''
-        Considering that only extra permissions are only required for block devices,
-        this should be moved to show on the device tab only.
-        '''
-        is_elevated = self._check_elevation()
-        if not is_elevated:
-            banner = QLabel(
-                'Interfacing directly with block devices requires elevated permissions.'
-                'Run as Administrator on Windows or use sudo/root on Linux/macOS.'
-            )
-            banner.setWordWrap(True)
-            layout.addWidget(banner)
 
     def _check_elevation(self) -> bool:
         if platform.system() != 'Windows' and self.selected_path:
@@ -405,7 +389,7 @@ class DeviceOrIsoDialog(QDialog):
     def _create_iso_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(QLabel('Select a .iso file:'))
         h_layout = QHBoxLayout()
         self.iso_path_input = QLineEdit()
@@ -422,7 +406,7 @@ class DeviceOrIsoDialog(QDialog):
     def _create_device_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(QLabel('Select a physical optical drive or block device:'))
         self.device_combo = QComboBox()
         self._populate_device_combo()
@@ -537,7 +521,6 @@ class DeviceOrIsoDialog(QDialog):
                 return
             self.selected_path = Path(path_str)
         self.source_selected.emit(self.selected_path)
-        self.accept()
 
 
 ###------------------------------------- Rebuilding Page -----------------------------------###
@@ -616,17 +599,17 @@ class MainMenuBar:
 
     def __init__(
         self,
-        main_window:    MainWindow,
-        workspace_page: FileBrowserPage,
-        dispatcher:     Dispatcher,
-        metadata_store: NodeMetadataStore,
-        app_settings:   AppSettings,
+        main_window:       MainWindow,
+        file_browser_page: FileBrowserPage,
+        dispatcher:        Dispatcher,
+        metadata_store:    NodeMetadataStore,
+        app_settings:      AppSettings,
     ) -> None:
-        self.window     = main_window
-        self.workspace  = workspace_page
-        self.dispatcher = dispatcher
-        self._store     = metadata_store
-        self.settings   = app_settings
+        self.window        = main_window
+        self.file_browser  = file_browser_page
+        self.dispatcher    = dispatcher
+        self._store        = metadata_store
+        self.settings      = app_settings
 
         self._build_file_menu()
         self._build_view_menu()
@@ -654,12 +637,12 @@ class MainMenuBar:
         file_menu.addSeparator()
 
         self.open_action = QAction('Open ISO', self.window)
-        self.open_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_action.setShortcut(Shortcuts.sequence(Shortcut.OPEN))
         self.open_action.triggered.connect(self._handle_open)
         file_menu.addAction(self.open_action)
 
         self.close_action = QAction('Close ISO', self.window)
-        self.close_action.setShortcut(QKeySequence.StandardKey.Close)
+        self.close_action.setShortcut(Shortcuts.sequence(Shortcut.CLOSE))
         self.close_action.setEnabled(False)
         self.close_action.triggered.connect(self._handle_close)
         file_menu.addAction(self.close_action)
@@ -667,7 +650,7 @@ class MainMenuBar:
         file_menu.addSeparator()
 
         exit_action = QAction('Exit', self.window)
-        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        exit_action.setShortcut(Shortcuts.sequence(Shortcut.QUIT))
         exit_action.triggered.connect(self._handle_exit)
         file_menu.addAction(exit_action)
 
@@ -692,9 +675,9 @@ class MainMenuBar:
         zoom_in  = QAction('Zoom In', self.window)
         zoom_out = QAction('Zoom out', self.window)
         zoom_rst = QAction('Reset Zoom', self.window)
-        zoom_in.setShortcut(QKeySequence.StandardKey.ZoomIn)
-        zoom_out.setShortcut(QKeySequence.StandardKey.ZoomOut)
-        zoom_rst.setShortcut('Ctrl+0')
+        zoom_in.setShortcut(Shortcuts.sequence(Shortcut.ZOOM_IN))
+        zoom_out.setShortcut(Shortcuts.sequence(Shortcut.ZOOM_OUT))
+        zoom_rst.setShortcut(Shortcuts.sequence(Shortcut.ZOOM_RESET))
         zoom_in.triggered.connect(lambda: self.window.adjust_zoom(+1))
         zoom_out.triggered.connect(lambda: self.window.adjust_zoom(-1))
         zoom_rst.triggered.connect(lambda: self.window.reset_zoom())
@@ -780,7 +763,7 @@ class MainMenuBar:
         self.window.set_theme(theme_name)
 
     def _handle_toggle_log(self, checked: bool) -> None:
-        self.workspace.log_console.setVisible(checked)
+        self.file_browser.log_console.setVisible(checked)
         self.settings.show_log_console = checked
 
     def _handle_toggle_verbose(self, checked: bool) -> None:
@@ -800,6 +783,115 @@ class MainMenuBar:
         theme_name = self.window.current_theme
         LegendView(ThemeManager.THEMES.get(theme_name), self.window).exec()
 
+
+###------------------------------------------- Toasts ------------------------------------------###
+
+
+class Toast(QWidget):
+    '''
+    All toast notifications popus for non-blocking user feedback.
+    Handles temporary text messages and action progress bars.
+    Animates upwards upon creation and recedes downwards automatically or manually.
+    '''
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.SubWindow | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setObjectName('Popus')
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        self.label = QLabel()
+        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        layout.addWidget(self.label)
+        layout.addWidget(self.progress)
+
+        self._is_active = False
+        self.dismiss_timer = QTimer(self)
+        self.dismiss_timer.setSingleShot(True)
+        self.dismiss_timer.timeout.connect(self.dismiss)
+        self.hide()
+
+    def show_message(self, message: str, duration_ms: int = 3000) -> None:
+        '''Display a temporary text-only notification.'''
+        self.label.setText(message)
+        self.progress.hide()
+        self._slide_up(duration_ms)
+
+    def show_progress(self, value: int, title: str = '') -> None:
+        '''
+        Display or update a persistent progress bar.
+        Automatically fades out if value reaches 100.
+        '''
+        if title:
+            self.label.setText(title)
+        self.progress.show()
+        self.progress.setValue(value)
+        if not self._is_active:
+            self._slide_up(display_duration=0)
+        if value >= 100:
+            self.dismiss_timer.start(2500)
+        else:
+            self.dismiss_timer.stop()
+
+    def dismiss(self) -> None:
+        '''Force the toast to slide down and hide'''
+        if not self._is_active:
+            return
+
+        self.dismiss_timer.stop()
+        self.anim = QPropertyAnimation(self, b'pos')
+        self.anim.setDuration(300)
+        self.anim.setStartValue(self.pos())
+        self.anim.setEndValue(self.hidden_pos)
+        self.anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        self.anim.finished.connect(self.hide)
+        self.anim.finished.connect(lambda: setattr(self, '_is_active', False))
+        self.anim.start()
+
+    def _calculate_position(self) -> tuple[QPoint, QPoint]:
+        '''Determines the display anchor and off-screen anchor point from window geometry.'''
+        parent = self.parentWidget()
+        if not parent:
+            return QPoint(0, 0), QPoint(0, 0)
+
+        parent_rect   = parent.rect()
+        padding_x  = 30
+        padding_y = 40
+        self.adjustSize()
+        x = parent_rect.right() - self.width() - padding_x
+        y = parent_rect.bottom() - self.height() - padding_y
+        target_pos = QPoint(x, y)
+        hidden_pos = QPoint(x, parent_rect.height())
+        return target_pos, hidden_pos
+
+    def _reposition(self) -> None:
+        if not self.parentWidget():
+            return
+        self.target_pos, self.hidden_pos = self._calculate_position()
+        if self._is_active:
+            self.move(self.target_pos)
+
+    def _slide_up(self, display_duration: int) -> None:
+        '''Slide upward animation. Start auto-dismiss timer if duration > 0.'''
+        self.target_pos, self.hidden_pos = self._calculate_position()
+        if self._is_active:
+            self.move(self.target_pos)
+        else:
+            self.move(self.hidden_pos)
+            self.show()
+            self.raise_()
+            self.anim = QPropertyAnimation(self, b'pos')
+            self.anim.setDuration(350)
+            self.anim.setStartValue(self.hidden_pos)
+            self.anim.setEndValue(self.target_pos)
+            self.anim.setEasingCurve(QEasingCurve.Type.InCubic)
+            self.anim.start()
+            self._is_active = True
+        if display_duration > 0:
+            self.dismiss_timer.start(display_duration)
 
 ###------------------------------------------- File Legend ------------------------------------------###
 
