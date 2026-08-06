@@ -3,6 +3,7 @@ Native Library Registry for all native libraries that are used by the modding to
 Handles tiered resolution, JIT compliation, dependency discovery, and thread-safe loading.
 '''
 from __future__ import annotations
+from ssl import OP_LEGACY_SERVER_CONNECT
 
 import ctypes
 import os
@@ -25,7 +26,7 @@ _INCLUDE_REGEX = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
 class NativeLibrary:
     '''Defines the root of a native library, including its name, path, and dependencies.'''
     name:      str
-    root_dir:      Path
+    root_dir:  Path
     sources:   list[str]
     link_args: list[str] = field(default_factory=list)
     cflags:    list[str] = field(default_factory=list)
@@ -35,7 +36,7 @@ class NativeRegistry:
     _cache: dict[str, ctypes.CDLL | None] = {}
     _locks: dict[str, threading.Lock] = {}
     _global_lock = threading.Lock()
-    _BUILD_ROOT = Path('.native_build').resolve()
+    _BUILD_ROOT = (Path(__file__).resolve().parent.parent.parent / 'native_build').resolve()
 
     @classmethod
     def load(
@@ -44,10 +45,9 @@ class NativeRegistry:
         bind_callback: Callable[[ctypes.CDLL], ctypes.CDLL]
     ) -> ctypes.CDLL | None:
         '''
-        Thread-safe with tiered resolution.
-        Prebuilt, JIT, and pure-python fallback resolutions.
-        Release builds are always prebuilt.
-        Not all libraries support a pure-python fallback.
+        Two tiered native library resolution:
+            1. Prebuilt - frozen build or precompiled library
+            2. JIT compilation - first run from source (cached)
         '''
         with cls._global_lock:
             if module.name not in cls._locks:
@@ -60,12 +60,9 @@ class NativeRegistry:
             # Second tier: JIT
             if not lib and not getattr(sys, 'frozen', False):
                 lib = cls._try_compile_and_load(module, bind_callback)
-            # Third tier: Fallback
+            # Failed resolution
             if not lib:
-                logger.warning(
-                    f'Native library "{module.name}" not found and failed to compile. '
-                    f'Using pure-python fallback if available.'
-                )
+                raise RuntimeError(f'Native library "{module.name}" not found and failed to compile.')
             cls._cache[module.name] = lib
             return lib
 
@@ -138,15 +135,20 @@ class NativeRegistry:
         module: NativeLibrary,
         bind_callback: Callable[[ctypes.CDLL], ctypes.CDLL]
     ) -> ctypes.CDLL | None:
+        '''
+        Attempt to compile the given native library and load it.
+        Compilation will report any errors and warnings appropriately with the logger.
+        Cache directory is matched to the build_native directory.
+        '''
         try:
             tracked_files = cls._resolve_dependencies(module)
             missing = [src for src in module.sources if not (module.root_dir / src).exists()]
             if missing:
                 logger.error(f'Missing required sources for {module.name}: {missing}')
                 return None
-            build_dir = cls._BUILD_ROOT / module.name
+            cls._BUILD_ROOT.mkdir(parents=True, exist_ok=True)
             library_name = cls._library_filename(module.name)
-            library_path = build_dir / library_name
+            library_path = cls._BUILD_ROOT / library_name
 
             if not cls._build_needed(library_path, tracked_files, force=False):
                 return bind_callback(ctypes.CDLL(str(library_path)))
@@ -156,16 +158,11 @@ class NativeRegistry:
                 logger.error('No C compiler found on PATH.')
                 return None
 
-            # Stage files
-            build_dir.mkdir(parents=True, exist_ok=True)
-            staged_sources = []
-            for file_path in tracked_files:
-                staged_file = build_dir / file_path.name
-                shutil.copyfile(file_path, staged_file)
-                if file_path.suffix == '.c':
-                    staged_sources.append(staged_file)
             if library_path.exists():
-                library_path.unlink()
+                try:
+                    library_path.unlink()
+                except OSError:
+                    pass
 
             # Compile
             platform_flags = ['-static-libgcc'] if sys.platform.startswith('win') else ['-fPIC']
@@ -181,15 +178,18 @@ class NativeRegistry:
                 '-o',
                 str(library_path)
             ]
-            for src in staged_sources:
-                cmd.append(str(src))
+            for src in module.sources:
+                cmd.append(str(module.root_dir / src))
             cmd.extend(module.link_args)
-            result = subprocess.run(cmd, cwd=build_dir, text=True, capture_output=True, check=False)
+            result = subprocess.run(cmd, cwd=module.root_dir, text=True, capture_output=True, check=False)
+            build_output = f'{result.stderr or ""}\n{result.stdout or ""}'.strip()
             if result.returncode != 0:
-                details = (result.stderr or result.stdout).strip()
-                logger.error(f'Failed to build {module.name}: {details}')
+                logger.error(f'Failed to build {module.name}: {build_output}')
                 return None
-            logger.info(f'Compiled and loaded native library: {library_path.name}')
+            elif build_output:
+                logger.warning(f'Compiler warnings for {module.name}:\n{build_output}')
+            else:
+                logger.info(f'Successfully built {module.name}.')
             return bind_callback(ctypes.CDLL(str(library_path)))
         except Exception as e:
             logger.warning(f'Failed to build native library {module.name}: {e}', exc_info=True)
@@ -203,9 +203,10 @@ class NativeRegistry:
         module: NativeLibrary,
         bind_callback: Callable[[ctypes.CDLL], ctypes.CDLL]
     ) -> ctypes.CDLL | None:
+        '''Attempt to load a prebuilt native library from the build root to match the github actions build.'''
         name = cls._library_filename(module.name)
         osname, arch = cls._platform_tag()
-        dirs: list[Path] = []
+        dirs: list[Path] = [cls._BUILD_ROOT]
         meipass = getattr(sys, '_MEIPASS', None)
         if meipass:
             base = Path(meipass)

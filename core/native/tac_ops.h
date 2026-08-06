@@ -44,6 +44,9 @@ static inline void UPDATE_FLOATS(uint8_t dest, REG_VF *vf) {
             }
         }
     }
+#else // Silence compiler warnings for unused parameters
+    (void)dest;
+    (void)vf;
 #endif
 }
 

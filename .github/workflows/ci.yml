@@ -13,10 +13,10 @@ jobs:
           - { os: windows-latest, label: windows-x64 }
           - { os: ubuntu-22.04,   label: linux-x86_64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@7
+      - uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - name: Install deps
         run: |
           python -m pip install --upgrade pip

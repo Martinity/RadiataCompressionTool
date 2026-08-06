@@ -149,7 +149,11 @@ EXPORT uint32_t get_sector_size(NativeBlockDevice* device) {
 
 // defines async read events for windows
 #if defined(_WIN32)
-__declspec(thread) HANDLE tls_read_event = NULL;
+    #if defined(__GNUC__) || defined(__clang__)
+        __thread HANDLE tls_read_event = NULL;
+    #else
+        __declspec(thread) HANDLE tls_read_event = NULL;
+    #endif
 #endif
 
 EXPORT int64_t read_sectors(NativeBlockDevice* device, uint64_t byte_offset, void* out_buffer, size_t byte_count) {
@@ -212,10 +216,10 @@ EXPORT int64_t read_slice(
         return 0;
     }
     // Bounds clamping
-    if ((aligned_offset >= device->size) || (aligned_size > (size_t)(device->size - aligned_offset)))
-        aligned_size = (size_t)(device->size - aligned_offset);
+    if ((aligned_offset >= (uint64_t)device->size) || (aligned_size > (size_t)((uint64_t)device->size - aligned_offset)))
+        aligned_size = (size_t)((uint64_t)device->size - aligned_offset);
     if (aligned_offset + aligned_size > (uint64_t)device->size)
-        aligned_size = (size_t)(device->size - aligned_offset);
+        aligned_size = (size_t)((uint64_t)device->size - aligned_offset);
     // Capacity check
     if (aligned_size > buffer_capacity) return -1;
     int64_t n = read_sectors(device, aligned_offset, aligned_buffer, aligned_size);
