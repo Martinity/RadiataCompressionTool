@@ -22,11 +22,12 @@ Icon=radiata
 Type=Application
 Categories=Utility;
 EOF
-if [ -f "ui/assets/app_icon.png" ]; then
-  cp "ui/assets/app_icon.png" "$APPDIR/radiata.png"
-else
-  touch "$APPDIR/radiata.png"
-fi
+# Icons are included in main and linked in spec, might be better to include here?
+# if [ -f "ui/assets/app_icon.png" ]; then
+#   cp "ui/assets/app_icon.png" "$APPDIR/radiata.png"
+# else
+#   touch "$APPDIR/radiata.png"
+# fi
 OUT="RadiataModdingTool-${VERSION}-linux-${ARCH}.AppImage"
 if command -v appimagetool >/dev/null 2>&1; then
   APPIMAGE_ARCH="${ARCH}"
