@@ -8,13 +8,18 @@ import functools
 import threading
 import platform
 from struct import unpack_from
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
+from PyQt6.QtWidgets import QWidget, QFileDialog
 
 from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
-from core.workers import TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle
+from core.workers import (
+    TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle, LogChannel,
+    IsoRebuildFlags, ActionDef
+)
 from core.native.block_device import BlockDevice
 from core.navigator import VfsNavigator
 from core.metadata_manager import NodeMetadataStore
@@ -25,6 +30,21 @@ if TYPE_CHECKING:
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
+
+###------------------------------------------------- Task signal relay ---------------------------------------------------###
+
+class TaskRelay(QObject):
+    '''
+    Own the signal wiring for generic tasks, routing to the appropriate page.
+    Not for dedicated tasks like rebuild.
+    '''
+    log      = pyqtSignal(LogChannel, str)       # (channel, message)
+    progress = pyqtSignal(LogChannel, int, str)  # (channel, percent, *label)
+    def track(self, handle: TaskHandle) -> TaskHandle:
+        '''Attach the handle's generic signals to the relay, routed by the channel/label. Return handle for chaining'''
+        handle.log_message.connect(lambda msg: self.log.emit(handle.channel, msg))
+        handle.progress.connect(lambda pct: self.progress.emit(handle.channel, pct, handle.label))
+        return handle
 
 ###----------------------------------------------------- Dispatch -------------------------------------------------###
 
@@ -37,21 +57,13 @@ class Dispatcher(QObject):
     '''
     # Tree / Tracker
     iso_loaded        = pyqtSignal(bool, object)     # (success, result[root | error_msg])
-    expand_requested  = pyqtSignal(object, object)   # (VfsNode, wait_event)
+    expand_requested  = pyqtSignal(VfsNode, object)  # (VfsNode, wait_event)
     node_changed      = pyqtSignal(VfsNode)          # Update for TreeView
     tracking_update   = pyqtSignal(int, int)         # (modified_count, staged_count)
-    # Page transitions
-    rebuild_requested = pyqtSignal(list)             # For MainWindow page swap
-    # Rebuild Task
-    rebuild_progress = pyqtSignal(int)               # completion %
-    rebuild_log      = pyqtSignal(str)               # log for rebuild page
-    rebuild_complete = pyqtSignal(bool, str)         # (success, message)
     # ISO verification
     iso_verified = pyqtSignal(str)                   # Build string. Used for get_build and verify_iso with the difference being specificity
     # Generic node actions
-    action_complete  = pyqtSignal(object)            # ActionResult
-    file_browser_log = pyqtSignal(str)               # Testing usefulness of log signalling
-    action_progress  = pyqtSignal(int, str)          # (completion %, action name)
+    action_complete  = pyqtSignal(ActionResult)            # ActionResult
 
     def __init__(self) -> None:
         super().__init__()
@@ -62,26 +74,41 @@ class Dispatcher(QObject):
         self._metadata_store: NodeMetadataStore | None = None
         self.tracker          = ModTracker()
         self.task_coordinator = TaskCoordinator()
+        self.relay            = TaskRelay()
+        self._active_channel  = LogChannel.BROWSER
+        self._pending_expansions: dict[tuple[int, ...], list[Callable[[bool, VfsNode], None]]] = {}
         self._setup_connections()
-
-        self._rebuild_active: bool = False
 
     def _setup_connections(self) -> None:
         '''Relay tracker signals to UI'''
         self.tracker.node_modified.connect(self.node_changed.emit)
         self.tracker.node_reverted.connect(self.node_changed.emit)
-        self.tracker.rebuild_initiated.connect(self._rebuild_relay)
         self.tracker.state_changed.connect(self._relay_tracking_state)
-
         self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection) # type: ignore this is valid
 
-    def _rebuild_relay(self, staged_nodes: list[VfsNode], slimmed: bool) -> None:
-        '''
-        Pass-through to save the slimmed state. Really I should redo the
-        rebuild signalling logic, this is just stupid.
-        '''
-        self.slimmed_requested = slimmed
-        self.rebuild_requested.emit(staged_nodes)
+    def set_active_channel(self, channel: LogChannel) -> None:
+        '''Set the log channel to a new log window. Must be manually reset to browser after task.'''
+        self._active_channel = channel
+
+    def _start(
+        self,
+        fn: Callable,
+        *args,
+        label: str = '',
+        channel: LogChannel | None = None,
+        **kwargs
+    ) -> TaskHandle:
+        '''Wires the appropriate signal to channel during task startup.'''
+        handle = self.task_coordinator.start_task(fn, *args, channel=channel or self._active_channel, label=label, **kwargs)
+        return self.relay.track(handle)
+
+    def finalize_rebuild(self, success: bool) -> None:
+        '''Rebuild endpoint. cleanup/reset the dispatcher rebuild related states'''
+        self.set_active_channel(LogChannel.BROWSER)
+        if self.nav:
+            self.nav.clear_rollup_pending()
+        if success:
+            self.tracker.clear()
 
     def set_metadata_store(self, store: NodeMetadataStore) -> None:
         self._metadata_store = store
@@ -127,13 +154,12 @@ class Dispatcher(QObject):
             return []
 
         source.expansion_pending = True
-        task_handle = self.task_coordinator.start_task(
+        task_handle = self._start(
             Actions.dispatch,
             action_def,
             source,
-            self.nav,
+            self.nav
         )
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         task_handle.finished.connect(self._on_action_complete)
         return []  # signal populates the tree ^^^
 
@@ -182,18 +208,13 @@ class Dispatcher(QObject):
                 on_failure(error_msg)
             return
         # Start task
-        task_handle = self.task_coordinator.start_task(
+        task_handle = self._start(
             Actions.decode_editor_data,
             handler_class,
             node,
             data
         )
-        task_handle.log_message.connect(
-            self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit
-        )
-        task_handle.finished.connect(
-            functools.partial(self._on_decode_done, node, on_success, on_failure)
-        )
+        task_handle.finished.connect(functools.partial(self._on_decode_done, node, on_success, on_failure))
         return task_handle
 
     def open_editor(self, node: VfsNode, editor: BaseEditor) -> TaskHandle | None:
@@ -220,14 +241,12 @@ class Dispatcher(QObject):
             f'handler={handler_class.__name__}'
         )
         # Start task
-        task_handle = self.task_coordinator.start_task(
+        task_handle = self._start(
             Actions.prepare_editor,
             handler_class,
             node,
             self.nav,
         )
-        # Connect signals
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         return task_handle
 
     def execute_node_action(self, node: VfsNode, action_name: str, **kwargs) -> None:
@@ -252,25 +271,27 @@ class Dispatcher(QObject):
                 message=f'{node.name} has already been expanded previously. Duplicate expansion cancelled.'
             ))
             return
-        task_handle = self.task_coordinator.start_task(
+        task_handle = self._start(
             Actions.dispatch,
             action_def,
             node,
             self.nav,
+            channel=LogChannel.TOAST if action_def.action_type is ActionType.EXPORT else None,
+            label=action_def.name,
             **kwargs
             )
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
         task_handle.finished.connect(self._on_action_complete)
 
-    def start_iso_rebuild(self, output_path: Path) -> TaskHandle | None:
+    def start_iso_rebuild(self, request: RebuildRequest, output_path: Path) -> TaskHandle | None:
+        '''
+        Starts the actual rebuild task.
+        Routing the logic appropriately for the requests.
+        Called by RebuildCoordinator.
+        '''
         if not self.active_handler or not self.vfs or not self.nav:
-            self.rebuild_complete.emit(False, 'No ISO Loaded.')
-            return
-        self._rebuild_active = True
-
-        staged_nodes = list(self.tracker.rebuild_queue)
-        self.rebuild_log.emit(f'Preparing to build {len(staged_nodes)} staged file(s)...')
-
+            logger.error('Cannot start rebuild: No ISO loaded.')
+            return None
+        logger.info(f'Preparing to build {len(request.staged_nodes)} staged files(s)')
         # Use start_dedicated_task (not start_task) so the rebuild runs on a
         # dedicated thread outside the bounded QThreadPool.  The rebuild blocks
         # waiting for expansion tasks that must themselves run on the pool; if
@@ -280,15 +301,47 @@ class Dispatcher(QObject):
             self.active_handler,
             self.vfs.root,
             self.nav,
-            staged_nodes,
+            request.staged_nodes,
             output_path,
-            self.slimmed_requested,
+            request.build_flags,
+            request.patch_targets,
+            channel=LogChannel.REBUILD,  # Rebuild is always rebuild page
         )
-        task_handle.progress.connect(lambda pct: self.rebuild_progress.emit(pct))
-        task_handle.log_message.connect(self.rebuild_log.emit)
-        task_handle.finished.connect(self._on_rebuild_finished)
-
         return task_handle
+
+    ###------------------------------- VFS node resolution -------------------------------###
+
+    def resolve_and_unpack_all(self, target_hid: tuple[int, ...], on_success: Callable[[list[VfsNode]], None]) -> None:
+        '''Asynchronously unpack recursively untill no more ActionType.TREE_EXPAND actionable nodes remain.'''
+        def _on_parent_resolved(node: VfsNode) -> None:
+            self._deep_unpack_layer([node], [], on_success)
+        self.resolve_ghost_node(target_hid, _on_parent_resolved)
+
+    def _deep_unpack_layer(self, queue: list[VfsNode], expanded: list[VfsNode], on_success: Callable[[list[VfsNode]], None]) -> None:
+        '''
+        Consumes `queue` synchronously as along as each node resolves immediately via _expand_once fast track.
+        If asynchronous expansion is needed stops and returns.
+        Expansions' callback eventually fires from Qt event loop, re-entering the method and starting over.
+        '''
+        while queue:
+            node = queue.pop(0)
+            waiting_sync = True
+            settled_sync = False
+            def _continue(success: bool, expanded_node: VfsNode) -> None:
+                nonlocal settled_sync
+                if success and expanded_node.children:
+                    queue.extend(expanded_node.children)
+                else:
+                    expanded.append(expanded_node)
+                if waiting_sync:
+                    settled_sync = True
+                else:  # Async
+                    self._deep_unpack_layer(queue, expanded, on_success)
+            self._expand_once(node, _continue)
+            waiting_sync = False
+            if not settled_sync:
+                return  # _continue will be called from Qt event loop
+        on_success(expanded)
 
     def resolve_ghost_node(self, target_hid: tuple[int, ...], on_success: Callable[[VfsNode], None]) -> None:
         '''Asynchronously unpack the VFS until the target hid is reached'''
@@ -297,8 +350,13 @@ class Dispatcher(QObject):
         self._drill_down_to(target_hid, on_success)
 
     def _drill_down_to(self, target_hid: tuple[int, ...], on_success: Callable[[VfsNode], None]) -> None:
-        '''Recursively expand the VFS until target_hid becomes reachable.
-        Called on the main thread; each async layer connects back via _on_layer_done.'''
+        '''
+        Recursively expand ancestors until target_hit becomes reachable.
+        Bounded by tree depth.
+        Promoted slot for _handle_expand_request expansion task.
+        Context params (node, wait_event) bound by functools.partial;
+        each async layer connects back via _on_layer_done.
+        '''
         if not self.vfs:
             return
         node = self.vfs.get_vfs_node_by_id(target_hid)
@@ -310,57 +368,66 @@ class Dispatcher(QObject):
         if not ancestor:
             logger.error(f'Cannot resolve {target_hid}: No ancestor exists.')
             return
-        if not hasattr(self, '_pending_drills'):
-            self._pending_drills: dict[tuple[int, ...], list[tuple[tuple[int, ...], Callable]]] = {}
-        if getattr(ancestor, 'expansion_pending', False):
-            logger.debug(f'Expansion already running for {ancestor.name}. Queuing {target_hid}')
-            self._pending_drills[ancestor.hierarchical_id].append((target_hid, on_success))
+        logger.debug(f'Drilling down to {target_hid} from ancestor {ancestor.hierarchical_id_str}')
+        def _continue(success: bool, expanded_ancestor: VfsNode) -> None:
+            if not success:
+                logger.error(f'Failed to drill down to {target_hid}.')
+                return
+            self._drill_down_to(target_hid, on_success)
+
+        self._expand_once(ancestor, _continue)
+
+    def _expand_once(self, node: VfsNode, on_done: Callable[[bool, VfsNode], None]) -> None:
+        '''
+        Single source for all async expansion logic. All expansion requests follow the same pattern,
+        only the entrypoint is different in how the vfs is navigated/polled.
+
+        Ensures TREE_EXPAND actions run at most once per node:
+            - on_done(True, node) fires immediately if node already has
+              children, or has no TREE_EXPAND action to run.
+            - if node._expansion_task_active is already True (a task this
+              method started for this node hasn't finished yet), on_done is
+              queued in _expand_waiters and fires once that task completes -
+              callers never start duplicate tasks for the same node.
+            - otherwise on_done fires once a newly-started task completes.
+
+        Always resolves node's begin_expansion() wait_event via finish_expansion().
+        '''
+        if node.children:
+            node.finish_expansion()
+            on_done(True, node)
             return
-        profile = Registry.get_handler_profile(ancestor)
+        profile = Registry.get_handler_profile(node)
         action_def = profile.primary_expand_action() if profile else None
-        if not action_def:
-            logger.error(f'Cannot expand {ancestor.name}: No TREE_EXPAND action registered')
+        if not action_def or action_def.action_type is not ActionType.TREE_EXPAND:
+            node.finish_expansion()
+            on_done(True, node)
             return
-        ancestor.expansion_pending = True
-        self._pending_drills[ancestor.hierarchical_id] = [(target_hid, on_success)]
-        logger.debug(f'Drilling down to {ancestor.name} ({ancestor.hierarchical_id_str})')
-        handle = self.task_coordinator.start_task(
+        if not self.nav:
+            logger.warning(f'Cannot expand {node.name}: No navigator available')
+            node.finish_expansion()
+            on_done(False, node)
+            return
+
+        self._pending_expansions.setdefault(node.hierarchical_id, []).append(on_done)
+        if node._expansion_task_active:
+            logger.debug(f'Expansion already running for {node.name}. Queuing pending node.')
+            return
+        node.begin_expansion()
+        node._expansion_task_active = True
+        logger.debug(f'Expanding {node.name} ({node.hierarchical_id_str})')
+        handle = self._start(
             Actions.dispatch,
             action_def,
-            ancestor,
+            node,
             self.nav,
+            channel=LogChannel.BROWSER # Node expansion is always file browser page
         )
-        handle.log_message.connect(self.file_browser_log.emit)
-        handle.finished.connect(functools.partial(self._on_layer_done, ancestor.hierarchical_id))
+        handle.finished.connect(functools.partial(self._on_expand_once_done, node))
 
-    def _on_layer_done(
-        self,
-        ancestor_hid: tuple[int, ...],
-        success: bool,
-        result: Any,
-    ) -> None:
-        '''Promoted slot for resolve_ghost_node layer completion.
-        Context params (target_hid, on_success) bound by functools.partial;
-        signal params (success, result) appended by Qt.'''
-        if threading.get_ident() != self._main_thread_id:
-            logger.error("_on_layer_done ran off the main thread")
-        self._on_action_complete(success, result)
-        if not self.vfs:
-            return
-        ancestor = self.vfs.get_vfs_node_by_id(ancestor_hid)
-        if ancestor:
-            ancestor.expansion_pending = False
-        queued_expansions = self._pending_drills.pop(ancestor_hid, [])
-        if success:
-            for target_hid, on_success in queued_expansions:
-                self._drill_down_to(target_hid, on_success)
-        else:
-            logger.error('Failed to drill down to target node...')
-
-    def _on_expand_done(
+    def _on_expand_once_done(
         self,
         node: VfsNode,
-        wait_event: threading.Event,
         success: bool,
         result: Any,
     ) -> None:
@@ -368,10 +435,13 @@ class Dispatcher(QObject):
         Context params (node, wait_event) bound by functools.partial;
         signal params (success, result) appended by Qt.'''
         if threading.get_ident() != self._main_thread_id:
-            logger.error("_on_expand_done ran off the main thread")
+            logger.error("_on_expand_once_done ran off the main thread")
         self._on_action_complete(success, result)
         node.finish_expansion()
-        wait_event.set()
+        if not success:
+            logger.error(f'Expansion failed for {node.name} ({node.hierarchical_id_str}): {result}')
+        for on_done in self._pending_expansions.pop(node.hierarchical_id, []):
+            on_done(success, node)
 
     def close(self) -> None:
         '''For exiting the dispatch'''
@@ -393,11 +463,11 @@ class Dispatcher(QObject):
         if not self._metadata_store:
             logger.debug(f'No file metadata loaded... {self._metadata_store}')
 
-        task_handle = self.task_coordinator.start_task(
+        task_handle = self._start(
             Actions.load_iso,
             handler,
+            channel=LogChannel.BROWSER
         )
-        task_handle.log_message.connect(self.file_browser_log.emit)
         task_handle.finished.connect(self._on_iso_loaded)
         return task_handle
 
@@ -417,42 +487,16 @@ class Dispatcher(QObject):
 
     ###------------------------ Callback -----------------------###
     def _expand_node(self, parent: VfsNode, wait_event: threading.Event) -> None:
-        '''Callback by VfsNavigator on a background thread to expand missing nodes.
-        Coordinates expansion on the main thread via QueuedConnection, blocking on wait_event '''
+        '''
+        Cross-thread callback for VfsNavigator. Blocking on node.begin_expansion()
+
+        Callback by VfsNavigator on a background thread to expand missing nodes.
+        Coordinates expansion on the main thread via QueuedConnection'''
         self.expand_requested.emit(parent, wait_event)
 
     def _handle_expand_request(self, node: VfsNode, wait_event: threading.Event) -> None:
         '''Starts a worker task with TREE_EXPAND and sets wait_event on completion'''
-        if not node.expansion_pending or node.children:
-            wait_event.set()
-            return
-
-        # Dedup: a task is already in-flight for this node (set below when we start one).
-        # The running task will call finish_expansion() which sets node._expansion_event
-        # (== wait_event after the begin_expansion fix), so the caller is unblocked without
-        # us starting a duplicate task.
-        if node._expansion_task_active:
-            return
-
-        profile = Registry.get_handler_profile(node)
-        action_def = profile.primary_expand_action() if profile else None
-        if not action_def or not self.nav:
-            logger.warning(f'Cannot expand node: {node.hierarchical_id_str}, missing expand actions or navigator.')
-            wait_event.set()
-            return
-
-        node.expansion_pending = True
-        node._expansion_task_active = True  # Guard against duplicate tasks (cleared in finish_expansion)
-
-        logger.debug('Starting expansion background task')
-        task_handle = self.task_coordinator.start_task(
-            Actions.dispatch,
-            action_def,
-            node,
-            self.nav,
-        )
-        task_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
-        task_handle.finished.connect(functools.partial(self._on_expand_done, node, wait_event))
+        self._expand_once(node, lambda success, expanded_node: None)
 
     def _handle_extension_request(self, node: VfsNode, auto_save: bool = False) -> None:
         '''
@@ -527,23 +571,8 @@ class Dispatcher(QObject):
         '''
         if self.active_handler is None:
             return
-        verify_handle = self.task_coordinator.start_task(Actions.verify_iso, self.active_handler)
-        verify_handle.progress.connect(lambda pct: self.action_progress.emit(pct, 'Verify iso'))
-        verify_handle.log_message.connect(self.rebuild_log.emit if self._rebuild_active else self.file_browser_log.emit)
+        verify_handle = self._start(Actions.verify_iso, self.active_handler, label='Verify iso', channel=LogChannel.TOAST)
         verify_handle.finished.connect(self._on_iso_verified)
-
-    def _on_rebuild_finished(self, success: bool, result: Any) -> None:
-        '''Verify type of result and pack signal'''
-        self._rebuild_active = False
-        if isinstance(result, ActionResult):
-            msg = result.message or ('Rebuild succeeded.' if success else 'Rebuild failed.')
-        else:
-            msg = str(result)
-        self.rebuild_complete.emit(success, msg)
-        if self.nav:
-            self.nav.clear_rollup_pending()
-        if success:
-            self.tracker.clear()
 
     def _on_iso_verified(self, success: bool, result: Any) -> None:
         if success and isinstance(result, str):
@@ -569,7 +598,7 @@ class Dispatcher(QObject):
             case ActionType.IMPORT:
                 # edits get applied via fallback handler, prevents silent failing
                 self.apply_edit(result.node, result.payload, editor=None)
-                self.rebuild_log.emit(f'Import applied to {result.node.name}')
+                self.relay.log.emit(self._active_channel, f'Import applied to {result.node.name}')
             case ActionType.TREE_EXPAND:
                 if self.vfs:
                     new_nodes: list[VfsNode] = []
@@ -653,3 +682,119 @@ def resolve_raw_disc_device(path: Path) -> Path | str:
         raise FileNotFoundError(f'Could not resolve macOS disk device for {path}')
 
     return path
+
+###--------------------------------------------- Rebuild ---------------------------------------------------###
+
+@dataclass(frozen=True)
+class RebuildRequest:
+    '''Everything needed to determine the logic required for the ISO build.'''
+    staged_nodes: list[VfsNode]
+    build_flags:  IsoRebuildFlags = IsoRebuildFlags.NONE
+    patch_targets: dict[str, list[VfsNode]] | None = None
+
+@dataclass(frozen=True)
+class PatchTargetRule:
+    '''
+    Links the patch flags to an action and target.
+    action is the ActionDef name to execute
+    parent_hid whose children are the targets to patch
+
+    A new patch must be added to RebuildFlag and PATCH_TARGET_RULES.
+    '''
+    action: str
+    parent_hid: tuple[int, ...]
+
+PATCH_TARGET_RULES: dict[IsoRebuildFlags, PatchTargetRule] = {
+    IsoRebuildFlags.CUTSCENE_SKIPPER: PatchTargetRule(action='Skip cutscenes', parent_hid=(186,)),
+}
+
+class RebuildCoordinator(QObject):
+    '''
+    Single entrypoint to trigger a rebuild.
+    Owns the entire staging->confirm->run->complete lifecycle.
+    Nothing else touches rebuild state.
+    '''
+    started  = pyqtSignal(object)      # TaskHandle
+    progress = pyqtSignal(int)         # Percentage
+    log      = pyqtSignal(str)         # Log message
+    finished = pyqtSignal(bool, str)   # Success, Report message
+
+    def __init__(self, dispatcher: Dispatcher, parent_widget: QWidget):
+        super().__init__()
+        self._dispatcher = dispatcher
+        self._parent = parent_widget # Connection for the File dialog
+        self._config: RebuildRequest | None = None
+
+    def request_rebuild(self, staged_nodes: list[VfsNode], build_flags: IsoRebuildFlags = IsoRebuildFlags.NONE) -> None:
+        '''
+        Entry point for both the staging-page flow and direct triggers
+        (e.g. the Patches menu). Resolves every active patch's targets
+        (asynchronously expanding ghost nodes as needed) before opening the
+        save dialog, since handler.rebuild_node needs concrete VfsNodes, not
+        HIDs that might not be reachable yet.
+        '''
+        active_rules = [
+            rule for flag, rule in PATCH_TARGET_RULES.items()
+            if flag is not IsoRebuildFlags.NONE and (build_flags & flag)
+        ]
+        self._resolve_patch_targets(staged_nodes, build_flags, active_rules, {})
+
+    def _resolve_patch_targets(
+        self,
+        staged_nodes:  list[VfsNode],
+        build_flags:   IsoRebuildFlags,
+        rules:         list[PatchTargetRule],
+        patch_targets: dict[str, list[VfsNode]],
+    ) -> None:
+        '''
+        Resolve one rule's target parent at a time, chaining through
+        resolve_ghost_node's async callback rather than assuming its
+        expansion is complete by the next line. Recurses until every active
+        rule has been resolved, then proceeds to the save dialog.
+
+        Known limitation: if a rule's parent HID can never be reached (bad
+        HID, or a node with zero matching children), resolve_ghost_node has
+        no failure callback - this chain will simply never continue for that
+        rebuild request. Worth confirming in testing before relying on it.
+        '''
+        if not rules or not self._dispatcher.vfs:
+            self._begin(staged_nodes, build_flags, patch_targets)
+            return
+
+        rule, *rest = rules
+
+        def _on_resolved(leaves: list[VfsNode]) -> None:
+            patch_targets.setdefault(rule.action, []).extend(leaves)
+            self._resolve_patch_targets(staged_nodes, build_flags, rest, patch_targets)
+
+        self._dispatcher.resolve_and_unpack_all(rule.parent_hid, _on_resolved)
+
+    def _begin(
+        self,
+        staged_nodes: list[VfsNode],
+        build_flags: IsoRebuildFlags,
+        patch_targets: dict[str, list[VfsNode]],
+    ) -> None:
+        self._config = RebuildRequest(staged_nodes, build_flags, patch_targets)
+        file_path, _ = QFileDialog.getSaveFileName(self._parent, 'Save Modified ISO', '', 'ISO Files (*.iso)')
+        if not file_path:
+            self._config = None
+            return
+        self._dispatcher.set_active_channel(LogChannel.REBUILD)
+        handle = self._dispatcher.start_iso_rebuild(self._config, Path(file_path))
+        if not handle:
+            self._dispatcher.set_active_channel(LogChannel.BROWSER)
+            self._config = None
+            return
+        handle.progress.connect(self.progress.emit)
+        handle.log_message.connect(self.log.emit)
+        handle.finished.connect(self._on_finished)
+        self.started.emit(handle)
+
+    def _on_finished(self, success: bool, result: Any) -> None:
+        msg = result.message if isinstance(result, ActionResult) else str(result)
+        if not msg:
+            msg = 'Rebuild succeeeded.' if success else 'Rebuild failed.'
+        self._dispatcher.finalize_rebuild(success)
+        self.finished.emit(success, msg)
+        self._config = None

@@ -20,7 +20,7 @@ import xxhash
 from core.contracts import PhysicalHandler
 from core.node import VfsNode
 from core.registry import Registry
-from core.workers import TaskHandle
+from core.workers import TaskHandle, IsoRebuildFlags
 from core.native.block_device import BlockDevice
 
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -582,12 +582,12 @@ class IsoHandler(PhysicalHandler):
         root:         VfsNode,
         staged_nodes: list[VfsNode],
         output_path:  Path,
-        slimmed_rebuild_requested: bool,
+        build_flags:  IsoRebuildFlags,
         task_handle:  TaskHandle,
     ) -> bool:
         '''
         Rebuilds the ISO using DiskLayoutPlanner sequentially.
-        slimmed_rebuild_requested shifts the TOC location hardcode sector.
+        IsoRebuildFlags.SLIMMED shifts the TOC location hardcode sector.
 
         Because the tool currently doesn't support mutable file systems the way the first
         three areas are built is redundant and can be collapsed into one copy. I wrote it
@@ -656,6 +656,7 @@ class IsoHandler(PhysicalHandler):
                     f'ISO filesystem exceeded hardcoded TOC offset! '
                     f'({current_size:#x} > {self.params.toc_offset:#x})'
                 )
+            slimmed_rebuild_requested = bool(build_flags & IsoRebuildFlags.SLIMMED)
             if not slimmed_rebuild_requested:
                 new_toc_lba = 494979
                 padding = (new_toc_lba * self.params.sector_size) - current_size
@@ -739,6 +740,7 @@ class IsoHandler(PhysicalHandler):
         hasher = xxhash.xxh128()
         chunk_size = (24 * 1024 * 1024) # 24MB chunks seemed to load the fastest I have tested
         bytes_read = 0
+        # raise ValueError('Nothikgn')
         while (chunk := self.handle.pread_view(size=chunk_size, offset=bytes_read)):
             task_handle.checkpoint()
             hasher.update(chunk)

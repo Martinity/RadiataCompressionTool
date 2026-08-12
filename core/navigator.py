@@ -146,11 +146,11 @@ class VfsNavigator:
         '''Cache payload/headers that are not located sequentially on disk'''
         nonseq_nodes: set[VfsNode] = set()
         staged_sorted = sorted(staged_nodes, key=lambda node: node.hierarchical_id)
-        task_handle.log_message.emit(f'{staged_sorted}')
+        task_handle.log_message.emit(f'{len(staged_sorted)} nodes to precompute and all their children.')
         for node in staged_sorted:
             current_node = node
             while current_node is not None:
-                task_handle.log_message.emit(f'{current_node.hierarchical_id} has target:{current_node.target}')
+                # task_handle.log_message.emit(f'{current_node.hierarchical_id} has target:{current_node.target}')
                 if current_node.target and current_node.parent:
                     task_handle.log_message.emit(f'Sending {node.hierarchical_id} to cached roll-up')
                     nonseq_nodes.add(node)

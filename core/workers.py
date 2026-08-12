@@ -14,7 +14,7 @@ import threading
 import itertools
 import time
 from pathlib import Path
-from enum import auto, Enum
+from enum import auto, Enum, Flag
 from dataclasses import dataclass
 from typing import Callable, Any, TYPE_CHECKING, NamedTuple
 from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool
@@ -30,6 +30,34 @@ import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
 ###------------------------------------- Action Types -------------------------------------###
+
+class LogChannel(Enum):
+    '''
+    Designates which log/progress widget the given tasks' output belongs to. Set at task creation
+    (TaskCoordinator.start_*) and carried on the TaskHandle itself, consumers read off the handle.
+
+    BROWSER  - FileBrowserPage log console
+    REBUILD  - IsoRebuildPage log console
+    TOAST    - MainWindows's Toast, bottom right notification
+    ACTION   - TODO EditorPage logging [[UNUSED]]
+    '''
+    BROWSER = auto()
+    REBUILD = auto()
+    TOAST   = auto()
+    ACTION  = auto()
+
+class IsoRebuildFlags(Flag):
+    '''
+    Which patches need to be applied to the filesystems before or during the ISO rebuild.
+    Patches should be designed as independent and combinable.
+    Adding a new patch should be as simple as adding a new flag and logic(Navigation + Overwrite).
+
+    SLIMMED           - IsoHandler, patch out non-essential runtime data to save 1GB
+    CUTSCENE_SKIPPER  - EvdHandler, scan and patch all story events with the appropriate near instant termination
+    '''
+    NONE              = 0
+    SLIMMED           = auto()
+    CUTSCENE_SKIPPER  = auto()
 
 class ActionType(Enum):
     '''
@@ -62,10 +90,11 @@ class ActionStatus(Enum):
 
 @dataclass
 class ActionResult:
+    '''Generic action result. Carries the action name, node, status, and optional payload/message.'''
     action_name: str
     node:        VfsNode
     status:      ActionStatus
-    payload:     Any = None  # result of the action (bytes, str... etc) depending on ActionType
+    payload:     Any = None  # result of the action (bytes, str... etc depending on ActionType)
     message:     str = ''
 
 @dataclass
@@ -75,7 +104,7 @@ class EditorPayload:
     data: Any
 
 class LoadIsoResult(NamedTuple):
-    '''Payload for _on_iso_loaded'''
+    '''Payload for _on_iso_loaded. PhysicalHandler and ISO handling are always dedicated logically.'''
     success: bool
     handler: PhysicalHandler | None = None
     root:    VfsNode         | None = None
@@ -135,10 +164,20 @@ class TaskCoordinator(QObject):
         self._active_handles[handle_id] = handle
         handle.finished.connect(lambda *_: self._active_handles.pop(handle_id, None))
 
-    def start_task(self, function: Callable, *args, **kwargs) -> TaskHandle:
-        '''Spin up thread. Link handle'''
-        task_name = function.__name__
-        handle = TaskHandle(task_name)
+    def start_task(
+        self,
+        function: Callable,
+        *args,
+        channel: LogChannel = LogChannel.BROWSER,
+        label:   str        = '',
+        **kwargs
+    ) -> TaskHandle:
+        '''
+        Spin up thread. Link handle.
+        channel and label are consumed here tagging the TaskHandle, never passing to actions.
+        '''
+        task_name = function.__name__ # type: ignore function is a named function
+        handle = TaskHandle(task_name, channel=channel, label=label)
 
         logger.debug(
             f'<TaskCoordinator: Queuing ThreadPool Task #{handle.task_id} '
@@ -152,7 +191,14 @@ class TaskCoordinator(QObject):
         self.thread_pool.start(worker)
         return handle
 
-    def start_dedicated_task(self, function: Callable, *args, **kwargs) -> TaskHandle:
+    def start_dedicated_task(
+        self,
+        function: Callable,
+        *args,
+        channel: LogChannel = LogChannel.BROWSER,
+        label: str = '',
+        **kwargs
+    ) -> TaskHandle:
         '''Run *function* on a dedicated daemon thread, NOT on the bounded QThreadPool.
 
         Use this for long-running coordinator tasks (e.g. ISO rebuild) that may
@@ -164,11 +210,11 @@ class TaskCoordinator(QObject):
         signals are emitted cross-thread and delivered to the main thread via Qt's
         queued-connection mechanism.
         '''
-        task_name = function.__name__
-        handle = TaskHandle(task_name)
+        task_name = function.__name__ # type: ignore  function is a named funtion
+        handle = TaskHandle(task_name, channel=channel, label=label)
         kwargs['task_handle'] = handle
 
-        logger.info(
+        logger.debug(
             f'<TaskCoordinator: Allocation Dedicated Thread for Task #{handle.task_id} ({task_name})>'
         )
         self._retain_handle(handle)
@@ -236,10 +282,12 @@ class TaskHandle(QObject):
         'cancelled':  set()
     }
 
-    def __init__(self, task_name: str):
+    def __init__(self, task_name: str, channel: LogChannel = LogChannel.BROWSER, label: str = ''):
         super().__init__()
         self.task_id    = next(self._id_generator)
         self.task_name  = task_name
+        self.channel    = channel
+        self.label      = label    # <-- may be redundant since the task_name could be used instaed.
         self._state     = 'pending'
         self._lock      = threading.Lock()
         self._cancel_token = threading.Event()
@@ -326,7 +374,6 @@ class TaskHandle(QObject):
         else:
             self._transition('completed')
             self.finished.emit(True, result)
-        self.progress.emit(100)
 
     def fail(self, error: Exception | str) -> None:
         if self.is_cancelling():
@@ -335,18 +382,49 @@ class TaskHandle(QObject):
         else:
             self._transition('failed')
             self.finished.emit(False, str(error))
-        self.progress.emit(100)
+
+###-------------------------------------- Rebuild Patches ------------------------------------###
+
+REBUILD_PATCH_ACTIONS: dict[IsoRebuildFlags, str] = {
+    IsoRebuildFlags.CUTSCENE_SKIPPER: 'Skip cutscenes',
+}
 
 ###---------------------------------------- Actions --------------------------------------###
 
-
 class Actions:
-    """All background task logic in one place
+    """All background task entrypoint logic in one place."""
 
-    log_callback: context dependent. Currently: FileBrowserPage or RebuildPage logs
-    logger.*:     system/debug messages (FileBrowserPage w/ Log Level Filtering)
-    progress_callback(%, label): progress bar (RebuildPage)
-    """
+    @staticmethod
+    def _apply_rebuild_patches(
+        patch_targets: dict[str, list[VfsNode]],
+        navigator:        VfsNavigator,
+        task_handle:      TaskHandle,
+    ) -> list[VfsNode]:
+        '''Apply all rebuild patches to the given nodes, returning the list of touched nodes.
+        Uses the same Actions.dispatch pipeline generic node actions use.'''
+        if not patch_targets:
+            return []
+        from core.registry import Registry
+        touched: list[VfsNode] = []
+        for action_name, nodes in patch_targets.items():
+            for node in nodes:
+                # Filter out container nodes, nodes waiting to be expanded, and sentinel nodes
+                # Container nodes may need to be included if some fs patch requires them to be modified
+                if node.children or getattr(node, 'expansion_pending', False) or 'sentinel' in node.name:
+                    continue
+
+                task_handle.checkpoint()
+                action_def = Registry.get_action(node, action_name)
+                if not action_def:
+                    task_handle.log_message.emit(f'Warning: No action found for {action_name} on {node.name} ({node.hierarchical_id_str})')
+                    continue
+                task_handle.log_message.emit(f'Applying patch {action_name} to {node.name} ({node.hierarchical_id_str})')
+                result = Actions.dispatch(action_def, node, navigator, task_handle)
+                if result.status is ActionStatus.SUCCESS:
+                    touched.append(node)
+                else:
+                    task_handle.log_message.emit(f'{action_name} failed on {node.name}: {result.message}')
+        return touched
 
     ### Editor
     @staticmethod
@@ -497,26 +575,38 @@ class Actions:
 
     @staticmethod
     def rebuild_iso(
-        handler:      IsoHandler,
-        root_node:    VfsNode,
-        navigator:    VfsNavigator,
-        staged_nodes: list[VfsNode],
-        output_path:  Path,
-        slimmed_rebuild_requested: bool,
+        handler:       IsoHandler,
+        root_node:     VfsNode,
+        navigator:     VfsNavigator,
+        staged_nodes:  list[VfsNode],
+        output_path:   Path,
+        build_flags:   IsoRebuildFlags,
+        patch_targets: dict[str, list[VfsNode]],
         task_handle:  TaskHandle,
     ) -> ActionResult:
         from core.navigator import ExpansionTimeoutError
         try:
             task_handle.log_message.emit('Starting ISO build sequence...')
             task_handle.progress.emit(0)
-            task_handle.log_message.emit('Starting Pass 1, Precomputing Datacenter...')
+            if build_flags is not IsoRebuildFlags.NONE:
+                applied = ', '.join(
+                    flag.name for flag in IsoRebuildFlags
+                    if flag is not IsoRebuildFlags.NONE and (build_flags & flag) and flag.name
+                )
+                task_handle.log_message.emit(f'Patch(es) to be applied: {applied}')
+            task_handle.log_message.emit('Starting Pass 0   -   Applying patches...')
+            patched_nodes = Actions._apply_rebuild_patches(patch_targets, navigator, task_handle)
+            if patched_nodes :
+                staged_nodes = list(staged_nodes) + patched_nodes
+                task_handle.log_message.emit(f'Pass 0 complete   -   Patched {len(patched_nodes)} nodes')
+            task_handle.log_message.emit('Starting Pass 1   -   Precomputing Datacenter...')
 
             extra_targets: list[VfsNode] = navigator.precompute_datacenter(staged_nodes, task_handle)
             all_staged:    list[VfsNode] = list(staged_nodes) + extra_targets
-            task_handle.log_message.emit(f'Pass 1 complete - {len(extra_targets)} datacenter target(s) cached and queued')
+            task_handle.log_message.emit(f'Pass 1 complete   -   {len(extra_targets)} datacenter target(s) cached and queued')
 
             task_handle.progress.emit(0)
-            task_handle.log_message.emit('Starting Pass 2, Performing VFS rollup...')
+            task_handle.log_message.emit('Starting Pass 2   -   Performing VFS rollup...')
 
             physical_staged_nodes = navigator.rollup_nodes(all_staged, task_handle)
             task_handle.progress.emit(0)
@@ -525,12 +615,13 @@ class Actions:
                 root_node,
                 physical_staged_nodes,
                 output_path,
-                slimmed_rebuild_requested,
+                build_flags,
                 task_handle,
             )
 
             if success:
                 task_handle.log_message.emit('ISO Build Successful.')
+                task_handle.progress.emit(100)
                 return ActionResult(
                     action_name='Build ISO',
                     node=root_node,
@@ -559,7 +650,8 @@ class Actions:
         task_handle.progress.emit(0)
         task_handle.log_message.emit('Verifying ISO...')
         result = handler.verify_iso_integrity(task_handle)
-        task_handle.log_message.emit(f'ISO verified, build: {result}')
+        task_handle.log_message.emit(f'ISO verified {result}')
+        task_handle.progress.emit(100)
         return result
 
     ### IO specific actions
@@ -587,7 +679,7 @@ class Actions:
                 action_name=action_name,
                 node=node,
                 status=ActionStatus.SUCCESS,
-                message=f'Successfully exported to {output_path.name}'
+                message=f'Exported: {output_path.name}'
             )
         except Exception as e:
             logger.error(f'Export failed: {e}', exc_info=True)

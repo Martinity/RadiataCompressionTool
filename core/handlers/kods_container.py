@@ -36,7 +36,7 @@ class KodsHandler(ContainerHandler):
         '''System unifies all unpacks to one header thus can unpack generically'''
         root = VfsNode(
             name=f'{getattr(self.handler_parent, "name", "KODS")} contents',
-            parent=self.handler_parent,        
+            parent=self.handler_parent,
         )
         is_internal = not bool(self.datacenter_header)
         if not self.datacenter_header and self.payload_view[:4] != b'Kods':
@@ -61,7 +61,7 @@ class KodsHandler(ContainerHandler):
                 dummy_node.is_hidden = True
                 root.append_child(dummy_node)
                 continue
-            
+
             header = bytes(self.payload_view[meta.offset : meta.offset + 8])
             ext: str = lookup_extension(header)
             name = f'{meta.node_index:04d}' if is_internal else f'Entry {meta.node_index:02d}'
@@ -87,7 +87,7 @@ class KodsHandler(ContainerHandler):
     def rebuild_node(self, node: VfsNode, staged_nodes: list[VfsNode]) -> RebuildResult:
         '''Routes to the correct rebuild strategy based on node state'''
         if not self.task_handle:
-            raise RuntimeError(f'No active Task Handle for {self.__class__.__name__}')     
+            raise RuntimeError(f'No active Task Handle for {self.__class__.__name__}')
         is_internal = not bool(self.datacenter_header)
         # Check original structure
         self.header_view  = (
@@ -182,14 +182,14 @@ class KodsHandler(ContainerHandler):
             )
         lines.append("")
         return "\n".join(lines)
-            
+
     def execute_action(self, node: VfsNode, action_name: str, **kwargs) -> Any:
         if action_name == 'Unpack':
             return self.get_file_tree()
         elif action_name == 'Properties':
             return self.get_properties()
         return None
-    
+
 ###----------------------------------------------- Archiver ----------------------------------------------------###
 
 class KodsArchiver:
@@ -219,7 +219,7 @@ class KodsArchiver:
     def __init__(self, payload: bytes | memoryview | bytearray):
         self.payload_view   = memoryview(payload)
         self.payload_length = len(self.payload_view) # Includes header size if internal header present
-    
+
     ###---------------------------------------- Unpack ----------------------------------------------###
 
     def get_kods_map(self, header: memoryview, is_internal: bool) -> list[KodsArchiver.FileNodeMeta]:
@@ -230,7 +230,7 @@ class KodsArchiver:
         kods_map: list[self.FileNodeMeta] = []
         for i, offset in enumerate(offsets): # Get Basic Segment metadata (missing size)
             is_valid = offset != -1
-            if is_valid and is_internal: 
+            if is_valid and is_internal:
                 is_valid = offset < self.payload_length
             node_metadata = self.FileNodeMeta(i, offset, 0, is_valid)
             kods_map.append(node_metadata)
@@ -265,7 +265,7 @@ class KodsArchiver:
         mode = (control_word >> 20) & 0x01               # Bits 20
         has_second_table = (control_word >> 29) & 0x01   # Bit 29
         bit30 = (control_word >> 30) & 0x01              # Bit 30
-        
+
         # Data alignement
         data_format = "<H" if mode else "<I"
         stride = 2 if mode else 4

@@ -271,14 +271,10 @@ class VfsManager(QObject):
 ###------------------------------------ Status Tracker ---------------------------------------###
 
 class ModTracker(QObject):
-    '''Modification state tracker'''
+    '''Pure state tracker for modified nodes.'''
     node_modified = pyqtSignal(VfsNode)
-    node_staged   = pyqtSignal(VfsNode)
-    node_unstaged = pyqtSignal(VfsNode)
     node_reverted = pyqtSignal(VfsNode)
-
-    state_changed     = pyqtSignal(int, int)   # (unstaged_count, staged_count)
-    rebuild_initiated = pyqtSignal(list, bool) # (staged_nodes, slimmed)
+    state_changed = pyqtSignal(int, int)              # (unstaged_count, staged_count)
 
     def __init__(self) -> None:
         super().__init__()
@@ -307,7 +303,6 @@ class ModTracker(QObject):
             self.modified_nodes.remove(node)
             self.rebuild_queue.add(node)
             node.status = NodeStatus.STAGED
-            self.node_staged.emit(node)
             self._emit_state()
 
     def unstage_node(self, node: VfsNode) -> None:
@@ -316,7 +311,6 @@ class ModTracker(QObject):
             self.rebuild_queue.remove(node)
             self.modified_nodes.add(node)
             node.status = NodeStatus.MODIFIED
-            self.node_unstaged.emit(node)
             self._emit_state()
 
     def revert_node(self, node: VfsNode) -> None:
@@ -329,13 +323,6 @@ class ModTracker(QObject):
         logger.info(f'Reverted changes for node: {node.hierarchical_id_str}')
         self.node_reverted.emit(node)
         self._emit_state()
-
-    def confirm_and_rebuild(self, slimmed: bool = False) -> None:
-        '''Triggered by Confirm button in staging page'''
-        if not self.rebuild_queue:
-            return
-        staged_nodes = list(self.rebuild_queue)
-        self.rebuild_initiated.emit(staged_nodes, slimmed)
 
     def clear(self) -> None:
         '''Clear state when closing an ISO'''

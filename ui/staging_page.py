@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from core.node import ModTracker, VfsNode
+from core.workers import IsoRebuildFlags
 from ui.settings import Shortcut, Shortcuts
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -208,12 +209,13 @@ class StagingPage(QWidget):
 
     request_file_browser = pyqtSignal()
 
-    def __init__(self, dispatcher, parent=None) -> None:
+    def __init__(self, dispatcher, rebuild_coordinator, parent=None) -> None:
         super().__init__(parent)
         self.dispatcher = dispatcher
+        self.rebuild_coordinator = rebuild_coordinator
         self.tracker: ModTracker = self.dispatcher.tracker
         self._selected_node: VfsNode | None = None
-        self.slimmed_requested = False
+        self._build_flags = IsoRebuildFlags.NONE
         self._setup_ui()
         self._connect_signals()
         self._setup_shortcuts()
@@ -319,11 +321,16 @@ class StagingPage(QWidget):
         self.btn_revert_all.clicked.connect(self._on_revert_all)
 
         self.tracker.state_changed.connect(self.refresh_lists)
-        self.btn_confirm.clicked.connect(lambda: self.tracker.confirm_and_rebuild(self.slimmed_requested))
+        self.btn_confirm.clicked.connect(self._on_confirm)
         self.slim_toggle.stateChanged.connect(self._on_slim_toggled)
 
         self.unstaged_list.currentItemChanged.connect(self._on_item_changed)
         self.staged_list.currentItemChanged.connect(self._on_item_changed)
+
+    def _on_confirm(self) -> None:
+        if not self.tracker.rebuild_queue:
+            return
+        self.rebuild_coordinator.request_rebuild(list(self.tracker.rebuild_queue), self._build_flags)
 
     def _on_slim_toggled(self) -> None:
         self.slimmed_requested = self.slim_toggle.isChecked()

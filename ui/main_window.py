@@ -7,32 +7,32 @@ to the log console even when on a different page.
 
 Here is a visual breakdown of the widget hierarchy with ISO loading/rebuild as example:
 =========================================================================================
-  VISUAL HIERARCHY (Main GUI Thread)         |   CONCURRENCY & TASKS (Worker Threads)
+  VISUAL HIERARCHY (Main GUI Thread)       |   CONCURRENCY & TASKS (Worker Threads)
 =========================================================================================
-                                             |
-[MainWindow]                                 |   [Dispatcher] (Task Coordinator)
- ├── MainMenuBar                             |    │
- ├── QStatusBar                              |    │
- │                                           |    │
- └── QStackedWidget                          |    ├── Async Task: Load ISO
-      │                                      |    │    └── Returns: TaskHandle
-      ├── [0] WelcomePage                    |    │
-      │                                      |    └── Async Task: Rebuild ISO
-      ├── [1] FileBrowserPage                |         ├── emit rebuild_progress
-      │    ├── [0] tree_view                 |         └── emit rebuild_log
-      │    ├── [1] search_view               |
-      │    ├── FileMetadataPanel             |
-      │    ├── SearchOverlay                 |
-      │    └── log_console (Toggleable)      |
-      │                                      |
-      ├── [2] StagingPage                    |
-      │    └── HexDiffModel                  |
-      │                                      |
-      ├── [3] RebuildStatusPage              |
-      │    ├── QProgressBar ◄────────────────┼─── receive rebuild_progress
-      │    └── QTextEdit ◄───────────────────┼─── receive rebuild_log
-      │                                      |
-      └── [4] EditorPage                     |
+                                           |
+[MainWindow]                               |   [Dispatcher] (Task Coordinator)
+├── MainMenuBar                            |    ├── TaskRelay - generic pooled tasks
+├── QStatusBar                             |    │    (tree expand, node actions, editor
+│                                          |    │     prep/decode, verify hash...)
+└── QStackedWidget                         |    │    tagged with LogChannel, routed by
+    │                                      |    │    MainWindow._route_task_log/progress
+    ├── [0] WelcomePage                    |    │
+    │                                      |    └── Async Task: Load ISO
+    ├── [1] FileBrowserPage                |         └── Returns: TaskHandle
+    │    ├── [0] tree_view                 |
+    │    ├── [1] search_view               |   [RebuildCoordinator] (dedicated, not pooled)
+    │    ├── FileMetadataPanel             |    ├── owns stage->path->run->complete lifecycle
+    │    ├── SearchOverlay                 |    ├── emit progress / log / finished
+    │    └── log_console (Toggleable)      |    └── flips Dispatcher's active TaskRelay
+    │                                      |         channel to REBUILD for the duration
+    ├── [2] StagingPage                    |
+    │    └── HexDiffModel                  |
+    │                                      |
+    ├── [3] RebuildStatusPage              |
+    │    ├── QProgressBar ◄────────────────┼─── receive RebuildCoordinator.progress
+    │    └── QTextEdit ◄───────────────────┼─── receive RebuildCoordinator.log
+    │                                      |
+    └── [4] EditorPage                     |
            └── *Plugin-specific
 """
 
@@ -47,17 +47,17 @@ import os
 from enum import IntEnum
 from pathlib import Path
 
-from core.dispatcher import Dispatcher
+from core.dispatcher import Dispatcher, RebuildCoordinator, LogChannel
 from core.metadata_manager import NodeMetadataStore
 from core.node import VfsNode
 from core.version import __version__
-from core.workers import TaskHandle
+from core.workers import TaskHandle, IsoRebuildFlags
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint
 from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenuBar,
-    QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QTextEdit,
-    QTreeView, QVBoxLayout, QWidget, QTabWidget, QLineEdit, QComboBox, QSizePolicy
+    QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QTextEdit, QWidgetAction,
+    QTreeView, QVBoxLayout, QWidget, QTabWidget, QLineEdit, QComboBox, QSizePolicy, QCheckBox
 )
 from ui.editor_page import EditorPage
 from ui.file_browser_page import FileBrowserBehavior, FileBrowserPage
@@ -104,11 +104,12 @@ class MainWindow(QMainWindow):
         )
         self.metadata_store.load()
         self.dispatcher.set_metadata_store(self.metadata_store)
+        self.rebuild_coordinator = RebuildCoordinator(self.dispatcher, self)
         # Setup View
         self.stack              = QStackedWidget()
         self.welcome_page       = WelcomePage(self.app_settings)
         self.file_browser_page  = FileBrowserPage(self.metadata_store)
-        self.staging_page       = StagingPage(self.dispatcher)
+        self.staging_page       = StagingPage(self.dispatcher, self.rebuild_coordinator)
         self.rebuild_page       = RebuildStatusPage()
         self.editor_page        = EditorPage()
         self._setup_ui()
@@ -175,14 +176,32 @@ class MainWindow(QMainWindow):
         self.editor_page.back_requested.connect(lambda: self.stack.setCurrentIndex(AppPage.FILEBROWSER))
 
         self.dispatcher.iso_loaded.connect(self._on_iso_loaded)
-        self.dispatcher.rebuild_requested.connect(self.start_rebuild)
-        self.dispatcher.rebuild_progress.connect(self.rebuild_page.update_progress)
-        self.dispatcher.rebuild_log.connect(self.rebuild_page.append_log)
-        self.dispatcher.rebuild_complete.connect(self.on_rebuild_complete)
         self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(build))
 
-        self.dispatcher.action_progress.connect(self.toast.show_progress)
-        self.dispatcher.file_browser_log.connect(self.file_browser_page.append_log)
+        self.rebuild_coordinator.started.connect(self.on_rebuild_started)
+        self.rebuild_coordinator.progress.connect(self.rebuild_page.update_progress)
+        self.rebuild_coordinator.log.connect(self.rebuild_page.append_log)
+        self.rebuild_coordinator.finished.connect(self.on_rebuild_complete)
+
+        # Generic task routing
+        self.dispatcher.relay.log.connect(self._route_task_log)
+        self.dispatcher.relay.progress.connect(self._route_task_progress)
+
+    def _route_task_log(self, channel: LogChannel, message: str) -> None:
+        if channel is LogChannel.REBUILD:
+            self.rebuild_page.append_log(message)
+        else:
+            self.file_browser_page.append_log(message)
+
+    def _route_task_progress(self, channel: LogChannel, percentage: int, label: str) -> None:
+        '''Where to send progress. label is optional upstream used by toast but not rebuild.'''
+        match channel:
+            case LogChannel.REBUILD:
+                self.rebuild_page.update_progress(percentage)
+            case LogChannel.TOAST:
+                self.toast.show_progress(percentage, label)
+            case LogChannel.BROWSER:
+                pass
 
     ###------------------------------- Appearance ----------------------------------###
     def _restore_layout(self) -> None:
@@ -247,19 +266,16 @@ class MainWindow(QMainWindow):
             return
         task_handle.log_message.connect(self._on_worker_log)
 
-    def start_rebuild(self, staged_nodes: list[VfsNode]) -> None:
-        """Transitions UI and asks for save location before kicking off background thread"""
-        file_path, _ = QFileDialog.getSaveFileName(self, 'Save Modified ISO', '', 'ISO Files (*.iso)')
-
-        if not file_path:  # User canceled the save dialog, stay on staging page
-            return
-
+    def on_rebuild_started(self, handle: TaskHandle) -> None:
+        '''
+        Purely UI;
+        Rebuilding pipeline is now managed by the dedicated RebuildCoordinator.
+        Transitions the rebuild page after RebuildCoordinator has a save path and an active task.
+        '''
         self.stack.setCurrentWidget(self.rebuild_page)
         self.rebuild_page.log_output.clear()
         self.rebuild_page.progress_bar.setValue(0)
-        handle = self.dispatcher.start_iso_rebuild(Path(file_path))
-        if handle:
-            self.rebuild_page.set_task_handle(handle)
+        self.rebuild_page.set_task_handle(handle)
 
     def _on_iso_loaded(self, success: bool, result: VfsNode | str) -> None:
         self.welcome_page.set_loading(False)
@@ -282,11 +298,11 @@ class MainWindow(QMainWindow):
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         """Handles the completion signal from the background thread"""
         self.rebuild_page.on_rebuild_finished()
-        if success:
-            QMessageBox.information(self, 'Success', message)
-        else:
-            QMessageBox.critical(self, 'Build Failed', message)
-        self.stack.setCurrentWidget(self.file_browser_page)
+        # if success:
+        #     QMessageBox.information(self, 'Success', message)
+        # else:
+        #     QMessageBox.critical(self, 'Build Failed', message)
+        # self.stack.setCurrentWidget(self.file_browser_page)
 
     ###------------------------------------- Lifecycle --------------------------------------###
 
@@ -613,6 +629,7 @@ class MainMenuBar:
 
         self._build_file_menu()
         self._build_view_menu()
+        self._build_patches_menu()
         self._build_info_menu()
 
     @property
@@ -707,6 +724,34 @@ class MainMenuBar:
         toggle_hidden.triggered.connect(self._handle_toggle_hidden)
         view_menu.addAction(toggle_hidden)
 
+    def _build_patches_menu(self) -> None:
+        '''
+        Rather than use QActions this menu uses QWidgetAction + QCheckBox for patches.
+        The reason being UX: QActions collapse the parent QMenu.
+        "Apply patches" uses the standard QAction to close the menu when start the patching process.
+
+        Each checkbox is tied to a IsoRebuildFlags flag
+        '''
+        patches_menu = self.menu_bar.addMenu('Patches')
+        assert patches_menu is not None
+
+        self._patch_flags: list[tuple[QCheckBox, IsoRebuildFlags]] = []
+        def add_patch_box(title: str, tooltip: str, flag: IsoRebuildFlags) -> None:
+            action = QWidgetAction(patches_menu)
+            checkbox = QCheckBox(title, self.window)
+            checkbox.setToolTip(tooltip)
+            action.setDefaultWidget(checkbox)
+            patches_menu.addAction(action)
+            self._patch_flags.append((checkbox, flag))
+
+        add_patch_box('Slimmed rebuild', 'Save 1GB by trimming out unused disk space.', IsoRebuildFlags.SLIMMED)
+        add_patch_box('Cutscene skipper', 'Patch all story scripts to complete ASAP.', IsoRebuildFlags.CUTSCENE_SKIPPER)
+
+        patches_menu.addSeparator()
+        apply_patches = QAction('Apply patches', self.window)
+        apply_patches.triggered.connect(self._handle_patches)
+        patches_menu.addAction(apply_patches)
+
     def _build_info_menu(self) -> None:
         info_menu = self.menu_bar.addMenu('Info')
         assert info_menu is not None
@@ -779,6 +824,15 @@ class MainMenuBar:
         if self.window.controller.proxy_model:  # Prevent crashing when no proxy_model is live
             self.window.controller.proxy_model.set_show_hidden(checked)
 
+    def _handle_patches(self) -> None:
+        '''Trigger a rebuild of the unmodified source with the checked flags'''
+        build_flags = IsoRebuildFlags.NONE
+        for checkbox, flag in self._patch_flags:
+            if checkbox.isChecked():
+                build_flags |= flag
+        self.window.stack.setCurrentIndex(AppPage.REBUILD)
+        self.window.rebuild_coordinator.request_rebuild([], build_flags=build_flags)
+
     def _handle_legend(self) -> None:
         theme_name = self.window.current_theme
         LegendView(ThemeManager.THEMES.get(theme_name), self.window).exec()
@@ -797,10 +851,11 @@ class Toast(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.SubWindow | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setObjectName('Popus')
+        self.setObjectName('Popup')
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
         self.label = QLabel()
         self.label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.progress = QProgressBar()
@@ -808,14 +863,32 @@ class Toast(QWidget):
         layout.addWidget(self.label)
         layout.addWidget(self.progress)
 
+        # Timer for auto-dismissal
         self._is_active = False
         self.dismiss_timer = QTimer(self)
         self.dismiss_timer.setSingleShot(True)
         self.dismiss_timer.timeout.connect(self.dismiss)
+
+        # Timer before progres is revealed (stop 0.1s or less tasks)
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setSingleShot(True)
+        self._reveal_timer.timeout.connect(self._reveal_progress)
+        self._pending_progress: tuple[int, str] | None = None
+
+        # Timer for dismissing progress after suspected failure
+        self.timeout_timer = QTimer(self)
+        self.timeout_timer.setSingleShot(True)
+        self.timeout_timer.timeout.connect(lambda: self.show_message(f'Error: "{self.label.text()}" timed out.', duration_ms=3000))
+        self._last_progress_value = -1
+
         self.hide()
 
     def show_message(self, message: str, duration_ms: int = 3000) -> None:
         '''Display a temporary text-only notification.'''
+        self._reveal_timer.stop()
+        self.timeout_timer.stop()
+        self._pending_progress = None
+        logger.info(message)
         self.label.setText(message)
         self.progress.hide()
         self._slide_up(duration_ms)
@@ -825,19 +898,45 @@ class Toast(QWidget):
         Display or update a persistent progress bar.
         Automatically fades out if value reaches 100.
         '''
+        self._pending_progress = (value, title)
+        if value != self._last_progress_value:
+            self._last_progress_value = value
+            if value < 100:
+                self.timeout_timer.start(5000)
+            else:
+                self.timeout_timer.stop()
+
+        if self._is_active:
+            if title:
+                self.label.setText(title)
+            self.progress.show()
+            self.progress.setValue(value)
+            if value >= 100:
+                self.dismiss_timer.start(2500)
+                self._reveal_timer.stop()
+                self._pending_progress = None
+            else:
+                self.dismiss_timer.stop()
+        else:
+            if value < 100 and not self._reveal_timer.isActive():
+                self._reveal_timer.start(100)
+
+    def _reveal_progress(self) -> None:
+        if self._pending_progress is None or self._is_active:
+            return
+        value, title = self._pending_progress
         if title:
             self.label.setText(title)
         self.progress.show()
         self.progress.setValue(value)
-        if not self._is_active:
-            self._slide_up(display_duration=0)
-        if value >= 100:
-            self.dismiss_timer.start(2500)
-        else:
-            self.dismiss_timer.stop()
+        self._slide_up(display_duration=0)
 
     def dismiss(self) -> None:
         '''Force the toast to slide down and hide'''
+        self._reveal_timer.stop()
+        self.timeout_timer.stop()
+        self._pending_progress = None
+        self._last_progress_value = -1
         if not self._is_active:
             return
 

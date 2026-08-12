@@ -524,9 +524,7 @@ class FileBrowserBehavior(QObject):
                         self.launch_editor(result.node, editor_classes[0])
             case ActionType.EXPORT:
                 if hasattr(self.window, 'toast'):
-                    self.window.toast.show_message(  # type: ignore
-                        f'Successfully exported: {result.message if result.message else result.node.name}'
-                    )
+                    self.window.toast.show_message(f'{result.message if result.message else result.node.name}') # type: ignore
             case ActionType.IMPORT:
                 pass  # Review bar updates automatically for user feedback (on_tracking_update)
 

@@ -10,7 +10,7 @@ from PyQt6.QtCore import pyqtSignal
 from core.node import VfsNode
 from core.native.block_device import BlockDevice
 if TYPE_CHECKING:
-    from core.workers import TaskHandle
+    from core.workers import TaskHandle, IsoRebuildFlags
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -142,7 +142,7 @@ class PhysicalHandler(BaseHandler):
         root:         VfsNode,
         staged_nodes: list[VfsNode],
         output_path:  Path,
-        slimmed_rebuild_requested: bool,
+        build_flags:  IsoRebuildFlags,
         task_handle:  TaskHandle,
     ) -> bool:  # type: ignore
         '''Rebuild and write a collection of nodes to disk. Returns True on success'''

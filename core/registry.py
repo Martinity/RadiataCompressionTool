@@ -347,7 +347,7 @@ class Registry:
         return profile.handler_class
 
     @classmethod
-    def get_action(cls, node: 'VfsNode', action_name: str) -> ActionDef | None:
+    def get_action(cls, node: VfsNode, action_name: str) -> ActionDef | None:
         '''Resolve ActionDef from action_name for a given node.
         Checks node's HandlerProfile first falling back to global actions.'''
         profile = cls.get_handler_profile(node)
@@ -355,7 +355,7 @@ class Registry:
             action = profile.get_action(action_name)
             if action:
                 return action
-        return _GLOBAL_ACTIONS_BY_NAME.get(action_name)
+        return _GLOBAL_ACTIONS_BY_NAME.get(action_name, None)
 
     ###----------------------------------- Diagnostics ---------------------------------------###
     @classmethod
