@@ -3,7 +3,6 @@ Native Library Registry for all native libraries that are used by the modding to
 Handles tiered resolution, JIT compliation, dependency discovery, and thread-safe loading.
 '''
 from __future__ import annotations
-from ssl import OP_LEGACY_SERVER_CONNECT
 
 import ctypes
 import os
@@ -217,7 +216,7 @@ class NativeRegistry:
             if candidate.exists():
                 try:
                     lib = bind_callback(ctypes.CDLL(str(candidate)))
-                    logger.info(f'Loaded prebuild native library: {candidate.name}')
+                    logger.debug(f'Loaded prebuild native library: {candidate.name}')
                     return lib
                 except Exception as e:
                     logger.warning(f'Failed to load prebuilt library {module.name}: {e}')

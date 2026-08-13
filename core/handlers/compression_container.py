@@ -20,7 +20,7 @@ logger = logging.getLogger(f'radiata.{__name__}')
     supported_actions=(
         ActionDef('Decompress', ActionType.TREE_EXPAND),
         ActionDef('Properties', ActionType.DIALOG)
-    ))
+))
 class CompressorHandler(ContainerHandler):
     '''Wrapper for Compressor class'''
 
@@ -173,42 +173,6 @@ class CompressorHandler(ContainerHandler):
             return self.get_properties(node)
         return None
 
-    def get_buffer_data(self, node: VfsNode) -> memoryview:
-        '''Specialized extraction for composite buffer nodes.'''
-        target = node
-        if not hasattr(target, 'parent_header'):
-            if node.parent and hasattr(node.parent, 'parent_header'):
-                target = node.parent
-            else:
-                logger.error(f'Cannot extract buffer: No compression metadata {node.name}')
-                return memoryview(b'')
-
-        continuous_buffer = bytearray()
-        current_offset = target.offset
-
-        while True:
-            header_view = self.raw_source[current_offset : current_offset + 16]
-            if len(header_view) < 16 or header_view[:3] not in [b'SLZ', b'SLE']:
-                break
-
-            header = bytes(header_view)
-            if target.parent_header is CompressorHandler.SlzHeader:
-                compressed_size = int.from_bytes(target.parent_header.compressed_size, 'little')
-            else:
-                compressed_size = int.from_bytes(header[4:8], 'little')
-            next_file = int.from_bytes(header[12:16], 'little')
-
-            chunk_view = self.raw_source[current_offset : current_offset + compressed_size + 16]
-            compressor = RadiCompressor(chunk_view)
-            continuous_buffer.extend(compressor.decompress())
-
-            if next_file == 0:
-                break
-
-            current_offset += next_file
-
-        return memoryview(continuous_buffer)
-
 ###------------------------------------ Compressor ------------------------------------------###
 
 class RadiCompressor:
@@ -258,9 +222,6 @@ class RadiCompressor:
         )
     }
 
-    SCRAMBLE_KEY = [0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7,
-                    0xE7, 0xD5, 0x1E, 0x4B, 0x7B, 0xA4, 0x1C, 0x7D]
-
     def __init__(self, data: memoryview, target_mode: int = 3, target_is_encrypted: bool = False, is_final_payload: bool = True):
         '''
         Initializes the compressor/decompressor.
@@ -281,26 +242,6 @@ class RadiCompressor:
 
     ###------------------------- Compress ---------------------------###
 
-    def _flush_flags(self, compressed: bytearray, flag_bits: int, token_buffer: bytearray) -> None:
-        '''Write flags in LE'''
-        compressed.append(flag_bits & 0xFF)
-        if self.mode.name == 'LZSS16':
-            compressed.append((flag_bits >> 8) &0xFF)
-        compressed.extend(token_buffer)
-
-    def _encode_match(self, offset: int, length: int) -> bytes:
-        '''Write the offset, length for matches'''
-        if self.mode.name == 'LZSS16':
-            length //= 2
-            offset //= 2
-
-        length_code = length - self.mode.length_base
-        offset_high = (offset >> 8) & 0x0F
-        offset_low = offset & 0xFF
-        byte1 = offset_low
-        byte2 = (length_code << 4) | offset_high
-        return bytes([byte1, byte2])
-
     def _encode_header(self, compressed_payload_length: int, uncompressed_length: int, next_file_offset: int) -> bytes:
         '''Write the header for the compressed output'''
         header = bytearray(16)
@@ -311,57 +252,6 @@ class RadiCompressor:
         header[12:16] = (next_file_offset.to_bytes(4, 'little'))
         return bytes(header)
 
-    def _hash3(self, pos) -> int:
-        '''get hash for byte'''
-        return ((self.data[pos] << 10) ^ (self.data[pos+1] << 5) ^ self.data[pos+2]) & (self.hash_size - 1)
-
-    def _find_best_match(self, pos, n, head, prev) -> tuple[int, int]:
-        '''Search the hash chain for best match'''
-        max_length = min(self.mode.max_match, n - pos)
-        if max_length < self.mode.min_match:
-            return 0, 0
-        word_aligned = self.mode.word_aligned
-        step = 2 if word_aligned else 1
-        max_offset = self.mode.window_size - step
-        h = self._hash3(pos)
-        candidate = head[h]
-        best_length = 0
-        best_offset = 0
-        chain_limit = 64
-        first_byte = self.data[pos]
-        while candidate >= 0 and chain_limit > 0:
-            offset = pos - candidate
-            if offset > max_offset:
-                break
-            if offset < step:
-                candidate = prev[candidate % self.mode.window_size]
-                chain_limit -= 1
-                continue
-            if word_aligned and offset % 2 != 0:
-                candidate = prev[candidate % self.mode.window_size]
-                chain_limit -= 1
-                continue
-            if self.data[candidate] == first_byte:
-                ml = 0
-                while ml < max_length and self.data[candidate + ml] == self.data[pos + ml]:
-                    ml += 1
-                if word_aligned:
-                    ml -= ml % 2
-                if ml > best_length:
-                    best_length = ml
-                    best_offset = offset
-                    if best_length == max_length:
-                        break
-            candidate = prev[candidate % self.mode.window_size]
-            chain_limit -= 1
-        return best_length, best_offset
-
-    def _update_hash(self, pos, n, head, prev) -> None:
-        '''Maintain the linked hashes'''
-        if pos + 2 < n:
-            h = self._hash3(pos)
-            prev[pos % self.mode.window_size] = head[h]
-            head[h] = pos
 
     def compress(self) -> bytes:
         '''Pack data into compressed file'''
@@ -370,13 +260,8 @@ class RadiCompressor:
             header = self._encode_header(len(self.data), len(self.data), next_file_offset)
             return header + self.data
 
-        compressed = bytearray()
-        i = 0
         original_size = len(self.data)
         n = original_size
-        token_buffer = bytearray()
-        flag_bits = 0
-        flag_count = 0
 
         if self.mode.word_aligned and n % 2 != 0:
             self.data = memoryview(bytes(self.data) + b'\x00')
@@ -384,106 +269,23 @@ class RadiCompressor:
 
         # Native fast path (falls through to Python below if unavailable).
         native_payload = native_compress(self.data, self.mode.mode)
-        if native_payload is not None:
-            next_file_offset = len(native_payload) + 16 if not self.is_final_payload else 0
-            header = self._encode_header(len(native_payload), original_size, next_file_offset)
-            if self.is_encrypted:
-                native_payload = self._scramble_slz_payload(native_payload)
-                header = header[:2] + b'E' + header[3:]
-            return bytes(header + native_payload)
-
-        head = [-1] * self.hash_size
-        prev = [-1] * self.mode.window_size
-
-        while i < n:
-            # deal with flags
-            if flag_count == self.mode.flag_bits:
-                self._flush_flags(compressed, flag_bits, token_buffer)
-                flag_bits = 0
-                flag_count = 0
-                token_buffer.clear()
-
-            RLE_triggered = False
-
-            if self.mode.rle_enabled:
-                run_length = 1
-                max_rle_check = min(n, i + self.mode.rle_long_max)
-                for j in range(i + 1, max_rle_check):
-                    if self.data[j] == self.data[i]:
-                        run_length += 1
-                    else:
-                        break
-
-                if run_length >= self.mode.rle_short_min:
-                    RLE_triggered = True
-                    flag_bits |= (0 << flag_count)
-                    flag_count += 1
-
-                    fill =  self.data[i]
-
-                    if run_length <= self.mode.rle_short_max: # RLE short
-                        token_buffer.extend([fill, 0xF0 | (run_length - self.mode.length_base)])
-                    else: # RLE long
-                        token_buffer.extend([(run_length - self.mode.rle_long_min), 0xF0, fill])
-                    for k in range(run_length):
-                        self._update_hash(i + k, n, head, prev)
-                    i += run_length
-
-            if not RLE_triggered : # LZSS
-                best_length, best_offset = self._find_best_match(i, n, head, prev)
-
-                if best_length >= self.mode.min_match:  # LZSS match
-                    flag_bits |= (0 << flag_count)
-                    flag_count += 1
-                    token_buffer.extend(self._encode_match(best_offset, best_length))
-                    for k in range(best_length):
-                        self._update_hash(i + k, n, head, prev)
-                    i += best_length
-
-                else: # Literal
-                    flag_bits |= (1 << flag_count)
-                    flag_count += 1
-                    token_buffer.extend((self.data[i : i + self.mode.literal_size]))
-                    self._update_hash(i, n, head, prev)
-                    i += self.mode.literal_size
-        # Flush remaining literals
-        if flag_count > 0:
-            self._flush_flags(compressed, flag_bits, token_buffer)
-
-        # Emit end-of-stream sentinel (offset==0 back-reference).
-        sentinel_flag = bytearray([0x00])
-        if self.mode.name == 'LZSS16':
-            sentinel_flag.append(0x00)  # 16-bit flag word
-        sentinel_flag.extend(b'\x00\x00')  # offset=0, length=0 back-reference
-        compressed.extend(sentinel_flag)
-
-        next_file_offset = len(compressed) + 16 if not self.is_final_payload else 0
-        header = self._encode_header(len(compressed), original_size, next_file_offset)
-
-        if self.is_encrypted: # Convert SLEs back to SLE
-            compressed = self._scramble_slz_payload(bytes(compressed))
+        if not native_payload:
+            raise RuntimeError('radiata_compressor.c failed to compile or load: Unable to compress SLZ payload')
+        next_file_offset = len(native_payload) + 16 if not self.is_final_payload else 0
+        header = self._encode_header(len(native_payload), original_size, next_file_offset)
+        if self.is_encrypted:
+            native_payload = self._scramble_slz_payload(native_payload)
             header = header[:2] + b'E' + header[3:]
+        return bytes(header + native_payload)
 
-        return bytes(header + compressed)
 
     def _scramble_slz_payload(self, data: bytes) -> bytes:
         '''Scramble the compressed'''
         native = native_scramble(bytes(data))
-        if native is not None:
-            return native
+        if not native:
+            raise RuntimeError('radiata_compressor.c failed to compile or load: Unable to scramble SLZ payload')
+        return native
 
-        KEY = self.SCRAMBLE_KEY
-        scrambled = bytearray()
-        mod_value = 0x03
-
-        for i, byte in enumerate(data):
-            key_value = KEY[i%16]
-            scrambled_byte = (byte ^ key_value) & 0xFF
-            modified_byte = (scrambled_byte + mod_value) & 0xFF
-            scrambled.append(modified_byte)
-            mod_value = (mod_value + 0x03) & 0xFF
-
-        return bytes(scrambled)
 
     ###------------------------- Decompress --------------------------###
 
@@ -495,129 +297,27 @@ class RadiCompressor:
         if self.mode.name == 'STORE': # STORE mode
             return bytes(self.data[16:])
 
-        compressed_size = int.from_bytes(self.data[4:8], 'little')
         expected_size = int.from_bytes(self.data[8:12], 'little')
 
         # Native fast path (falls through to Python below if unavailable).
         native_cap = min(expected_size, 64) if get_header else expected_size
         native_out = native_decompress(self.data[16:], native_cap, self.mode.mode)
-        if native_out is not None:
-            if not get_header and len(native_out) != expected_size:
-                logger.warning(f"Size mismatch! Header uncompressed={hex(expected_size)}, "
-                    f"produced={hex(len(native_out))}")
-            return native_out
+        if not native_out:
+            raise RuntimeError('radiata_compressor.c failed to compile or load: Unable to decompress SLZ payload')
+        if not get_header and len(native_out) != expected_size:
+            logger.warning(f"Size mismatch! Header uncompressed={hex(expected_size)}, "
+                f"produced={hex(len(native_out))}")
+        return native_out
 
-        pos = 16
-        decompressed = bytearray()
-
-        flags = 0
-        bits_remaining = 0
-        def get_next_flag_bit() -> int:
-            nonlocal pos, flags, bits_remaining
-            if bits_remaining == 0: # fill flag LZSS8
-                if pos >= len(self.data):
-                    logger.warning("Failed to terminate before EOF. Bailing out")
-                    return 0
-                low = self.data[pos]
-                pos += 1
-                if self.mode.name == 'LZSS16': # fill flag LZSS16
-                    if pos >= len(self.data):
-                        logger.warning("Failed to terminate before EOF. Bailing out")
-                        return 0
-                    high = self.data[pos]
-                    pos += 1
-                    flags = (high << 8) | low
-                else:
-                    flags = low
-                bits_remaining = self.mode.flag_bits
-            # consume flags
-            bit = flags & 1
-            flags >>= 1
-            bits_remaining -= 1
-            return bit
-
-        max_size = compressed_size + 16
-        if get_header: # Metadata toggle gate
-            max_size = 64
-        current_flags = []
-        # loop over compressed payload and stop when hit expected size (else 0s from flag will pad EOF)
-        while pos < max_size:
-            is_literal = (get_next_flag_bit() == 1)
-            current_flags.append(1 if is_literal else 0)
-            if len(current_flags) == self.mode.flag_bits:
-                current_flags = []
-
-            if is_literal: # literal
-                decompressed.extend(self.data[pos:pos + self.mode.literal_size])
-                pos += self.mode.literal_size
-
-            else: # reference
-                if pos + 2 > len(self.data):
-                    logger.warning("Failed to terminate before EOF. Bailing out")
-                    return bytes(decompressed)
-                byte1 = self.data[pos]
-                byte2 = self.data[pos+1]
-                pos += 2
-                if self.mode.rle_enabled and byte2 >= self.mode.rle_threshold: # RLE triggered
-                    if byte2 > self.mode.rle_threshold: # short RLE
-                        length = (byte2 & 0xF) + self.mode.length_base
-                        fill = byte1
-                    else: # long RLE
-                        length = byte1 + self.mode.rle_long_min
-                        if pos >= len(self.data):
-                            raise EOFError("Ran out of self.data for long RLE fill")
-                        fill = self.data[pos] # fill is byte 3
-                        pos += 1
-                    decompressed.extend(bytes([fill]) * length)
-                else: # LZSS triggered
-                    length_code = (byte2 >> 4) & 0x0F
-                    offset_low = byte1
-                    offset_high = byte2 & 0x0F
-                    offset = ((offset_high << 8) | offset_low )
-                    length = length_code + self.mode.length_base
-                    if self.mode.name == 'LZSS16': # LZSS16
-                        offset *= 2
-                        length = length * 2
-                    if offset == 0:
-                        break  # offset==0 is end-of-stream sentinel
-                    else:
-                        target = len(decompressed) - offset
-                        for k in range(length):
-                            if target + k < 0:
-                                decompressed.append(0x00)  # ring buffer zero-init
-                            else:
-                                decompressed.append(decompressed[target + k])
-            if len(decompressed) >= expected_size: # flush extra flags
-                decompressed = decompressed[:expected_size]
-                break
-
-        decompressed = decompressed[:expected_size]
-        if len(decompressed) != expected_size and not get_header:
-            logger.warning(f"Size mismatch not all compressed payloads support size changes! Header uncompressed={hex(expected_size)}, "
-                f"produced={hex(len(decompressed))}")
-        return bytes(decompressed)
 
     def _unscramble_slz_payload(self) -> bytes:
         '''Decrypt compressed payload.'''
-        KEY = self.SCRAMBLE_KEY
         comp_size = int.from_bytes(self.data[4:8], 'little')
         payload = self.data[16:]
 
         # Native fast path (falls through to Python below if unavailable).
         n = min(comp_size, len(payload))
-        native = native_unscramble(bytes(payload[:n]))
-        if native is not None:
-            return bytes(self.data[:2]) + b'Z' + bytes(self.data[3:16]) + native
-
-        unscrambled = bytearray()
-        mod_value = 0x03
-
-        for i in range(min(comp_size, len(payload))):
-            key_value = KEY[i % 16]
-            modified_byte = (payload[i] - mod_value) & 0xFF
-            unscrambled_byte = modified_byte ^ key_value
-            unscrambled.append(unscrambled_byte)
-            mod_value = (mod_value + 0x03) & 0xFF
-
-        updated = bytes(self.data[:2]) + b'Z' + bytes(self.data[3:16]) + bytes(unscrambled)
-        return updated
+        unscrambled_payload = native_unscramble(bytes(payload[:n]))
+        if not unscrambled_payload:
+            raise RuntimeError('radiata_compressor.c failed to compile or load: Unable to unscramble SLZ payload')
+        return bytes(self.data[:2]) + b'Z' + bytes(self.data[3:16]) + unscrambled_payload

@@ -71,32 +71,6 @@ def get_compressor() -> ctypes.CDLL | None:
             logger.warning("Using pure-Python SLZ/SLE compressor (native unavailable).")
         return _lib
 
-# def _load_native() -> ctypes.CDLL | None:
-#     """Resolve the native compressor across three tiers: prebuilt -> compile -> none."""
-#     # Tier 1: a CI-built lib bundled with the app (zero setup, no compiler).
-#     for cand in _prebuilt_lib_paths():
-#         if cand.exists():
-#             try:
-#                 lib = _bind(cand)
-#                 logger.info("Native SLZ/SLE compressor loaded (prebuilt): %s", cand)
-#                 return lib
-#             except Exception as exc:  # noqa: BLE001 - try the next candidate/tier
-#                 logger.warning("Prebuilt compressor %s failed to load: %s", cand.name, exc)
-
-#     # Tier 2: compile from the shipped source (developers running from source).
-#     # Skipped in a frozen bundle, which has no compiler and a read-only payload.
-#     if not getattr(sys, "frozen", False):
-#         try:
-#             library_path = _ensure_built()
-#             lib = _bind(library_path)
-#             logger.info("Native SLZ/SLE compressor compiled and loaded: %s", library_path.name)
-#             return lib
-#         except Exception as exc:  # noqa: BLE001 - fall through to Python
-#             logger.warning("Could not build native compressor: %s", exc)
-
-#     # Tier 3: caller falls back to the pure-Python compressor.
-#     return None
-
 ###----------------------------------------- High-level wrappers -----------------------------------------###
 
 def native_decompress(payload, expected_size: int, mode: int) -> bytes | None:
