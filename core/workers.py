@@ -68,12 +68,14 @@ class ActionType(Enum):
     DIALOG       - execute_action returns a display string — shown in metadata panel or dialog
     EXPORT       - write node data to disk
     IMPORT       - read file from disk into node
+    PATCH        - auto applies returned payload to node.pending_data
     '''
     TREE_EXPAND = 'tree_expand'
     PROCESS     = 'process'
     DIALOG      = 'dialog'
     EXPORT      = 'export'
     IMPORT      = 'import'
+    PATCH       = 'patch'
 
 @dataclass(frozen=True)
 class ActionDef:
@@ -253,10 +255,11 @@ class TaskCoordinator(QObject):
 
     def shutdown(self):
         active_ids = [h.task_id for h in self._active_handles.values()]
-        logger.info(
-            'TaskCoordinator: Canceling pending tasks...'
-            f'Unfinished Active Task IDs still in memory: {active_ids}'
-        )
+        if len(active_ids) > 0:  # Only log if there are active tasks
+            logger.info(
+                'TaskCoordinator: Cancelling pending tasks...'
+                f'Unfinished Active Task IDs still in memory: {active_ids}'
+            )
         for handle_id, handle in list(self._active_handles.items()):
             logger.debug(f'TaskCoordinator Force-Cancelling: Task #{handle.task_id}')
             handle.cancel()
@@ -421,7 +424,13 @@ class Actions:
                 task_handle.log_message.emit(f'Applying patch {action_name} to {node.name} ({node.hierarchical_id_str})')
                 result = Actions.dispatch(action_def, node, navigator, task_handle)
                 if result.status is ActionStatus.SUCCESS:
-                    touched.append(node)
+                    if isinstance(result.payload, (bytes, bytearray)):
+                        node.pending_data = bytes(result.payload)
+                        touched.append(node)
+                    else:
+                        task_handle.log_message.emit(
+                            f'{action_name} on {node.name} {node.hierarchical_id} did not return bytes payload  - Skipping'
+                        )
                 else:
                     task_handle.log_message.emit(f'{action_name} failed on {node.name}: {result.message}')
         return touched
@@ -495,7 +504,7 @@ class Actions:
         '''
         from core.registry import Registry
         match action_def.action_type:
-            case ActionType.TREE_EXPAND | ActionType.PROCESS | ActionType.DIALOG:
+            case ActionType.TREE_EXPAND | ActionType.PROCESS | ActionType.DIALOG | ActionType.PATCH:
                 handler_class = Registry.get_handler(node)
                 if not handler_class:
                     return ActionResult(
@@ -732,7 +741,7 @@ class Actions:
         execute action with handle
         '''
         if action_name != 'Properties':
-            task_handle.log_message.emit(f'Starting "{action_name}" on node: {node.name}...')
+            task_handle.log_message.emit(f'Starting "{action_name}" on node: {node.name} ({node.hierarchical_id_str})...')
         try:
             node_bytes   = navigator.unwrap_chain(node)
             header_bytes = navigator.resolve_data_from_hid(node.target)
@@ -743,7 +752,7 @@ class Actions:
                 setattr(handler, 'datacenter_header', header_bytes)
                 payload = handler.execute_action(node, action_name, **kwargs)
             if action_name != 'Properties':
-                task_handle.log_message.emit(f'Finished "{action_name}" on node: {node.name}.')
+                task_handle.log_message.emit(f'Finished "{action_name}" on node: {node.name} ({node.hierarchical_id_str}).')
             return ActionResult(
                 action_name=action_name,
                 node=node,

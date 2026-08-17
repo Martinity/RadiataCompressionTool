@@ -333,7 +333,11 @@ class StagingPage(QWidget):
         self.rebuild_coordinator.request_rebuild(list(self.tracker.rebuild_queue), self._build_flags)
 
     def _on_slim_toggled(self) -> None:
-        self.slimmed_requested = self.slim_toggle.isChecked()
+        if self.slim_toggle.isChecked():
+            self._build_flags |= IsoRebuildFlags.SLIMMED
+        else:
+            self._build_flags &= ~IsoRebuildFlags.SLIMMED
+
 
     def _setup_shortcuts(self) -> None:
         QShortcut(Shortcuts.sequence(Shortcut.BACK), self).activated.connect(self.request_file_browser.emit)

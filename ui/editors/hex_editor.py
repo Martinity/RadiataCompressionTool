@@ -290,7 +290,7 @@ class HexEditorWidget(BaseEditor):
             ('As ASCII text  (SLZ. …)',      'ascii'),
         ):
             act = QAction(label, self)
-            act.triggered.connect(lambda checked=False, f=fmt: self._copy(f))
+            act.triggered.connect(lambda f=fmt: self._copy(f))
             copy_menu.addAction(act)
 
         menu.addSeparator()

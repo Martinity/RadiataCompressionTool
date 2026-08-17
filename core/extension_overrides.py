@@ -8,8 +8,8 @@ HEADERS = {
     b'Kods'   : '.kods',
     b'1bcb'   : '.bcb',
     b'VIB'    : '.vib',
-    (0x464C457F).to_bytes(4, 'little'): ".elf",
-    (0xD51556).to_bytes(3, 'little'): ".idx",   # TOC 
+    (0x464C457F).to_bytes(4, 'little'): ".IRX", # changed to match the ISO files
+    (0xD51556).to_bytes(3, 'little'): ".idx",   # TOC
     # Audio
     b'SEQW'   : '.seqw',
     b'VAGp'   : '.VAG',
@@ -97,4 +97,3 @@ def lookup_extension(header: bytes, default: str = '.bin') -> str:
         if ext is not None:
             return ext
     return default
-

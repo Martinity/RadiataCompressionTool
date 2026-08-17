@@ -178,7 +178,8 @@ class MainWindow(QMainWindow):
         self.dispatcher.iso_loaded.connect(self._on_iso_loaded)
         self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(build))
 
-        self.rebuild_coordinator.started.connect(self.on_rebuild_started)
+        self.rebuild_coordinator.preparing_build.connect(self._on_rebuild_prep_started)
+        self.rebuild_coordinator.started.connect(self._on_rebuild_started)
         self.rebuild_coordinator.progress.connect(self.rebuild_page.update_progress)
         self.rebuild_coordinator.log.connect(self.rebuild_page.append_log)
         self.rebuild_coordinator.finished.connect(self.on_rebuild_complete)
@@ -266,7 +267,14 @@ class MainWindow(QMainWindow):
             return
         task_handle.log_message.connect(self._on_worker_log)
 
-    def on_rebuild_started(self, handle: TaskHandle) -> None:
+    def _on_rebuild_prep_started(self) -> None:
+        self.stack.setCurrentIndex(AppPage.REBUILD)
+        self.rebuild_page.header.setText('Preparing build...')
+        self.rebuild_page.log_output.clear()
+        self.rebuild_page.progress_bar.setValue(0)
+        self.rebuild_page._cancel_btn.setEnabled(False) # No task handle to cancel, UX potential improvement
+
+    def _on_rebuild_started(self, handle: TaskHandle) -> None:
         '''
         Purely UI;
         Rebuilding pipeline is now managed by the dedicated RebuildCoordinator.
@@ -275,6 +283,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.rebuild_page)
         self.rebuild_page.log_output.clear()
         self.rebuild_page.progress_bar.setValue(0)
+        self.rebuild_page.header.setText('Rebuilding ISO...')
         self.rebuild_page.set_task_handle(handle)
 
     def _on_iso_loaded(self, success: bool, result: VfsNode | str) -> None:
@@ -298,11 +307,11 @@ class MainWindow(QMainWindow):
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         """Handles the completion signal from the background thread"""
         self.rebuild_page.on_rebuild_finished()
-        # if success:
-        #     QMessageBox.information(self, 'Success', message)
-        # else:
-        #     QMessageBox.critical(self, 'Build Failed', message)
-        # self.stack.setCurrentWidget(self.file_browser_page)
+        if success:
+            QMessageBox.information(self, 'Success', message)
+        else:
+            QMessageBox.critical(self, 'Build Failed', message)
+        self.stack.setCurrentWidget(self.file_browser_page)
 
     ###------------------------------------- Lifecycle --------------------------------------###
 
@@ -830,7 +839,6 @@ class MainMenuBar:
         for checkbox, flag in self._patch_flags:
             if checkbox.isChecked():
                 build_flags |= flag
-        self.window.stack.setCurrentIndex(AppPage.REBUILD)
         self.window.rebuild_coordinator.request_rebuild([], build_flags=build_flags)
 
     def _handle_legend(self) -> None:

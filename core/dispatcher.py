@@ -421,7 +421,7 @@ class Dispatcher(QObject):
             action_def,
             node,
             self.nav,
-            channel=LogChannel.BROWSER # Node expansion is always file browser page
+            channel=self._active_channel
         )
         handle.finished.connect(functools.partial(self._on_expand_once_done, node))
 
@@ -498,7 +498,7 @@ class Dispatcher(QObject):
         '''Starts a worker task with TREE_EXPAND and sets wait_event on completion'''
         self._expand_once(node, lambda success, expanded_node: None)
 
-    def _handle_extension_request(self, node: VfsNode, auto_save: bool = False) -> None:
+    def _handle_extension_request(self, node: VfsNode, auto_save: bool = True) -> None:
         '''
         Fulfill extension request from the VFS when metadata return null (default extension)
 
@@ -522,9 +522,10 @@ class Dispatcher(QObject):
 
         header: bytes = self.get_node_data(node)[:0x30]
         if len(header.replace(b'\x00', b'')) < 16:
-            logger.debug(f'Header too short: {len(header.replace(b"\\x00", b""))} bytes, node {node.name} ({node.hierarchical_id_str})')
-            return
-        ext = lookup_extension(header, _check_pk(header))
+            logger.debug(f'Header too short: {len(header.replace(b"\\x00", b""))} bytes, node {node.name} ({node.hierarchical_id_str}) applying .bin')
+            ext = '.bin'
+        else:
+            ext = lookup_extension(header, _check_pk(header))
         node.extension = ext
         if auto_save and self._metadata_store is not None:
             self._metadata_store.register(node.hierarchical_id_str, extension=ext)
@@ -595,10 +596,10 @@ class Dispatcher(QObject):
             return
 
         match action_def.action_type:
-            case ActionType.IMPORT:
+            case ActionType.IMPORT | ActionType.PATCH:
                 # edits get applied via fallback handler, prevents silent failing
                 self.apply_edit(result.node, result.payload, editor=None)
-                self.relay.log.emit(self._active_channel, f'Import applied to {result.node.name}')
+                self.relay.log.emit(self._active_channel, f'{action_def.name} applied to {result.node.name}')
             case ActionType.TREE_EXPAND:
                 if self.vfs:
                     new_nodes: list[VfsNode] = []
@@ -714,6 +715,7 @@ class RebuildCoordinator(QObject):
     Owns the entire staging->confirm->run->complete lifecycle.
     Nothing else touches rebuild state.
     '''
+    preparing_build = pyqtSignal()     # Signal to emit when the build is preparing to start
     started  = pyqtSignal(object)      # TaskHandle
     progress = pyqtSignal(int)         # Percentage
     log      = pyqtSignal(str)         # Log message
@@ -733,6 +735,9 @@ class RebuildCoordinator(QObject):
         save dialog, since handler.rebuild_node needs concrete VfsNodes, not
         HIDs that might not be reachable yet.
         '''
+        self.preparing_build.emit()
+        self._dispatcher.set_active_channel(LogChannel.REBUILD)
+        self.log.emit('Preparing VFS for rebuild...')
         active_rules = [
             rule for flag, rule in PATCH_TARGET_RULES.items()
             if flag is not IsoRebuildFlags.NONE and (build_flags & flag)
@@ -763,7 +768,11 @@ class RebuildCoordinator(QObject):
 
         rule, *rest = rules
 
+        self.progress.emit(0)
+        self.log.emit(f'Resolving patch target for action: {rule.action}...')
         def _on_resolved(leaves: list[VfsNode]) -> None:
+            self.progress.emit(100)
+            self.log.emit(f'Successfully resolved {len(leaves)} nodes for action: {rule.action}')
             patch_targets.setdefault(rule.action, []).extend(leaves)
             self._resolve_patch_targets(staged_nodes, build_flags, rest, patch_targets)
 
@@ -778,7 +787,10 @@ class RebuildCoordinator(QObject):
         self._config = RebuildRequest(staged_nodes, build_flags, patch_targets)
         file_path, _ = QFileDialog.getSaveFileName(self._parent, 'Save Modified ISO', '', 'ISO Files (*.iso)')
         if not file_path:
+            self.log.emit('Save dialog cancelled by user.')
             self._config = None
+            self._dispatcher.set_active_channel(LogChannel.BROWSER)
+            self.finished.emit(False, 'Rebuild cancelled by user.')
             return
         self._dispatcher.set_active_channel(LogChannel.REBUILD)
         handle = self._dispatcher.start_iso_rebuild(self._config, Path(file_path))

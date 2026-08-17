@@ -775,7 +775,15 @@ class EventScripts:
     def iter_entries(cls) -> Iterator[tuple[str, dict[str, Any]]]:
         for disk_idx in cls._RANGE:
             for sub_idx, values in cls._EVENTS.items():
-                yield f'{disk_idx}.{sub_idx}', {'title': values[0], 'tags': ('Script',)}
+                base_name = values[0]
+                base_key = f'{disk_idx}.{sub_idx}'
+                if '.' in sub_idx:
+                    yield base_key, {'title': f'{base_name} Compressed', 'tags': ('Script',)}
+                    yield f'{base_key}.0', {'title': f'{base_name} Container', 'tags': ('Script',)}
+                    yield f'{base_key}.0.0', {'title': f'{base_name} Script Data', 'tags': ('Script',)}
+                    yield f'{base_key}.0.1', {'title': f'{base_name} Message Data', 'tags': ('Script',)}
+                else:
+                    yield base_key, {'title': f'{base_name}', 'tags': ('Script',)}
 
 class CharaPortraits:
     '''Sequential list of all the names for portraits
@@ -851,7 +859,7 @@ class CharaPortraits:
 
 class TextureBanks:
     _BANK00 = {
-        0: {'title': 'Thought Bubbles', 'description': 'Channel packed.'},
+        1: {'title': 'Thought Bubbles', 'description': 'Channel packed.'},
         3: {'title': 'Clock'},
         9: {'title': 'Bear Icons'},
         10: {'title': 'Demo Finished Screen 1', 'description': 'First part of the "Hope you enjoyed playing" demo screen.'},

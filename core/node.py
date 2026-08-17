@@ -214,6 +214,8 @@ class VfsManager(QObject):
             return
         for child in self.root.children[-1].children:
             self.enrich_node(child)
+            # For building new metadata from scratch you will need to remove child.is_hidden for data center
+            # This could be designed better but won't matter to the average user
             if not child.extension and not child.is_hidden:
                 self.request_extension.emit(child)
         logger.debug('VfsManager.enrich_initial_tree: complete')

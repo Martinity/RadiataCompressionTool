@@ -248,7 +248,7 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta): # type: ignore
             self._populate_ui(result)
         else:
             self.show_error(
-                f'Receive data got {type(result).__name__}, expected bytes.'
+                f'Receive data got {type(result).__name__}, expected bytes. '
                 f'Override receive_data or ensure handler.prepare_editor_data returns bytes.'
             )
 
