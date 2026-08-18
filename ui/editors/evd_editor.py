@@ -39,8 +39,8 @@ from PyQt6.QtWidgets import (
 from core.contracts import BaseEditor
 from core.node import VfsNode
 from core.registry import Registry
-from core.evd import api
-from core.evd.api import Arg, CodeLine, EvdCompileError
+from core.handlers import evd_leaf
+from core.handlers.evd_leaf import Arg, CodeLine, EvdCompileError
 from core.handlers.evd_leaf import EVDHandler, EvdEditorPayload, EvdSavePayload, EvdError
 from utilities import hline
 
@@ -50,23 +50,23 @@ logger = logging.getLogger(f'radiata.{__name__}')
 ###------------------------------------------- Presentation -------------------------------------------###
 
 _CATEGORY_COLORS = {
-    api.CATEGORY_JUMP:         '#D06060',
-    api.CATEGORY_SCRIPT_START: '#4CAF50',
-    api.CATEGORY_MARKER_SEEK:  '#AB6BD6',
-    api.CATEGORY_EXPRESSION:   '#4A90D9',
-    api.CATEGORY_HIGH:         '#D06BD0',
-    api.CATEGORY_TERMINAL:     '#D6A02A',
-    api.CATEGORY_MACRO:        '#26A69A',
-    api.CATEGORY_STRUCTURE:    '#8A8A8A',
-    api.CATEGORY_NORMAL:       '#C8C8C8',
+    evd_leaf.CATEGORY_JUMP:         '#D06060',
+    evd_leaf.CATEGORY_SCRIPT_START: '#4CAF50',
+    evd_leaf.CATEGORY_MARKER_SEEK:  '#AB6BD6',
+    evd_leaf.CATEGORY_EXPRESSION:   '#4A90D9',
+    evd_leaf.CATEGORY_HIGH:         '#D06BD0',
+    evd_leaf.CATEGORY_TERMINAL:     '#D6A02A',
+    evd_leaf.CATEGORY_MACRO:        '#26A69A',
+    evd_leaf.CATEGORY_STRUCTURE:    '#8A8A8A',
+    evd_leaf.CATEGORY_NORMAL:       '#C8C8C8',
 }
 _LEGEND = (
-    (api.CATEGORY_JUMP, 'Branch'),
-    (api.CATEGORY_SCRIPT_START, 'Script start'),
-    (api.CATEGORY_MARKER_SEEK, 'Marker seek'),
-    (api.CATEGORY_EXPRESSION, 'Value'),
-    (api.CATEGORY_HIGH, 'Marker'),
-    (api.CATEGORY_MACRO, 'Macro'),
+    (evd_leaf.CATEGORY_JUMP, 'Branch'),
+    (evd_leaf.CATEGORY_SCRIPT_START, 'Script start'),
+    (evd_leaf.CATEGORY_MARKER_SEEK, 'Marker seek'),
+    (evd_leaf.CATEGORY_EXPRESSION, 'Value'),
+    (evd_leaf.CATEGORY_HIGH, 'Marker'),
+    (evd_leaf.CATEGORY_MACRO, 'Macro'),
 )
 _COLOR_GUTTER      = '#6E6E6E'
 _COLOR_LINE_NUMBER = '#5A5A5A'
@@ -102,7 +102,7 @@ _VALUE_COLUMN_MAX = 420
 
 
 def _category_color(category: str) -> str:
-    return _CATEGORY_COLORS.get(category, _CATEGORY_COLORS[api.CATEGORY_NORMAL])
+    return _CATEGORY_COLORS.get(category, _CATEGORY_COLORS[evd_leaf.CATEGORY_NORMAL])
 
 ###------------------------------------------- Editor state -------------------------------------------###
 
@@ -131,7 +131,7 @@ class EvdEditor(BaseEditor):
         self._code:     str = ''
         self._lines:    list[CodeLine] = []
         self._raw:      bytes = b''
-        self._stats:    api.ScriptStats | None = None
+        self._stats:    evd_leaf.ScriptStats | None = None
         self._source:   str = ''
         self._offsets:  dict[int, int] = {}
         self._error:    EvdCompileError | None = None
@@ -370,7 +370,7 @@ class EvdEditor(BaseEditor):
             return True
         t0 = time.monotonic()
         if validate:
-            built = api.assemble(code)
+            built = evd_leaf.assemble(code)
             if not built.ok:
                 elapsed = (time.monotonic() - t0) * 1000
                 logger.warning(f'[gen {self._generation}] {action_desc} REJECTED ({elapsed:.1f}ms): {built.error}')
@@ -383,7 +383,7 @@ class EvdEditor(BaseEditor):
         self._push_undo()
         self._generation += 1
         self._code = code
-        self._lines = api.parse_code(code)
+        self._lines = evd_leaf.parse_code(code)
         self._refresh_views(preserve_selection=True, select_line=select_line)
         self.set_dirty(True)
         self._emit_undo_state()
@@ -403,7 +403,7 @@ class EvdEditor(BaseEditor):
         still changes where a branch goes, so it has to be said out loud. The
         check needs no compile, which is why it runs on every applied edit.
         '''
-        stranded = api.undefined_label_problems(self._lines)
+        stranded = evd_leaf.undefined_label_problems(self._lines)
         self._problems.set_errors(list(stranded))
         self._code_view.mark_error_line(stranded[0].line if stranded else None)
         if stranded:
@@ -424,7 +424,7 @@ class EvdEditor(BaseEditor):
     def _restore(self, snapshot: _Snapshot, action_desc: str) -> None:
         self._generation += 1
         self._code = snapshot.code
-        self._lines = api.parse_code(snapshot.code)
+        self._lines = evd_leaf.parse_code(snapshot.code)
         self._refresh_views(preserve_selection=False, select_line=snapshot.selected)
         self.set_dirty(bool(self._undo_stack))
         self._emit_undo_state()
@@ -454,7 +454,7 @@ class EvdEditor(BaseEditor):
         )
         self._prune_folds()
         self._structure_view.set_lines(self._lines, self._offsets, self._folded)
-        self._code_view.set_folds(api.foldable(self._lines), self._folded)
+        self._code_view.set_folds(evd_leaf.foldable(self._lines), self._folded)
         self._structure_view.set_highlight(self._highlight)
         self._code_view.set_highlight(self._highlight, self._lines)
         self._structure_stale = False
@@ -470,9 +470,9 @@ class EvdEditor(BaseEditor):
         self._on_line_selected(self._structure_view.current_line())
 
     def _update_info_label(self) -> None:
-        commands = sum(1 for line in self._lines if line.kind == api.KIND_COMMAND)
-        blocks = sum(1 for line in self._lines if line.opens and line.kind == api.KIND_COMMAND)
-        labels = sum(1 for line in self._lines if line.kind == api.KIND_LABEL)
+        commands = sum(1 for line in self._lines if line.kind == evd_leaf.KIND_COMMAND)
+        blocks = sum(1 for line in self._lines if line.opens and line.kind == evd_leaf.KIND_COMMAND)
+        labels = sum(1 for line in self._lines if line.kind == evd_leaf.KIND_LABEL)
         text = f'{len(self._lines)} lines, {commands} commands, {blocks} blocks, {labels} labels'
         if self._stats:
             text += f' -- {self._stats.byte_size} bytes on load'
@@ -485,7 +485,7 @@ class EvdEditor(BaseEditor):
             return
         self._typing = False  # the next keystroke starts a fresh undo step
         self._sync_from_text()
-        built = api.assemble(self._code)
+        built = evd_leaf.assemble(self._code)
         error = built.error
         self._error = error
         if built.offsets:
@@ -494,7 +494,7 @@ class EvdEditor(BaseEditor):
         # Stranded branches assemble, so the compiler says nothing about them.
         # They are reported alongside its errors because a jump into the middle
         # of an unrelated command is worse than a script that will not build.
-        stranded = api.undefined_label_problems(self._lines)
+        stranded = evd_leaf.undefined_label_problems(self._lines)
         self._problems.set_errors(([error] if error else []) + stranded)
         self._code_view.mark_error_line(error.line if error else
                                         (stranded[0].line if stranded else None))
@@ -513,8 +513,8 @@ class EvdEditor(BaseEditor):
         if not self._code:
             return
         try:
-            data = api.compile_code(self._code)
-            code = api.decompile_code(data, self.current_node.name if self.current_node else 'Main')
+            data = evd_leaf.compile_code(self._code)
+            code = evd_leaf.decompile_code(data, self.current_node.name if self.current_node else 'Main')
         except EvdCompileError as e:
             self._set_status(f'Cannot normalize: {e}', error=True)
             self._problems.set_errors([e])
@@ -524,7 +524,7 @@ class EvdEditor(BaseEditor):
             self._set_status('Already normalized', error=False)
             return
         self._apply_code(code, 'Normalize')
-        self._lowered.set_text(api.decompile_source(data))
+        self._lowered.set_text(evd_leaf.decompile_source(data))
 
     ###--------------------------------------------- Folding --------------------------------------------###
 
@@ -545,7 +545,7 @@ class EvdEditor(BaseEditor):
         self._code_view.set_highlight(key, self._lines)
         if not key:
             return
-        count = sum(len(api.value_occurrences(line, key)) for line in self._lines)
+        count = sum(len(evd_leaf.value_occurrences(line, key)) for line in self._lines)
         shown = key[1:] if key.startswith('#') else key[1:]
         self._set_status(f'{count} occurrence(s) of {shown}', error=False)
 
@@ -558,17 +558,17 @@ class EvdEditor(BaseEditor):
         self._apply_folds()
 
     def toggle_fold_all(self) -> None:
-        spans = api.foldable(self._lines)
+        spans = evd_leaf.foldable(self._lines)
         # The event block wraps the whole script; collapsing it alone would hide
         # everything and read as a bug, so "collapse all" means every block
         # inside it.
-        inner = {opener for opener in spans if self._lines[opener - 1].kind != api.KIND_EVENT}
+        inner = {opener for opener in spans if self._lines[opener - 1].kind != evd_leaf.KIND_EVENT}
         self._folded = set() if self._folded else inner
         self._apply_folds()
 
     def _apply_folds(self) -> None:
         self._structure_view.set_folded(self._folded)
-        self._code_view.set_folds(api.foldable(self._lines), self._folded)
+        self._code_view.set_folds(evd_leaf.foldable(self._lines), self._folded)
         self._fold_button.setText('Expand all' if self._folded else 'Collapse all')
 
     def _prune_folds(self) -> None:
@@ -579,13 +579,13 @@ class EvdEditor(BaseEditor):
         only the ones that still are means a fold is at worst on a real block,
         never on nothing.
         '''
-        spans = api.foldable(self._lines)
+        spans = evd_leaf.foldable(self._lines)
         self._folded &= set(spans)
 
     def goto_line(self, number: int) -> None:
         # A line inside a collapsed block cannot be shown; open it first, which
         # is what any editor does when a search lands inside a fold.
-        for opener, end in api.foldable(self._lines).items():
+        for opener, end in evd_leaf.foldable(self._lines).items():
             if opener in self._folded and opener < number <= end:
                 self._folded.discard(opener)
         self._apply_folds()
@@ -595,7 +595,7 @@ class EvdEditor(BaseEditor):
     def goto_label(self, name: str) -> None:
         '''Jump to the label a branch names, or say why it cannot.'''
         self._sync_from_text()
-        target = next((number for label, number in api.iter_labels(self._lines) if label == name), None)
+        target = next((number for label, number in evd_leaf.iter_labels(self._lines) if label == name), None)
         if target is None:
             self._set_status(
                 f'{name} is not a label in this script; it will assemble as a raw byte offset',
@@ -627,7 +627,7 @@ class EvdEditor(BaseEditor):
     def _on_line_moved(self, moved_line: int, target_line: int) -> None:
         '''Move a line, or the whole block when the line opens one.'''
         self._sync_from_text()
-        start, end = api.block_range(self._lines, moved_line)
+        start, end = evd_leaf.block_range(self._lines, moved_line)
         if start <= target_line <= end + 1:
             return  # dropped inside itself
         block = self._lines[start - 1:end]
@@ -636,18 +636,18 @@ class EvdEditor(BaseEditor):
         insert_at = target_line - 1 - (end - start + 1) if target_line > end else target_line - 1
         insert_at = max(0, min(insert_at, len(rest)))
         merged = rest[:insert_at] + block + rest[insert_at:]
-        self._apply_code(api.render_code(merged), 'Move', select_line=insert_at + 1)
+        self._apply_code(evd_leaf.render_code(merged), 'Move', select_line=insert_at + 1)
 
     def _on_delete_requested(self, number: int) -> None:
         self._sync_from_text()
         line = self._line(number)
         if line is None:
             return
-        start, end = api.block_range(self._lines, number)
+        start, end = evd_leaf.block_range(self._lines, number)
         remaining = self._lines[:start - 1] + self._lines[end:]
         count = end - start + 1
         desc = f'Delete {count} lines' if count > 1 else 'Delete'
-        self._apply_code(api.render_code(remaining), desc, select_line=max(1, start - 1))
+        self._apply_code(evd_leaf.render_code(remaining), desc, select_line=max(1, start - 1))
 
     def _on_toggle_yield(self, number: int) -> None:
         '''Flip the one-frame yield on a command.
@@ -656,7 +656,7 @@ class EvdEditor(BaseEditor):
         clear, so removing it and adding it are the two halves of the same edit.
         '''
         line = self._line(number)
-        if line is None or line.kind != api.KIND_COMMAND:
+        if line is None or line.kind != evd_leaf.KIND_COMMAND:
             return
         if line.arg('yield') is not None:
             args = tuple(a for a in line.args if a.key != 'yield')
@@ -695,13 +695,13 @@ class EvdEditor(BaseEditor):
             return
         target_line = max(2, min(target_line, len(self._lines)))
         indent = self._insert_indent(target_line)
-        text = api.command_template(name, indent, api.unique_label(self._lines))
+        text = evd_leaf.command_template(name, indent, evd_leaf.unique_label(self._lines))
         if not text:
             self._set_status(f'No insertable form for {name}', error=True)
             return
-        merged = self._lines[:target_line - 1] + api.parse_code(text) + self._lines[target_line - 1:]
-        code = api.render_code(merged)
-        error = api.validate_code(code)
+        merged = self._lines[:target_line - 1] + evd_leaf.parse_code(text) + self._lines[target_line - 1:]
+        code = evd_leaf.render_code(merged)
+        error = evd_leaf.validate_code(code)
         if error is None:
             if self._apply_code(code, f'Insert {name}', select_line=target_line):
                 self._bottom_tabs.setCurrentWidget(self._inspector)
@@ -716,7 +716,7 @@ class EvdEditor(BaseEditor):
         line = self._line(target_line)
         if line is None:
             return 4
-        if line.kind == api.KIND_CLOSE:
+        if line.kind == evd_leaf.KIND_CLOSE:
             previous = self._line(target_line - 1)
             return previous.indent if previous and not previous.closes else line.indent + 4
         return line.indent
@@ -728,7 +728,7 @@ class EvdEditor(BaseEditor):
 
     def _apply_line_args(self, number: int, args: tuple[Arg, ...], action_desc: str) -> None:
         self._sync_from_text()
-        result = api.apply_line_edit(self._lines, number, args)
+        result = evd_leaf.apply_line_edit(self._lines, number, args)
         if not result.ok:
             error = result.error
             logger.warning(f'[gen {self._generation}] {action_desc} REJECTED: {result.error_text}')
@@ -744,7 +744,7 @@ class EvdEditor(BaseEditor):
         self._generation += 1
         self._code = result.text
         self._offsets = result.offsets
-        self._lines = api.parse_code(result.text)
+        self._lines = evd_leaf.parse_code(result.text)
         self._refresh_views(preserve_selection=False, select_line=number)
         self.set_dirty(True)
         self._error = None
@@ -788,11 +788,11 @@ class EvdEditor(BaseEditor):
         if not self._structure_stale:
             return
         self._structure_stale = False
-        self._lines = api.parse_code(self._code)
+        self._lines = evd_leaf.parse_code(self._code)
         self._prune_folds()
         current = self._code_view.current_line()
         self._structure_view.set_lines(self._lines, self._offsets, self._folded)
-        self._code_view.set_folds(api.foldable(self._lines), self._folded)
+        self._code_view.set_folds(evd_leaf.foldable(self._lines), self._folded)
         self._structure_view.select_line(current)
         self._update_info_label()
 
@@ -854,8 +854,8 @@ class LineModel(QAbstractListModel):
         self.endResetModel()
 
     def _rebuild(self) -> None:
-        self._spans = api.foldable(self._lines)
-        hidden = api.hidden_lines(self._lines, self._folded)
+        self._spans = evd_leaf.foldable(self._lines)
+        hidden = evd_leaf.hidden_lines(self._lines, self._folded)
         self._visible = [line for line in self._lines if line.number not in hidden]
         self._row_of = {line.number: row for row, line in enumerate(self._visible)}
 
@@ -902,7 +902,7 @@ class LineModel(QAbstractListModel):
             if end is None:
                 return None
             return (line.number in self._folded,
-                    api.fold_summary(self._lines, line.number) if line.number in self._folded else '')
+                    evd_leaf.fold_summary(self._lines, line.number) if line.number in self._folded else '')
         if role == Qt.ItemDataRole.UserRole + 3:
             return self._highlight
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -920,7 +920,7 @@ class LineModel(QAbstractListModel):
 def _line_tooltip(line: CodeLine, offset: int | None = None) -> str:
     info = line.info
     address = (f'at 0x{offset:04X} &mdash; a label here would be named '
-               f'<code>{api.label_for_offset(offset)}</code>') if offset is not None else ''
+               f'<code>{evd_leaf.label_for_offset(offset)}</code>') if offset is not None else ''
     if info is None:
         return '<br>'.join(part for part in (line.text.strip(), address) if part)
     bits = [f'<b>{info.name}</b>']
@@ -1006,7 +1006,7 @@ class LineDelegate(QStyledItemDelegate):
                          right, str(line.number))
 
         offset = index.data(Qt.ItemDataRole.UserRole + 1)
-        if line.kind in (api.KIND_BLANK, api.KIND_COMMENT):
+        if line.kind in (evd_leaf.KIND_BLANK, evd_leaf.KIND_COMMENT):
             offset = None
         if offset is not None:
             # Printed the way the decompiler names a label, so `loc_02BC` in a
@@ -1052,14 +1052,14 @@ class LineDelegate(QStyledItemDelegate):
         def add(text: str, color: str, italic: bool = False, bold: bool = False, key: str = '') -> None:
             out.append((text, color, italic, bold, key))
 
-        structure = _CATEGORY_COLORS[api.CATEGORY_STRUCTURE]
-        if line.kind in (api.KIND_CLOSE, api.KIND_ELSE):
+        structure = _CATEGORY_COLORS[evd_leaf.CATEGORY_STRUCTURE]
+        if line.kind in (evd_leaf.KIND_CLOSE, evd_leaf.KIND_ELSE):
             add(line.text.strip(), structure, bold=True)
-        elif line.kind in (api.KIND_BLANK, api.KIND_UNKNOWN):
+        elif line.kind in (evd_leaf.KIND_BLANK, evd_leaf.KIND_UNKNOWN):
             add(line.text.strip(), _COLOR_VALUE)
-        elif line.kind == api.KIND_COMMENT:
+        elif line.kind == evd_leaf.KIND_COMMENT:
             add(line.comment, _COLOR_COMMENT, italic=True)
-        elif line.kind == api.KIND_EVENT:
+        elif line.kind == evd_leaf.KIND_EVENT:
             add('event ', structure, bold=True)
             add(line.args[0].value if line.args else '', _COLOR_VALUE)
             add(' {', structure, bold=True)
@@ -1073,12 +1073,12 @@ class LineDelegate(QStyledItemDelegate):
                     add(arg.key, _COLOR_ARG_KEY)
                     add('=', _COLOR_VALUE)
                 add(arg.value, _COLOR_STRING if arg.value.startswith('"') else _COLOR_VALUE,
-                    key=api.value_key(arg.value) or '')
+                    key=evd_leaf.value_key(arg.value) or '')
             add(')', _COLOR_VALUE)
             if line.opens:
                 add(' {', structure, bold=True)
 
-        if line.comment and line.kind != api.KIND_COMMENT:
+        if line.comment and line.kind != evd_leaf.KIND_COMMENT:
             add('   ' + line.comment, _COLOR_COMMENT, italic=True)
         if fold is not None and fold[0]:
             # The collapsed body, stated rather than just missing, so a fold is
@@ -1280,7 +1280,7 @@ class StructureView(QListView):
             goto_action = menu.addAction(f'Go to {target}')
             menu.addSeparator()
         yield_action = None
-        if line is not None and line.kind == api.KIND_COMMAND:
+        if line is not None and line.kind == evd_leaf.KIND_COMMAND:
             has_yield = line.arg('yield') is not None
             yield_action = menu.addAction('Clear yield (run next command immediately)' if has_yield
                                           else 'Set yield (pause one game frame)')
@@ -1315,7 +1315,7 @@ class EvdCodeHighlighter(QSyntaxHighlighter):
         self._string  = self._format(_COLOR_STRING)
         self._number  = self._format(_COLOR_NUMBER)
         self._key     = self._format(_COLOR_ARG_KEY)
-        self._brace   = self._format(_CATEGORY_COLORS[api.CATEGORY_STRUCTURE], bold=True)
+        self._brace   = self._format(_CATEGORY_COLORS[evd_leaf.CATEGORY_STRUCTURE], bold=True)
         self._heads   = {
             category: self._format(color, bold=True)
             for category, color in _CATEGORY_COLORS.items()
@@ -1332,22 +1332,22 @@ class EvdCodeHighlighter(QSyntaxHighlighter):
     def highlightBlock(self, text: str | None) -> None:
         if not text:
             return
-        split = api.comment_start(text)
+        split = evd_leaf.comment_start(text)
         code = text if split < 0 else text[:split]
 
         head_start = len(code) - len(code.lstrip())
         stripped = code.strip()
         if stripped.startswith('event ') or stripped.startswith('option'):
-            self.setFormat(head_start, len(stripped.split()[0]), self._heads[api.CATEGORY_STRUCTURE])
+            self.setFormat(head_start, len(stripped.split()[0]), self._heads[evd_leaf.CATEGORY_STRUCTURE])
         else:
             paren = code.find('(')
             if paren > 0:
                 head = code[head_start:paren].strip()
                 if head:
-                    category = (api.CATEGORY_STRUCTURE if head in _STRUCTURE_HEADS
-                                else api.COMMANDS.category(head))
+                    category = (evd_leaf.CATEGORY_STRUCTURE if head in _STRUCTURE_HEADS
+                                else evd_leaf.COMMANDS.category(head))
                     self.setFormat(head_start, len(head),
-                                   self._heads.get(category, self._heads[api.CATEGORY_NORMAL]))
+                                   self._heads.get(category, self._heads[evd_leaf.CATEGORY_NORMAL]))
 
         for i, ch in enumerate(code):
             if ch in '{}':
@@ -1597,17 +1597,17 @@ class CodeView(QWidget):
         number = cursor.blockNumber() + 1
         if not (1 <= number <= len(lines)):
             return ''
-        found = api.token_at(lines[number - 1].text, cursor.positionInBlock())
+        found = evd_leaf.token_at(lines[number - 1].text, cursor.positionInBlock())
         if found is None:
             return ''
         # Only a value counts, and the line model already knows which spans are
         # values, so ask it rather than guessing from the token alone.
-        key = api.value_key(found[0]) or ''
+        key = evd_leaf.value_key(found[0]) or ''
         if not key:
             return ''
         start = found[1]
         return key if any(a <= start < b for a, b in
-                          api.value_occurrences(lines[number - 1], key)) else ''
+                          evd_leaf.value_occurrences(lines[number - 1], key)) else ''
 
     def _refresh_selections(self) -> None:
         selections: list[QTextEdit.ExtraSelection] = []
@@ -1621,7 +1621,7 @@ class CodeView(QWidget):
                 block = self._edit.document().findBlockByNumber(line.number - 1)
                 if not block.isValid():
                     continue
-                for start, end in api.value_occurrences(line, key):
+                for start, end in evd_leaf.value_occurrences(line, key):
                     cursor = QTextCursor(block)
                     cursor.setPosition(block.position() + start)
                     cursor.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
@@ -1678,7 +1678,7 @@ class CommandPalette(QWidget):
 
     def _populate(self) -> None:
         groups: dict[str, QTreeWidgetItem] = {}
-        for name, family, summary in api.COMMANDS.palette_entries():
+        for name, family, summary in evd_leaf.COMMANDS.palette_entries():
             parent = groups.get(family)
             if parent is None:
                 parent = QTreeWidgetItem(self._tree, [family])
@@ -1686,8 +1686,8 @@ class CommandPalette(QWidget):
                 groups[family] = parent
             item = QTreeWidgetItem(parent, [name])
             item.setData(0, Qt.ItemDataRole.UserRole, name)
-            info = api.COMMANDS.get(name)
-            category = api.COMMANDS.category(name)
+            info = evd_leaf.COMMANDS.get(name)
+            category = evd_leaf.COMMANDS.category(name)
             item.setForeground(0, QColor(_category_color(category)))
             tip = [f'<b>{name}</b>']
             if info and info.opcode is not None:
@@ -1756,7 +1756,7 @@ class IdCombo(QComboBox):
         # Reserves the strip paintEvent draws the chevron into, so a long name
         # does not run underneath it.
         self.setStyleSheet('QComboBox { padding-right: 18px; }')
-        for number, name in api.domain_choices(domain):
+        for number, name in evd_leaf.domain_choices(domain):
             self.addItem(f'{number}: {name}', number)
 
         completer = self.completer()
@@ -1767,7 +1767,7 @@ class IdCombo(QComboBox):
             completer.setFilterMode(Qt.MatchFlag.MatchContains)
             completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
 
-        number = api.parse_number(value)
+        number = evd_leaf.parse_number(value)
         index = self.findData(number) if number is not None else -1
         if index >= 0:
             self.setCurrentIndex(index)
@@ -1781,7 +1781,7 @@ class IdCombo(QComboBox):
         '''The field text to write: the id alone, never the display label.'''
         text = self.currentText().strip()
         head, sep, _name = text.partition(':')
-        if sep and api.parse_number(head) is not None:
+        if sep and evd_leaf.parse_number(head) is not None:
             return head.strip()
         return text
 
@@ -1930,8 +1930,8 @@ class ParameterInspector(QWidget):
         # own, which for the commands that spell both out would be a duplicate.
         part_names: set[str] = set()
         for arg in line.args:
-            specs = api.packed_spec(info, arg.key) if arg.key else None
-            if specs and api.parse_number(arg.value) is not None:
+            specs = evd_leaf.packed_spec(info, arg.key) if arg.key else None
+            if specs and evd_leaf.parse_number(arg.value) is not None:
                 part_names.update(name for name, _s, _m in specs)
         self._explicit_parts.update(a.key for a in line.args if a.key in part_names)
 
@@ -1989,7 +1989,7 @@ class ParameterInspector(QWidget):
             self._table.setItem(row, 2, value_item)
             self._table.setItem(row, 3, meaning_item)
 
-            domain = api.symbol_domain(info, name) if role != 'derived' else None
+            domain = evd_leaf.symbol_domain(info, name) if role != 'derived' else None
             if domain:
                 combo = IdCombo(domain, value)
                 self._table.setCellWidget(row, 2, combo)
@@ -2016,20 +2016,20 @@ class ParameterInspector(QWidget):
         means "the script's default character" and assembles to different bytes
         with no error. So the packed word is always what gets written.
         '''
-        specs = api.packed_spec(info, arg.key)
-        word = api.parse_number(arg.value)
+        specs = evd_leaf.packed_spec(info, arg.key)
+        word = evd_leaf.parse_number(arg.value)
         if specs is None or word is None:
             return []
         self._packed[arg.key] = (word, specs)
         shifts = {name: shift for name, shift, _mask in specs}
         rows: list[tuple[str, str, str, str, str]] = []
-        for name, value in api.split_packed(word, specs).items():
+        for name, value in evd_leaf.split_packed(word, specs).items():
             meaning = (info.meaning_of(name) if info else '') or f'Part of the packed `{arg.key}` word.'
             # The id half decimal and the variant byte hex, matching how the
             # decompiler prints them when a command spells them out itself.
             if shifts[name] == 0:
                 text = str(value)
-                resolved = api.SYMBOLS.lookup('character', value)
+                resolved = evd_leaf.SYMBOLS.lookup('character', value)
                 if resolved:
                     meaning = f'{resolved} — {meaning}'
             else:
@@ -2059,12 +2059,12 @@ class ParameterInspector(QWidget):
             owner = value_item.data(Qt.ItemDataRole.UserRole)
             if owner:
                 original = self._packed.get(owner)
-                number = api.parse_number(value)
+                number = evd_leaf.parse_number(value)
                 if original is not None and number is not None:
                     # Only a part the user actually moved overrides the word, so
                     # editing the word directly still wins for the bits the
                     # parts were never touched on.
-                    if number != api.split_packed(original[0], original[1]).get(name):
+                    if number != evd_leaf.split_packed(original[0], original[1]).get(name):
                         part_edits.setdefault(owner, {})[name] = number
                     if name in self._explicit_parts:
                         # The line spells this half out as well as packing it.
@@ -2081,10 +2081,10 @@ class ParameterInspector(QWidget):
 
         for owner, values in part_edits.items():
             specs = self._packed[owner][1]
-            base = api.parse_number(edited.get(owner, ''))
+            base = evd_leaf.parse_number(edited.get(owner, ''))
             if base is None:
                 base = self._packed[owner][0]
-            edited[owner] = f'0x{api.compose_packed(base, values, specs):08X}'
+            edited[owner] = f'0x{evd_leaf.compose_packed(base, values, specs):08X}'
 
         # Keep the line's own order, then anything newly filled in, then the
         # derived fields the table is hiding -- so an unrelated edit never

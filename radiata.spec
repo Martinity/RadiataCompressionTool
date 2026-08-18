@@ -9,7 +9,6 @@ sys.path.insert(0, os.path.abspath('.'))
 hiddenimports = [
     'core.handlers.iso_container',
     *collect_submodules('core.handlers'),
-    *collect_submodules('core.evd'),
     *collect_submodules('ui.editors'),
 ]
 

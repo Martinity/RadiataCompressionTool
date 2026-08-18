@@ -1,5 +1,5 @@
 {
- "generator": "python tools/evd_tool.py extension-data",
+ "generator": "the EVD format layer",
  "commands": {
   "add_battle_character": {
    "engine": "battle_character_entry",
@@ -961,7 +961,7 @@
    ],
    "raw": true,
    "opcode": 208,
-   "evidence": "Command_d0 makes or reconfigures a battle character: arg bits 0/1/3 gate main/owner/notify character selector words, payload bytes 0-5 are plugin ids for groups 1-6 (0xFF skips), byte 6 a group-4 plugin value (arg bit 2 = relative), byte 7 an s16 field (0xFF -> -2), and an arg-bit-4 word packs team/leader. Builds RADI_BTL_ORDER for MakeBtlCharacter or applies ChangeLeader/ChangeTeamID to an existing one; see the branch trace in docs/evd_script_notes.md."
+   "evidence": "Command_d0 makes or reconfigures a battle character: arg bits 0/1/3 gate main/owner/notify character selector words, payload bytes 0-5 are plugin ids for groups 1-6 (0xFF skips), byte 6 a group-4 plugin value (arg bit 2 = relative), byte 7 an s16 field (0xFF -> -2), and an arg-bit-4 word packs team/leader. Builds RADI_BTL_ORDER for MakeBtlCharacter or applies ChangeLeader/ChangeTeamID to an existing one."
   },
   "battle_character_send_message": {
    "engine": "battle_character_send_message",
@@ -1943,7 +1943,7 @@
    ],
    "raw": true,
    "opcode": 55,
-   "evidence": "Command_37 resolves a character (arg bit 0 = explicit selector) and branches on word0: low16 = effect id, byte2 = mode (1 tail, 2 mosaic, 0xFF flag toggle), byte3 = sub mode (1 create, 2 delete, 3 clear-points/params). Inline attach-object names use the fixed four-word slot; see the branch trace in docs/evd_script_notes.md."
+   "evidence": "Command_37 resolves a character (arg bit 0 = explicit selector) and branches on word0: low16 = effect id, byte2 = mode (1 tail, 2 mosaic, 0xFF flag toggle), byte3 = sub mode (1 create, 2 delete, 3 clear-points/params). Inline attach-object names use the fixed four-word slot."
   },
   "character_expression_control": {
    "engine": "character_expression_control",
@@ -2196,7 +2196,7 @@
     }
    ],
    "opcode": 210,
-   "evidence": "Command_d2 builds or reads a per-character script param holder (r_chrScriptParamHolder.h): mode arg>>2 selects building a battle-team member list (sieves), picking a free stand position (GetStandPosition + Ground_CanBeArranged, shuffled or sorted by distance to target), listing child characters, or reading one element; the result count/element is always written to the event value named by the selector word's high half. See the branch trace in docs/evd_script_notes.md."
+   "evidence": "Command_d2 builds or reads a per-character script param holder (r_chrScriptParamHolder.h): mode arg>>2 selects building a battle-team member list (sieves), picking a free stand position (GetStandPosition + Ground_CanBeArranged, shuffled or sorted by distance to target), listing child characters, or reading one element; the result count/element is always written to the event value named by the selector word's high half."
   },
   "check_map_change": {
    "engine": "map_change_check",
@@ -2522,7 +2522,7 @@
     }
    ],
    "opcode": 160,
-   "evidence": "Command_a0 acts on the script's default character through a 14-entry jump table on arg&0x3F: fall start (mode 1, raw float operands), combo branch (mode 3), plugin activation 0x501/0x502 (modes 4/5), flag-bit writes from arg bit 7 (modes 7/8/9), attack-param/collision attach or Action::DoDamageForVolty into event value 0x11 (mode 0xB), SetStsInvincible (mode 0xC), and MagicChargeCountDownStart (mode 0xD). Battle paths gate on config flag 0xDC; see the branch trace in docs/evd_script_notes.md."
+   "evidence": "Command_a0 acts on the script's default character through a 14-entry jump table on arg&0x3F: fall start (mode 1, raw float operands), combo branch (mode 3), plugin activation 0x501/0x502 (modes 4/5), flag-bit writes from arg bit 7 (modes 7/8/9), attack-param/collision attach or Action::DoDamageForVolty into event value 0x11 (mode 0xB), SetStsInvincible (mode 0xC), and MagicChargeCountDownStart (mode 0xD). Battle paths gate on config flag 0xDC."
   },
   "control_camera_animation": {
    "engine": "camera_color_anim",
