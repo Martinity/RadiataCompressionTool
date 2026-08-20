@@ -188,6 +188,15 @@ QToolTip {
     color: {TEXT_MUTED};
 }
 
+QGroupBox {
+    margin-top: 1.5em;
+    padding-top: 0.5em;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    top: 0px;
+}
+
 /* ====================== Custom Objects ====================== */
 
 /* ============== Text ============== */

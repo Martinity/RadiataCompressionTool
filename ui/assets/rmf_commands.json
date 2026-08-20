@@ -1,0 +1,324 @@
+// Both the PutText and CTalk jump tables used by the RMF engine.
+// opcodes w/ prefix "0x" are CTalk, without the prefix PutText
+{
+  //-----------------------------------------------------------------------------------------------//
+  //------------------------------------------- PutText -------------------------------------------//
+  //-----------------------------------------------------------------------------------------------//
+  {
+    "opcode": "00",
+    "name": "End",
+    "payload_size": 0,
+    "description": "End the message sequence. Clear pointers and set render state 2."
+  },
+  {
+    "opcode": "01",
+    "name": "Space",
+    "payload_size": 0,
+    "description": "English: Advance by (width * 12) >> 12\nJapanese: Advance by a cell (width * 32) >> 12"
+  },
+  {
+    "opcode": "02",
+    "name": "Color",
+    "payload_size": 16,
+    "description": "Word 1 colors the text, word 2 colors the drop shadow. R G B A little endian."
+  },
+  {
+    "opcode": "03",
+    "name": "Dimensions",
+    "payload_size": 16,
+    "description": "Glyph cell width then height in U8.8 fixed point format. Word 2 multiplies into word 1."
+  },
+  {
+    "opcode": "04",
+    "name": "Position",
+    "payload_size": 16,
+    "description": "Word 1 stores the anchor for the text (x, y) in 16bit signed int. Word 2 is relatve cursor position."
+  },
+  {
+    "opcode": "05",
+    "name": "Text Style",
+    "payload_size": 0,
+    "description": "Stored subcommand % 3 into +0x0C. Every character code is stamped with the style in the high nibble."
+  },
+  {
+    "opcode": "06",
+    "name": "Signal",
+    "payload_size": 8,
+    "description": "_CbSignal fallthrough."
+  },
+  {
+    "opcode": "07",
+    "name": "Text Speed",
+    "payload_size": 8,
+    "description": "Text speed in U8.8 fixed point format."
+  },
+  {
+    "opcode": "09",
+    "name": "Style Save/Load",
+    "payload_size": 8,
+    "description": "The stored style. Used as a bitfield containing; text color, shadow color, pen x, pen y, glyph width, glyph height, text style, and text speed."
+  },
+  {
+    "opcode": "0A",
+    "name": "Newline",
+    "payload_size": 0,
+    "description": "Advance the pen y and reset the pen x to anchor."
+  },
+  //-----------------------------------------------------------------------------------------------//
+  //--------------------------------------- CTalk Callbacks ---------------------------------------//
+  //-----------------------------------------------------------------------------------------------//
+  {
+    "opcode": "0x00",
+    "name": "_End",
+    "payload_size": 0,
+    "description": "End the message. Destruct the talk session."
+  },
+  {
+    "opcode": "0x01",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "Space NOP"
+  },
+  {
+    "opcode": "0x02",
+    "name": "_CbNop",
+    "payload_size": 16,
+    "description": "Color"
+  },
+  {
+    "opcode": "0x03",
+    "name": "_CbNop",
+    "payload_size": 16,
+    "description": "Dimensions"
+  },
+  {
+    "opcode": "0x04",
+    "name": "_CbNop",
+    "payload_size": 16,
+    "description": "Position"
+  },
+  {
+    "opcode": "0x05",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "TextStyle"
+  },
+  {
+    "opcode": "0x06",
+    "name": "_CbSignal",
+    "payload_size": 8,
+    "description": "State polling. Used for syncronization."
+  },
+  {
+    "opcode": "0x07",
+    "name": "_CbNop",
+    "payload_size": 8,
+    "description": "TextSpeed"
+  },
+  {
+    "opcode": "0x08",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "---"
+  },
+  {
+    "opcode": "0x09",
+    "name": "_CbNop",
+    "payload_size": 8,
+    "description": "StyleSave / StyleRestore"
+  },
+  {
+    "opcode": "0x0A",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "Newline"
+  },
+  {
+    "opcode": "0x0B",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "---"
+  },
+  {
+    "opcode": "0x0C",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "---"
+  },
+  {
+    "opcode": "0x0D",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "---"
+  },
+  {
+    "opcode": "0x0E",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "---"
+  },
+  {
+    "opcode": "0x0F",
+    "name": "_CbNop",
+    "payload_size": 0,
+    "description": "---"
+  },
+  {
+    "opcode": "0x10",
+    "name": "_CbSpeaker",
+    "payload_size": 16,
+    "description": "Word 1 stores the speaker table index. Word 2 stores the mode in a bit field."
+  },
+  {
+    "opcode": "0x11",
+    "name": "_CbBupVisible",
+    "payload_size": -1,
+    "description": "Variable payload size. Word 1 stores the speaker index. Then stores the visibility state."
+  },
+  {
+    "opcode": "0x12",
+    "name": "_CbBupDirection",
+    "payload_size": -1,
+    "description": "Variable payload size. Word 1 stores the speaker index. Resolves the bustup body."
+  },
+  {
+    "opcode": "0x13",
+    "name": "_CbBupPosition",
+    "payload_size": -1,
+    "description": "Variable payload size. Word 1 stores the speaker index. Byte-identical to _CbBupDirection."
+  },
+  {
+    "opcode": "0x14",
+    "name": "_CbBFace",
+    "payload_size": 16,
+    "description": "Word 1 stores the speaker index. Word 2 stores the face mode (expression)."
+  },
+  {
+    "opcode": "0x15",
+    "name": "_CbSpeak",
+    "payload_size": 16,
+    "description": "Word 1 stores the speaker index. Word 2 stores the speak timing flags for independent speech."
+  },
+  {
+    "opcode": "0x16",
+    "name": "_CbSpeakingCycle",
+    "payload_size": 16,
+    "description": "Word 1 stores the speaker index. Word 2 stores the speaking cycle timings."
+  },
+  {
+    "opcode": "0x17",
+    "name": "_CbEmotion",
+    "payload_size": -1,
+    "description": "Variable payload size. Word 1 stores the speaker index. Next byte stores the emotion mode flags \
+      Word 2 stores magnitude of the emotion."
+  },
+  {
+    "opcode": "0x18",
+    "name": "_CbErr",
+    "payload_size": 0,
+    "description": "Assertion trap 0x18"
+  },
+  {
+    "opcode": "0x19",
+    "name": "_CbErr",
+    "payload_size": 0,
+    "description": "Assertion trap 0x19"
+  },
+  {
+    "opcode": "0x1A",
+    "name": "_CbEyeMove",
+    "payload_size": -1,
+    "description": "Variable payload size. Half-Word@2 stores the speaker index. Byte@4 stores the loop target. Byte@5 stored the eye move duration. Half-Word@6 stores the X/Y coordinates of the eye move target."
+  },
+  {
+    "opcode": "0x1B",
+    "name": "_CbErr",
+    "payload_size": 0,
+    "description": "Assertion trap 0x1B"
+  },
+  {
+    "opcode": "0x1C",
+    "name": "_CbEyeNumber",
+    "payload_size": 16,
+    "description": "Half-Word@2 stores the speaker index. Byte@4 stores the eye variant."
+  },
+  {
+    "opcode": "0x1D",
+    "name": "_CbBupReleaseCount",
+    "payload_size": 16,
+    "description": "Half-Word@2 stores the speaker index. Half-Word@4 stores the bustup ref/release count."
+  },
+  {
+    "opcode": "0x1E",
+    "name": "_CbNameWindow",
+    "payload_size": 32,
+    "description": "Half-Word@2, speaker index. Byte@4, style bit mask. HW@6, signed X/Y anchor point. HW@8, override name id"
+  },
+  {
+    "opcode": "0x1F",
+    "name": "_CbErr",
+    "payload_size": 0,
+    "description": "Assertion trap 0x1F"
+  },
+  {
+    "opcode": "0x20",
+    "name": "_CbWaitTime",
+    "payload_size": 16,
+    "description": "HW@2, wait time in milliseconds (inf=0xFFFF). HW@4, waiting flags (blinking curosr, timed wait...)"
+  },
+  {
+    "opcode": "0x21",
+    "name": "_CbErr",
+    "payload_size": 0,
+    "description": "Assertion trap 0x21"
+  },
+  {
+    "opcode": "0x22",
+    "name": "_CbWaitSelect2",
+    "payload_size": 16,
+    "description": "HW@2, time limit in milliseconds (0=inf). HW@4, option count low 7 bites, bit 0x80 cursor state flag."
+  },
+  {
+    "opcode": "0x23",
+    "name": "_CbProhibitSkip",
+    "payload_size": 8,
+    "description": "B@2, flag to set the prohibit skip flag: 0=can skip."
+  },
+  {
+    "opcode": "0x24",
+    "name": "_CbWaitSelect2",
+    "payload_size": 16,
+    "description": "Same as WaitSelect but with a default choice first."
+  },
+  {
+    "opcode": "0x25",
+    "name": "_CbSentence",
+    "payload_size": 16,
+    "description": "HW@2, flags. HW@4, glyph count."
+  },
+  {
+    "opcode": "0x26",
+    "name": "_CbProper",
+    "payload_size": 16,
+    "description": "Called with the first callback for a named entity to get and set a \
+      proper name into a scratch buffer. To be utilized throughout the message sequence."
+  },
+  {
+    "opcode": "0x27",
+    "name": "_CbJump",
+    "payload_size": -1,
+    "description": "B@2 + upto 6 mode Words. Acts as a message sequence prologue. Executing setup before the message packets. Jumping to the first standard packet (non-0F7*) opcode"
+  },
+  {
+    "opcode": "0x28",
+    "name": "_CbPlaySe",
+    "payload_size": 16,
+    "description": "B@2, channel. HW@4, sound ID. Channel greater than 0x10 causes a signed read."
+  },
+  {
+    "opcode": "0x29",
+    "name": "_CbErr",
+    "payload_size": 0,
+    "description": "Assertion trap 0x29"
+  },
+}

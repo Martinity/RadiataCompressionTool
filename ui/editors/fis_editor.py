@@ -5,7 +5,7 @@ from typing import Callable, Any
 from pathlib import Path
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint, QTimer, QObject
 from PyQt6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, QScrollArea, QSizePolicy, 
+    QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, QScrollArea, QSizePolicy,
     QFrame, QFileDialog, QListWidget, QListView, QAbstractItemView, QListWidgetItem, QColorDialog,
     QSlider, QButtonGroup
 )
@@ -196,8 +196,9 @@ class InteractiveCanvas(QLabel):
 class FisEditorWidget(BaseEditor):
     '''Displays and edits a decoded FIS texture (Indexed image) with palette editing and undo/redo.'''
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, data_resolver=None) -> None:
         super().__init__(parent)
+        self._data_resolver = data_resolver
         self.img:   QImage  | None = None
         self.info:  FISInfo | None = None
         self.raw_fis: bytes | None = None
@@ -213,7 +214,7 @@ class FisEditorWidget(BaseEditor):
         self._is_panning:  bool  = False
 
         self._setup_ui()
-        
+
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -330,7 +331,7 @@ class FisEditorWidget(BaseEditor):
         self._palette_list.customContextMenuRequested.connect(self._on_palette_context)
 
         lay.addWidget(self._palette_list, stretch=1)
-    
+
         return frame
 
 ###----------------------------------- Contractuals ---------------------------------------------###
@@ -599,7 +600,7 @@ class FisEditorWidget(BaseEditor):
             logger.error(f'FIS: QImage.save() failed for {path}')
             return
         logger.info(f'FIS: exported to {Path(path).name}')
-    
+
 ###--------------------------------------- Event Handlers ------------------------------------------------###
 
     def _on_color_selected(self, index: int) -> None:
@@ -609,7 +610,7 @@ class FisEditorWidget(BaseEditor):
     def _on_tool_changed(self, button_id: int) -> None:
         '''0 = Brush, 1 = Bucket'''
         self._image_label.current_tool = 'brush' if button_id == 0 else 'bucket'
-    
+
     def _on_brush_size_changed(self, size: int) -> None:
         self._image_label.brush_size = size
 
@@ -636,7 +637,7 @@ class FisEditorWidget(BaseEditor):
                     self._scroll_area.unsetCursor()
                     return True
         return super().eventFilter(source, event)
-    
+
     def wheelEvent(self, event) -> None:
         '''Ctrl+scroll to adjust image size'''
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

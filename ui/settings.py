@@ -1,4 +1,4 @@
-'''Stores and Sets application states for new session ease of use'''
+'''Session persistence + cross-platform shortcuts'''
 from __future__ import annotations
 
 from enum import Enum, auto

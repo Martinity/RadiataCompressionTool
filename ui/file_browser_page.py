@@ -557,7 +557,7 @@ class FileBrowserBehavior(QObject):
         """
         if self._current_session and not self._current_session.is_done():
             self._current_session.cancel()
-        new_editor = editor_class()
+        new_editor = editor_class(data_resolver=self.dispatcher)
 
         # Build the dispatch funtion that will close confirm/reject callbacks
         def dispatch_fn(node: VfsNode, data: Any) -> None:
@@ -623,7 +623,7 @@ class FileBrowserBehavior(QObject):
             )
             return
         # Data passed all guards, finalize the editor initialization
-        session.complete(payload.data, self.dispatcher.get_node_data)
+        session.complete(payload.data)
         logger.debug(f'{session} populated successfully.')
 
     ###-------------------- Search --------------------###

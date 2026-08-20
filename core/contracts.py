@@ -10,12 +10,13 @@ from PyQt6.QtCore import pyqtSignal
 from core.node import VfsNode
 from core.native.block_device import BlockDevice
 if TYPE_CHECKING:
-    from core.workers import TaskHandle, IsoRebuildFlags
+    from core.workers import TaskHandle, IsoRebuildFlags, EditorPayload
+    from core.dispatcher import Dispatcher
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
-###-------------------------------------------- Special Return --------------------------------------------------###
+###-------------------------------------------- Special Return Structs --------------------------------------------------###
 
 class RebuildResult(NamedTuple):
     '''Structured return value for handlers that mutate linked nodes (kods w/datacenter)'''
@@ -215,13 +216,13 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta): # type: ignore
     dataChanged = pyqtSignal(bool)              # Data changed bool
     is_mutable = True
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, data_resolver: Dispatcher | None = None):
         super().__init__(parent)
         self.current_node:      VfsNode | None = None
-        self._is_dirty:         bool           = False
-        self._original_payload: Any            = None
-        self._pending_data:     Any            = None
-        self._data_resolver:    Callable[[VfsNode], bytes] | None = None
+        self._is_dirty:         bool = False
+        self._original_payload: Any = None
+        self._pending_data:     Any = None
+        self._data_resolver:    Dispatcher | None = data_resolver
 
     def __repr__(self) -> str:
         node_name = self.current_node.name if self.current_node else "None"
@@ -235,13 +236,12 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta): # type: ignore
         '''Called when editor is open for data loading feedback, while waiting for BG thread'''
         self.current_node = node
 
-    def receive_data(self, result: Any, data_resolver: Callable[[VfsNode], bytes] | None = None) -> None:
+    def receive_data(self, result: Any) -> None:
         '''
         Called when the BG thread is done data processing
         (default) if result is bytes, stores as original data and call _populate_ui(result).
         Override for handlers that return non-bytes results.
         '''
-        self._data_resolver = data_resolver
         self._original_payload = result
         if isinstance(result, bytes):
             self.set_dirty(False)
@@ -262,6 +262,14 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta): # type: ignore
     def redo(self) -> None:
         pass
 
+    def receive_request(self, payload: Any) -> None:
+        '''Callback for a request from the data resolver
+        payload = None if the request could not be resolved
+        payload = EditorPayload if the request was resolved successfully'''
+        if payload is None:
+            logger.error('request_payload failed to resolve an EditorPayload.')
+            return
+
     ### Lifecycle
     def cleanup(self) -> None:
         '''Editor Destructor'''
@@ -271,11 +279,15 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta): # type: ignore
         self.set_dirty(False)
 
     ### Data access
-    def request_node_data(self, target_node: VfsNode) -> bytes:
-        if self._data_resolver:
-            return self._data_resolver(target_node)
-        logger.warning(f'Data resolver not initialized. Cannot fetch data for {target_node.name}')
-        return b''
+    def request_payload(self, hid: tuple[int, ...]) -> None:
+        if not isinstance(self._data_resolver, Dispatcher):
+            raise TypeError(f'Ensure to set _data_resolver during recieve_data before calling request_payload')
+        self._data_resolver.request_editor_payload(hid, callback=self.receive_request)
+
+    def request_raw_data(self, hid: tuple[int, ...]) -> None:
+        if not self._data_resolver:
+            raise TypeError(f'Ensure to set _data_resolver during recieve_data before calling request_raw_data')
+        self._data_resolver.request_raw_data(hid, callback=self.receive_request)
 
     def current_data(self) -> Any:
         '''Return the live state'''

@@ -40,8 +40,9 @@ class HexEditorWidget(BaseEditor):
     '''Mutable global fallback editor'''
     undo_state_changed = pyqtSignal(bool, bool)  # (can_undo, can_redo)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, data_resolver = None) -> None:
         super().__init__(parent)
+        self._data_resolver = data_resolver
         self.model: HexTableModel | None = None
 
         self.undo_stack = QUndoStack(self)

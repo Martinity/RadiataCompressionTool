@@ -51,7 +51,10 @@ class VfsNavigator:
         return self._walk_chain(chain)
 
     def resolve_data_from_hid(self, target: tuple[int, ...] | None) -> bytes | None:
-        '''Resolve HID to raw bytes. snapshot -> expand missing -> re-read. In order of hids idx'''
+        '''
+        Resolve HID to raw bytes. snapshot -> expand missing -> re-read. In order of hids indexes.
+        Returning pending data first if exists.
+        '''
         if not target:
             return None
         logger.debug(f'Resolving datacenter header ID:{target}.')

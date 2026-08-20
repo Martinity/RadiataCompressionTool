@@ -126,8 +126,9 @@ class _Snapshot:
 class EvdEditor(BaseEditor):
     '''EVDCODE editor with a structure view and a text view over one script.'''
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, data_resolver=None) -> None:
         super().__init__(parent)
+        self._data_resolver = data_resolver
         self._code:     str = ''
         self._lines:    list[CodeLine] = []
         self._raw:      bytes = b''

@@ -6,7 +6,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from PyQt6.QtWidgets import QFrame, QWidget, QVBoxLayout, QLabel, QProgressBar
+from PyQt6.QtGui import QIcon, QPixmap, QPainter
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtSvg import QSvgRenderer
+
 
 def get_resource_path(relative_path: str | Path) -> Path:
     '''
@@ -101,3 +104,39 @@ class ToastProgressBar(QWidget):
         x = parent_rect.width() - self.width() - padding_x
         y = parent_rect.height() - self.height() - padding_y
         self.setGeometry(x, y, self.width(), self.height())
+
+
+PLAY_SVG = b"""
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24">
+    <path fill="#000000" d="M7 4v16l13-8L7 4z"/>
+</svg>
+"""
+
+PAUSE_SVG = b"""
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="24" height="24" viewBox="0 0 24 24">
+    <path fill="#000000" d="M6 4h5v16H6V4zm8 0h5v16h-5V4z"/>
+</svg>
+"""
+
+def play_svg(color: str, size: int) -> bytes:
+    return PLAY_SVG.replace(b'#000000', color.encode()).replace(b'24', str(size).encode())
+
+def pause_svg(color: str, size: int) -> bytes:
+    return PAUSE_SVG.replace(b'#000000', color.encode()).replace(b'24', str(size).encode())
+
+def svg_to_icon(mode: str, size=24) -> QIcon:
+    '''Return a QIcon for Play/Pause QPushButton's, ensures proper cross-platform rendering.
+    Button color is not the active theme but the theme at the time of rendering.'''
+    from ui.theme_manager import ThemeManager
+    c = ThemeManager.active_theme.TEXT
+    svg = play_svg(c, size) if mode == 'play' else pause_svg(c, size) if mode == 'pause' else None
+    if not svg: raise (ValueError(f'Invalid mode: {mode}, must be "play" or "pause"'))
+    renderer = QSvgRenderer(svg)
+    icon = QIcon()
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    with QPainter(pixmap) as painter:
+        renderer.render(painter)
+    return QIcon(pixmap)

@@ -18,7 +18,7 @@ from core.registry import Registry
 from core.node import VfsManager, ModTracker, VfsNode
 from core.workers import (
     TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle, LogChannel,
-    IsoRebuildFlags, ActionDef
+    IsoRebuildFlags, ActionDef, EditorPayload
 )
 from core.native.block_device import BlockDevice
 from core.navigator import VfsNavigator
@@ -308,6 +308,43 @@ class Dispatcher(QObject):
             channel=LogChannel.REBUILD,  # Rebuild is always rebuild page
         )
         return task_handle
+
+    def request_editor_payload(
+        self,
+        hid: tuple[int, ...],
+        callback: Callable[[Any], None]
+    ) -> None:
+        '''Called by an active editor to request an editor payload for a given node hid.'''
+        if not self.nav:
+            callback(None)
+            return
+        task_handle = self._start(
+            Actions.fetch_for_editor,
+            hid,
+            self.nav,
+        )
+        def _on_finished(success: bool, payload: Any) -> None:
+            task_handle.finished.disconnect(_on_finished)
+            callback(payload if success else None)
+        task_handle.finished.connect(_on_finished)
+
+    def request_raw_data(
+        self,
+        hid: tuple[int, ...],
+        callback: Callable[[Any], None]
+    ) -> None:
+        '''Called by an active editor to request raw data for a given node hid.'''
+        if not self.nav or not self.vfs:
+            callback(None)
+            return
+        data = self.nav.resolve_data_from_hid(hid) # Ensure data is resolved before looking up the node
+        node = self.vfs.get_vfs_node_by_id(hid)
+        if node is not None and data is not None:
+            payload = EditorPayload(node=node, data=data)
+            callback(payload)
+        else:
+            logger.error(f'Failed to resolve data or node for hid: {hid}')
+            callback(None)
 
     ###------------------------------- VFS node resolution -------------------------------###
 

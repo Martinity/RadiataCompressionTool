@@ -324,6 +324,62 @@
     ],
     "extension": ".kods"
   },
+  "26.0.0": {
+    "title": "Playstation Glyphs",
+    "description": "No description",
+    "tags": [
+      "Font"
+    ],
+    "extension": null
+  },
+  "26.2.0": {
+    "title": "Janapese Glyphs",
+    "description": "No description",
+    "tags": [
+      "Font"
+    ],
+    "extension": null
+  },
+  "26.3.0": {
+    "title": "Japanese Glyphs",
+    "description": "No description",
+    "tags": [
+      "Font"
+    ],
+    "extension": null
+  },
+  "26.10.0": {
+    "title": "Glyph Encoding Table",
+    "description": "No description",
+    "tags": [
+      "Font"
+    ],
+    "extension": null
+  },
+  "26.11.0": {
+    "title": "Glyph Encoding Table",
+    "description": "No description",
+    "tags": [
+      "Font"
+    ],
+    "extension": null
+  },
+  "26.22.0": {
+    "title": "Glyph Spacing Table",
+    "description": "No description",
+    "tags": [
+      "Font"
+    ],
+    "extension": null
+  },
+  "26.23.0": {
+    "title": "Glyph Spacing Table",
+    "description": "No description",
+    "tags": [
+      "Font"
+    ],
+    "extension": null
+  },
   "27": {
     "title": "Step1 00 Save Load",
     "description": "",

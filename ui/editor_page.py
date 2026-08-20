@@ -118,10 +118,10 @@ class EditorSession:
         if self.state_changed_callback:
             self.state_changed_callback(target)
 
-    def complete(self, data: Any, data_resolver: Callable | None = None) -> None:
+    def complete(self, data: Any) -> None:
         '''Populate the editor with processed data'''
         self._transition('ready')
-        self.editor.receive_data(data, data_resolver)
+        self.editor.receive_data(data)
 
     def fail(self, reason: str) -> None:
         '''Show load error in editor'''
