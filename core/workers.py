@@ -17,7 +17,7 @@ from pathlib import Path
 from enum import auto, Enum, Flag
 from dataclasses import dataclass
 from typing import Callable, Any, TYPE_CHECKING, NamedTuple
-from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool
+from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool, Qt
 from core.contracts import LeafHandler, ContainerHandler
 from core.native.block_device import BlockDevice
 if TYPE_CHECKING:
@@ -165,7 +165,11 @@ class TaskCoordinator(QObject):
         '''Store *handle* and schedule its removal when finished fires.'''
         handle_id = id(handle)
         self._active_handles[handle_id] = handle
-        handle.finished.connect(lambda *_: self._active_handles.pop(handle_id, None))
+        # DirectConnection to ensure that finished can be triggerd immediately regardless of main thread event loop
+        handle.finished.connect(
+            lambda *_: self._active_handles.pop(handle_id, None),
+            Qt.ConnectionType.DirectConnection # type: ignore this valid
+        )
 
     def start_task(
         self,
@@ -254,19 +258,34 @@ class TaskCoordinator(QObject):
         thread.start()
         return handle
 
-    def shutdown(self):
-        active_ids = [h.task_id for h in self._active_handles.values()]
-        if len(active_ids) > 0:  # Only log if there are active tasks
+    def shutdown(self, drain_timeout: float = 10.0, poll_interval: float = 0.02) -> bool:
+        '''
+        Cancel any task held by the retention map, returning True if all were cancelled.
+        drain_timeout needs to cover the longest gap between two checkpoint() calls in any
+        dedicated task.
+        '''
+        open_handles = list(self._active_handles.values())
+        if open_handles:  # Only log if there are active tasks
             logger.info(
                 'TaskCoordinator: Cancelling pending tasks...'
-                f'Unfinished Active Task IDs still in memory: {active_ids}'
+                f'Unfinished Active Task IDs still in memory: {[h.task_id for h in open_handles]}'
             )
-        for handle_id, handle in list(self._active_handles.items()):
+        for handle in open_handles:
             logger.debug(f'TaskCoordinator Force-Cancelling: Task #{handle.task_id}')
             handle.cancel()
+        # QThreadPool handles
         self.thread_pool.clear()
         if not self.thread_pool.waitForDone(2000):
             logger.warning('TaskCoordinator: Some threads did not finish in time.')
+        open_ids = {id(h) for h in open_handles}
+        deadline = time.monotonic() + drain_timeout
+        while open_ids & self._active_handles.keys():
+            if time.monotonic() > deadline:
+                still_pending = [h.task_id for h in open_handles if id(h) in self._active_handles]
+                logger.warning(f'TaskCoordinator: Shutdown deadline exceeded. Still pending: {still_pending}')
+                return False
+            time.sleep(poll_interval)
+        return True
 
 class TaskHandle(QObject):
     '''State machine and handle for background tasks, thread-safe'''

@@ -63,7 +63,9 @@ class Dispatcher(QObject):
     # ISO verification
     iso_verified = pyqtSignal(str)                   # Build string. Used for get_build and verify_iso with the difference being specificity
     # Generic node actions
-    action_complete  = pyqtSignal(ActionResult)            # ActionResult
+    action_complete  = pyqtSignal(ActionResult)      # ActionResult
+    # Metadata inconsistencies
+    ghost_node_confirmed_missing = pyqtSignal(tuple) # hids
 
     def __init__(self) -> None:
         super().__init__()
@@ -76,7 +78,6 @@ class Dispatcher(QObject):
         self.task_coordinator = TaskCoordinator()
         self.relay            = TaskRelay()
         self._active_channel  = LogChannel.BROWSER
-        self._pending_expansions: dict[tuple[int, ...], list[Callable[[bool, VfsNode], None]]] = {}
         self._setup_connections()
 
     def _setup_connections(self) -> None:
@@ -84,7 +85,8 @@ class Dispatcher(QObject):
         self.tracker.node_modified.connect(self.node_changed.emit)
         self.tracker.node_reverted.connect(self.node_changed.emit)
         self.tracker.state_changed.connect(self._relay_tracking_state)
-        self.expand_requested.connect(self._handle_expand_request, Qt.ConnectionType.QueuedConnection) # type: ignore this is valid
+        self.expand_requested.connect(self._handle_expand_requested, Qt.ConnectionType.QueuedConnection) # type: ignore this is valid
+        self.ghost_node_confirmed_missing.connect(self._handle_ghost_node_confirmed_missing, Qt.ConnectionType.QueuedConnection) # type: ignore this is valid
 
     def set_active_channel(self, channel: LogChannel) -> None:
         '''Set the log channel to a new log window. Must be manually reset to browser after task.'''
@@ -122,7 +124,7 @@ class Dispatcher(QObject):
 
     ###----------------------------------- Public ----------------------------------------###
 
-    def load_source(self, source: Path | VfsNode) -> TaskHandle | list[VfsNode]:
+    def load_source(self, source: Path | VfsNode) -> TaskHandle | list[VfsNode] | None:
         '''Route a block file or VfsNode to the appropriate handler.'''
         if isinstance(source, Path):
             handler_class = Registry.get_handler(source)
@@ -134,49 +136,39 @@ class Dispatcher(QObject):
                 not (isinstance(handler_class, type) and issubclass(handler_class, IsoHandler))
             ):
                 logger.warning(f'No handler for {source.name}, {handler_class}')
-                return []
+                return
             resolved = resolve_raw_disc_device(source)
             source_stream = BlockDevice(str(resolved), sector_size=2048)
             handler = handler_class(source_stream)
             return self._load_physical(handler)
 
-        if source.children or source.expansion_pending:
-            return source.children or []
+        if source.children:
+            return source.children
 
-        profile = Registry.get_handler_profile(source)
-        if not profile:
-            logger.warning(f'No profile or {source.name}, cannot expand.')
-            return []
+        if not self.nav:
+            logger.warning(f'No navigator, cannot expand {source.name}.')
+            return None
 
-        action_def = profile.primary_expand_action()
-        if not action_def:
-            logger.debug(f'{source.name} has no TREE_EXPAND action')
-            return []
-
-        source.expansion_pending = True
-        task_handle = self._start(
-            Actions.dispatch,
-            action_def,
-            source,
-            self.nav
-        )
-        task_handle.finished.connect(self._on_action_complete)
-        return []  # signal populates the tree ^^^
+        self.nav.request_expansion(source)
+        return [] # node_changed signal populates the tree
 
     def get_node_data(self, node: VfsNode) -> bytes:
-        '''Return the raw bytes of the requested node, unwrapping virtual to the physical source'''
+        '''Return the raw bytes of the requested node, unwrapping virtual to the physical source.
+        Actual tree navigation/resolution happens in VfsNavigator.'''
         pending = node.pending_data
         if pending is not None:
             return pending
         if node.is_physical:
-            if not self.active_handler:
+            handler = self.active_handler
+            if handler is None:
                 logger.error(f'No physical handler for node: {node.hierarchical_id_str}')
                 return b''
-            return self.active_handler.get_raw_node(node)
-        if not self.nav:
+            return handler.get_raw_node(node)
+        nav = self.nav
+        if nav is None:
             logger.error(f'No VfsNavigator initialized. Cannot resolve node: {node.hierarchical_id_str}')
             return b''
-        return self.nav.unwrap_chain(node)
+        return nav.unwrap_chain(node)
 
     def apply_edit(
         self,
@@ -263,13 +255,16 @@ class Dispatcher(QObject):
                 message=f'No ActionDef registered for "{action_name}" on node: {node.hierarchical_id_str}'
             ))
             return
-        if action_def.action_type is ActionType.TREE_EXPAND and node.children: # Dedup expansions
-            self.action_complete.emit(ActionResult(
-                action_name=action_name,
-                node=node,
-                status=ActionStatus.FAILURE,
-                message=f'{node.name} has already been expanded previously. Duplicate expansion cancelled.'
-            ))
+        if action_def.action_type is ActionType.TREE_EXPAND:
+            if node.last_expansion_success is not None:  # Already expanded (dedup)
+                self.action_complete.emit(ActionResult(
+                    action_name=action_name,
+                    node=node,
+                    status=ActionStatus.FAILURE,
+                    message=f'{node.name} has already been expanded previously. Duplicate expansion cancelled.'
+                ))
+                return
+            self.nav.request_expansion(node, lambda success, _node: None)
             return
         task_handle = self._start(
             Actions.dispatch,
@@ -346,143 +341,31 @@ class Dispatcher(QObject):
             logger.error(f'Failed to resolve data or node for hid: {hid}')
             callback(None)
 
-    ###------------------------------- VFS node resolution -------------------------------###
+    ###------------------------------- VFS node resolution passthroughs -------------------------------###
 
     def resolve_and_unpack_all(self, target_hid: tuple[int, ...], on_success: Callable[[list[VfsNode]], None]) -> None:
-        '''Asynchronously unpack recursively untill no more ActionType.TREE_EXPAND actionable nodes remain.'''
-        def _on_parent_resolved(node: VfsNode) -> None:
-            self._deep_unpack_layer([node], [], on_success)
-        self.resolve_ghost_node(target_hid, _on_parent_resolved)
-
-    def _deep_unpack_layer(self, queue: list[VfsNode], expanded: list[VfsNode], on_success: Callable[[list[VfsNode]], None]) -> None:
-        '''
-        Consumes `queue` synchronously as along as each node resolves immediately via _expand_once fast track.
-        If asynchronous expansion is needed stops and returns.
-        Expansions' callback eventually fires from Qt event loop, re-entering the method and starting over.
-        '''
-        while queue:
-            node = queue.pop(0)
-            waiting_sync = True
-            settled_sync = False
-            def _continue(success: bool, expanded_node: VfsNode) -> None:
-                nonlocal settled_sync
-                if success and expanded_node.children:
-                    queue.extend(expanded_node.children)
-                else:
-                    expanded.append(expanded_node)
-                if waiting_sync:
-                    settled_sync = True
-                else:  # Async
-                    self._deep_unpack_layer(queue, expanded, on_success)
-            self._expand_once(node, _continue)
-            waiting_sync = False
-            if not settled_sync:
-                return  # _continue will be called from Qt event loop
-        on_success(expanded)
+        '''Asynchronous entrypoint for unpack recursively untill no more ActionType.TREE_EXPAND actionable nodes remain.'''
+        if not self.nav:
+            logger.error('Navigator not initialised')
+            return
+        self.nav.unpack_recursive(target_hid, on_success)
 
     def resolve_ghost_node(self, target_hid: tuple[int, ...], on_success: Callable[[VfsNode], None]) -> None:
-        '''Asynchronously unpack the VFS until the target hid is reached'''
-        if not self.vfs or not self.nav:
-            return
-        self._drill_down_to(target_hid, on_success)
-
-    def _drill_down_to(self, target_hid: tuple[int, ...], on_success: Callable[[VfsNode], None]) -> None:
-        '''
-        Recursively expand ancestors until target_hit becomes reachable.
-        Bounded by tree depth.
-        Promoted slot for _handle_expand_request expansion task.
-        Context params (node, wait_event) bound by functools.partial;
-        each async layer connects back via _on_layer_done.
-        '''
-        if not self.vfs:
-            return
-        node = self.vfs.get_vfs_node_by_id(target_hid)
-        if node:
-            on_success(node)
-            return
-
-        ancestor = self.vfs.find_nearest_ancestor(target_hid)
-        if not ancestor:
-            logger.error(f'Cannot resolve {target_hid}: No ancestor exists.')
-            return
-        logger.debug(f'Drilling down to {target_hid} from ancestor {ancestor.hierarchical_id_str}')
-        def _continue(success: bool, expanded_ancestor: VfsNode) -> None:
-            if not success:
-                logger.error(f'Failed to drill down to {target_hid}.')
-                return
-            self._drill_down_to(target_hid, on_success)
-
-        self._expand_once(ancestor, _continue)
-
-    def _expand_once(self, node: VfsNode, on_done: Callable[[bool, VfsNode], None]) -> None:
-        '''
-        Single source for all async expansion logic. All expansion requests follow the same pattern,
-        only the entrypoint is different in how the vfs is navigated/polled.
-
-        Ensures TREE_EXPAND actions run at most once per node:
-            - on_done(True, node) fires immediately if node already has
-              children, or has no TREE_EXPAND action to run.
-            - if node._expansion_task_active is already True (a task this
-              method started for this node hasn't finished yet), on_done is
-              queued in _expand_waiters and fires once that task completes -
-              callers never start duplicate tasks for the same node.
-            - otherwise on_done fires once a newly-started task completes.
-
-        Always resolves node's begin_expansion() wait_event via finish_expansion().
-        '''
-        if node.children:
-            node.finish_expansion()
-            on_done(True, node)
-            return
-        profile = Registry.get_handler_profile(node)
-        action_def = profile.primary_expand_action() if profile else None
-        if not action_def or action_def.action_type is not ActionType.TREE_EXPAND:
-            node.finish_expansion()
-            on_done(True, node)
-            return
+        '''Asynchronous entrypoint for unpacking the VFS until the target hid is reached'''
         if not self.nav:
-            logger.warning(f'Cannot expand {node.name}: No navigator available')
-            node.finish_expansion()
-            on_done(False, node)
+            logger.error('Navigator not initialised')
             return
-
-        self._pending_expansions.setdefault(node.hierarchical_id, []).append(on_done)
-        if node._expansion_task_active:
-            logger.debug(f'Expansion already running for {node.name}. Queuing pending node.')
-            return
-        node.begin_expansion()
-        node._expansion_task_active = True
-        logger.debug(f'Expanding {node.name} ({node.hierarchical_id_str})')
-        handle = self._start(
-            Actions.dispatch,
-            action_def,
-            node,
-            self.nav,
-            channel=self._active_channel
-        )
-        handle.finished.connect(functools.partial(self._on_expand_once_done, node))
-
-    def _on_expand_once_done(
-        self,
-        node: VfsNode,
-        success: bool,
-        result: Any,
-    ) -> None:
-        '''Promoted slot for _handle_expand_request expansion task.
-        Context params (node, wait_event) bound by functools.partial;
-        signal params (success, result) appended by Qt.'''
-        if threading.get_ident() != self._main_thread_id:
-            logger.error("_on_expand_once_done ran off the main thread")
-        self._on_action_complete(success, result)
-        node.finish_expansion()
-        if not success:
-            logger.error(f'Expansion failed for {node.name} ({node.hierarchical_id_str}): {result}')
-        for on_done in self._pending_expansions.pop(node.hierarchical_id, []):
-            on_done(success, node)
+        self.nav.resolve_ghost_node(target_hid, on_success)
 
     def close(self) -> None:
-        '''For exiting the dispatch'''
-        self.task_coordinator.shutdown()
+        '''For exiting the dispatch. Refuses to tear down on failed task shutdown.'''
+        fully_stopped = self.task_coordinator.shutdown()
+        if not fully_stopped:
+            logger.error(
+                'Dispatcher.close(): a dedicated task did not stop in time. '
+                'Aborting shutdown.'
+            )
+            return
         if self.active_handler:
             self.active_handler.close()
         self.vfs            = None
@@ -523,17 +406,67 @@ class Dispatcher(QObject):
         logger.info('Re-enrichment pass complete - datacenter nodes have .kods extension.')
 
     ###------------------------ Callback -----------------------###
-    def _expand_node(self, parent: VfsNode, wait_event: threading.Event) -> None:
+    def _on_expand_requested(self, parent: VfsNode, wait_event: threading.Event) -> None:
         '''
         Cross-thread callback for VfsNavigator. Blocking on node.begin_expansion()
-
-        Callback by VfsNavigator on a background thread to expand missing nodes.
-        Coordinates expansion on the main thread via QueuedConnection'''
+        Coordinates expansion on the main thread via QueuedConnection.
+        '''
         self.expand_requested.emit(parent, wait_event)
 
-    def _handle_expand_request(self, node: VfsNode, wait_event: threading.Event) -> None:
-        '''Starts a worker task with TREE_EXPAND and sets wait_event on completion'''
-        self._expand_once(node, lambda success, expanded_node: None)
+    def _handle_expand_requested(self, node: VfsNode, wait_event: threading.Event) -> None:
+        '''
+        QueuedConnection slot for expand_requested. Runs on the main thread.
+        Starts the actual TREE_EXPAND task for `node` and reports completion
+        back to Navigator via complete_expansion(), which releases wait_event
+        and drains every waiter queued while this task was in flight.
+        '''
+        profile = Registry.get_handler_profile(node)
+        action_def = profile.primary_expand_action() if profile else None
+        if not action_def or action_def.action_type is not ActionType.TREE_EXPAND:
+            logger.warning(f'_handle_expand_requested called with non-TREE_EXPAND action: {action_def}')
+            if self.nav:
+                self.nav.complete_expansion(node, True)
+            return
+        logger.debug(f'Expanding: {node.name} {node.hierarchical_id}')
+        task_handle = self._start(
+            Actions.dispatch,
+            action_def,
+            node,
+            self.nav,
+            channel=self._active_channel
+        )
+        task_handle.finished.connect(functools.partial(self._on_expansion_task_done, node))
+
+    def _on_expansion_task_done(self, node: VfsNode, success: bool, result: Any) -> None:
+        '''
+        Completion slot for the TREE_EXPAND task started in
+        _handle_expand_requested. Context param (node) bound via
+        functools.partial; signal params (success, result) appended by Qt
+        when emitted.
+        '''
+        if threading.get_ident() != self._main_thread_id:
+            logger.error('_on_expansion_task_done called from non-main thread')
+        self._on_action_complete(success, result)  # inserts children into VFS
+        if not success:
+            logger.error(f'Expansion failed for {node.name} {node.hierarchical_id}: {result}')
+        if self.nav:
+            # Runs after on_action_complete so waiters see node.children
+            self.nav.complete_expansion(node, success)
+
+    def _on_ghost_node_confirmed_missing(self, hid: tuple[int, ...]) -> None:
+        '''VfsNavigator callback for invalid metadata entries. Triggering deletion.'''
+        self.ghost_node_confirmed_missing.emit(hid)
+
+    def _handle_ghost_node_confirmed_missing(self, hid: tuple[int, ...]) -> None:
+        '''
+        QueuedConnection slot for ghost_node_confirmed_missing. Runs on the main thread.
+        Purges a metadata entry that Navigator has conclusively proven does not exist.
+        '''
+        if self._metadata_store is None:
+            return
+        hid_str = '.'.join(map(str, hid))
+        logger.warning(f'Purging stale metadata entry for confirmed-missing node: {hid_str}')
+        self._metadata_store.delete(hid_str)
 
     def _handle_extension_request(self, node: VfsNode, auto_save: bool = True) -> None:
         '''
@@ -591,7 +524,7 @@ class Dispatcher(QObject):
         )
         self.vfs.request_extension.connect(self._handle_extension_request)
         self.vfs.enrich_initial_tree() # This populates node names/categories/extensions from metadata, thus is now crucial
-        self.nav = VfsNavigator(self.vfs, self.get_node_data, self._expand_node)
+        self.nav = VfsNavigator(self.vfs, self.get_node_data, self._on_expand_requested, self._on_ghost_node_confirmed_missing)
         if handler is not None:
             # I think doing this on mainthread is fine since when this fires it is not possible for there to be any node registration
             build = handler.get_region(root)  # type: ignore
@@ -648,7 +581,6 @@ class Dispatcher(QObject):
                         logger.warning(f'TREE_EXPAND action returned unexpected payload type: {type(result.payload)}')
                     if new_nodes:
                         self.vfs.insert_children(result.node, new_nodes)
-                        result.node.expansion_pending = False
                         logger.debug(f'Inserted {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
             case _:
                 pass # PROCESS / DIALOG / EXPORT -- UI handled via action_complete
@@ -794,12 +726,9 @@ class RebuildCoordinator(QObject):
         expansion is complete by the next line. Recurses until every active
         rule has been resolved, then proceeds to the save dialog.
 
-        Known limitation: if a rule's parent HID can never be reached (bad
-        HID, or a node with zero matching children), resolve_ghost_node has
-        no failure callback - this chain will simply never continue for that
-        rebuild request. Worth confirming in testing before relying on it.
+        Current limitation: Forced recursive expansion, no targeted expansion yet.
         '''
-        if not rules or not self._dispatcher.vfs:
+        if not rules or not self._dispatcher.vfs or not self._dispatcher.nav:
             self._begin(staged_nodes, build_flags, patch_targets)
             return
 

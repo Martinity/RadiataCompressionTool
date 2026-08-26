@@ -1,5 +1,6 @@
 '''Node metadata. Contains three supporting classes, VfsNode (File data), VfsManager (Relational data), ModTracker (Mutation tracking)'''
 from __future__ import annotations
+import queue
 
 import threading
 from enum import Enum, auto
@@ -50,15 +51,17 @@ class VfsNode:
         self._id_path: tuple[int, ...] = hid                # hierarchical id (root, sub, subsub)
 
         self.status = NodeStatus.UNMODIFIED                 # node state
-        self.pending_data: bytes | None = None              # cached data
+        self._pending_data: bytes | None = None             # cached data
 
         self.is_physical   = False                          # Has physical address
         self.is_hidden     = False                          # Hide node in UI (file system related or null nodes by default)
         self.is_boundary   = False                          # The entrypoint node for the VFS (always the last node appended to root)
 
-        self.expansion_pending: bool = False                 # Threading active bool
-        self._expansion_event: threading.Event | None = None # Threading event for active thread
-        self._expansion_task_active: bool = False            # True while a worker task is running (main-thread only)
+        self._lock                   = threading.RLock()     # Structural lock for parent-child mutations/access
+        self.expansion_pending: bool = False                 # True while an expansion is in-flight
+        self._expansion_lock         = threading.Lock()      # Expansion lock for expansion state
+        self.last_expansion_success: bool | None = None      # Outcome of the last expansion
+        self._expansion_event: threading.Event | None = None # Set when expansion completes
 
         self._row: int = 0                                   # Cached row index within parent
 
@@ -67,14 +70,32 @@ class VfsNode:
         Called to add a child node to this node.
         Keeps separate HID increments for ISO and VFS nodes, split by boundary flag.
         '''
-        self.children.append(child)
-        child.parent = self
-        child._row = len(self.children) - 1
+        with self._lock:
+            self.children.append(child)
+            child.parent = self
+            child._row = len(self.children) - 1
+            if self.is_boundary:
+                child._id_path = (child._row,)
+            else:
+                child._id_path = self._id_path + (child._row,)
 
-        if self.is_boundary:
-            child._id_path = (child._row,)
-        else:
-            child._id_path = self._id_path + (child._row,)
+    @property
+    def children_snapshot(self) -> list[VfsNode]:
+        '''Get a thread-safe snapshot of the children nodes'''
+        with self._lock:
+            return self.children.copy()
+
+    @property
+    def pending_data(self) -> bytes | None:
+        '''Get the pending data for this node'''
+        with self._lock:
+            return self._pending_data
+
+    @pending_data.setter
+    def pending_data(self, value: bytes | None) -> None:
+        '''Set the pending data for this node'''
+        with self._lock:
+            self._pending_data = value
 
     @property
     def hierarchical_id(self) -> tuple[int, ...]:
@@ -94,28 +115,35 @@ class VfsNode:
         '''Keep track of the children-parent links for tree view'''
         if self.parent is None:
             return 0
-        return self._row
+        with self._lock:
+            return self._row
 
-    def begin_expansion(self) -> threading.Event:
+    def begin_expansion(self) -> tuple[bool, threading.Event]:
         '''Mark expansion in progress. Return wait event.
         If an expansion is already pending and an event exists, return the existing
         event so that a second waiter blocks on the same event the running task will set.'''
-        if self.expansion_pending and self._expansion_event is not None:
-            return self._expansion_event
-        self._expansion_event = threading.Event()
-        self.expansion_pending = True
-        return self._expansion_event
+        with self._expansion_lock:
+            if self.expansion_pending and self._expansion_event is not None:
+                return False, self._expansion_event
+            self._expansion_event = threading.Event()
+            self.expansion_pending = True
+            return True, self._expansion_event
 
-    def finish_expansion(self) -> None:
-        '''Signal expansion complete'''
-        self.expansion_pending = False
-        self._expansion_task_active = False
-        if self._expansion_event:
-            self._expansion_event.set()
+    def finish_expansion(self, success: bool) -> None:
+        '''Release expansion ownership, record the outcome and wake any waiting threads.
+        Always called from the same caller as begin_expansion.'''
+        with self._expansion_lock:
+            self.expansion_pending = False
+            self.last_expansion_success = success
+            event = self._expansion_event
+            self._expansion_event = None
+        if event:
+            event.set()
 
     def clear_pending(self):
-        self.pending_data = None
-        self.status = NodeStatus.UNMODIFIED
+        with self._lock:
+            self.pending_data = None
+            self.status = NodeStatus.UNMODIFIED
 
     def __repr__(self) -> str:
         return (f"<VfsNode '{self.name}' "

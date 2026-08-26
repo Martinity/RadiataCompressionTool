@@ -79,6 +79,7 @@ class NodeMetadataStore(QObject):
     SAVE_DEBOUNCE_MS = 2000
     entry_registered = pyqtSignal(str)  # hid str
     entry_updated    = pyqtSignal(str)  # hid str
+    entry_removed    = pyqtSignal(str)  # hid str
     bulk_updated     = pyqtSignal(int)  # updated count
 
     def __init__(
@@ -240,6 +241,21 @@ class NodeMetadataStore(QObject):
             if self._auto_save:
                 self._save_timer.start(self.SAVE_DEBOUNCE_MS)
         return count
+
+    def delete(self, hid: str) -> bool:
+        '''Remove a single entry by hid. Triggered by the VfsNavigator when it discovers
+        invalid expansions targets.'''
+        with self._lock:
+            existed = self._db.pop(hid, None) is not None
+            if existed:
+                self._dirty = True
+        if existed:
+            self.entry_removed.emit(hid)
+            if self._auto_save:
+                self._save_timer.start(self.SAVE_DEBOUNCE_MS)
+        else:
+            logger.debug(f'delete({hid!r}): no such entry.')
+        return existed
 
     ### Persistence for expansion
     def save(self) -> None:
