@@ -254,6 +254,13 @@ class MainWindow(QMainWindow):
         if self.toast.progress.isVisible():
             self.toast._reposition()
 
+    def _toggle_menu_actions(self, has_iso: bool) -> None:
+        '''Toggle menu options based on the iso loaded state'''
+        self.menu_manager.open_action.setEnabled(not has_iso)
+        self.menu_manager.close_action.setEnabled(has_iso)
+        self.menu_manager.verify_hash.setEnabled(has_iso)
+        self.menu_manager.apply_patches.setEnabled(has_iso)
+
     ###----------------------------------- ISO ----------------------------------###
 
     def attempt_load_iso(self, path: Path) -> None:
@@ -305,9 +312,7 @@ class MainWindow(QMainWindow):
         self.controller.init_file_tree(result)
         self.stack.setCurrentIndex(AppPage.FILEBROWSER)
         self.file_browser_page.setFocus()
-        self.menu_manager.open_action.setEnabled(not has_iso)
-        self.menu_manager.close_action.setEnabled(has_iso)
-        self.menu_manager.verify_hash.setEnabled(has_iso)
+        self._toggle_menu_actions(has_iso)
 
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         """Handles the completion signal from the background thread"""
@@ -768,12 +773,13 @@ class MainMenuBar:
             self._patch_flags.append((checkbox, flag))
 
         add_patch_box('Slimmed rebuild', 'Save 1GB by trimming out unused disk space.', IsoRebuildFlags.SLIMMED)
-        add_patch_box('Cutscene skipper', 'Patch all story scripts to complete ASAP.', IsoRebuildFlags.CUTSCENE_SKIPPER)
+        # add_patch_box('Cutscene skipper', 'Patch all story scripts to complete ASAP.', IsoRebuildFlags.CUTSCENE_SKIPPER)
 
         patches_menu.addSeparator()
-        apply_patches = QAction('Apply patches', self.window)
-        apply_patches.triggered.connect(self._handle_patches)
-        patches_menu.addAction(apply_patches)
+        self.apply_patches = QAction('Apply patches', self.window)
+        self.apply_patches.setEnabled(False)
+        self.apply_patches.triggered.connect(self._handle_patches)
+        patches_menu.addAction(self.apply_patches)
 
     def _build_info_menu(self) -> None:
         info_menu = self.menu_bar.addMenu('Info')
@@ -811,8 +817,7 @@ class MainMenuBar:
 
     def _handle_close(self) -> None:
         self.dispatcher.close()
-        self.open_action.setEnabled(True)
-        self.close_action.setEnabled(False)
+        self.window._toggle_menu_actions(has_iso=False)
         self.verify_hash.setEnabled(False)
         self.window.welcome_page.set_loading(False)
         self.window.stack.setCurrentIndex(AppPage.WELCOME)
@@ -1083,7 +1088,7 @@ def build_legend_tree(theme) -> QStandardItemModel:
 
     ### Event
     event = add_category('Event')
-    add_item(event, '.evd', 'Event VM dispatcher data', '---')
+    add_item(event, '.evd', 'Event VM dispatcher data', 'Supported: \'Open in EVD Script Editor\'')
 
     ### Animation
     anim = add_category('Animation')
@@ -1114,7 +1119,7 @@ def build_legend_tree(theme) -> QStandardItemModel:
     scene = add_category('Scene')
     add_item(scene, '.rbad', 'Map object references')
     add_item(scene, '.rlf', 'Scene data')
-    add_item(scene, '.rmf', 'Scene data')
+    add_item(scene, '.rmf', 'Scene data', 'Experimentally Supported: \'Open in RMF Message Data Editor\'')
     add_item(scene, '.ndnc', 'Scene data')
     add_item(scene, '.xbdc', 'Scene data')
     add_item(scene, '.pcdc', 'Scene data')

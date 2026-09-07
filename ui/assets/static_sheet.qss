@@ -89,7 +89,7 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
     border: none;
 }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
-QScrollBar::add-page:horizontal, QScrollBar::add-page:horizontal {
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
     background: none;
 }
 
@@ -100,21 +100,21 @@ QPushButton, #BtnSurface {
     border: none;
     border-radius: 4px;
 }
-QPushButton:hover, #BtnSurface:hover, QRadioButton:hover {
+QPushButton:hover, #BtnSurface:hover, QRadioButton:hover, QCheckBox:hover {
     background-color: {INTERACTIVE_HOVER};
 }
-QPushButton:pressed, #BtnSurface:pressed, QRadioButton:pressed {
+QPushButton:pressed, #BtnSurface:pressed, QRadioButton:pressed, QCheckBox:pressed {
     background-color: {ACCENT};
 }
-QPushButton:disabled, #BtnSurface:disabled, QRadioButton:disabled {
+QPushButton:disabled, #BtnSurface:disabled, QRadioButton:disabled, QCheckBox:disabled {
     color: {TEXT_MUTED};
 }
-QRadioButton::indicator:unchecked {
+QRadioButton::indicator:unchecked, QCheckBox::indicator:unchecked {
     border: 1px solid {TEXT};
     border-radius: 8px;
     background: {BG_WINDOW};
 }
-QRadioButton::indicator:checked {
+QRadioButton::indicator:checked, QCheckBox::indicator:checked {
     border: 1px solid {TEXT};
     border-radius: 8px;
     background: {ACCENT};

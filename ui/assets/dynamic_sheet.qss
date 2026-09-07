@@ -23,7 +23,7 @@ QActionWidget, QGroupBox, QRadiaButton {
 }
 
 QPushButton, #BtnImportant, #BtnSurface, #BtnDanger, #Popup, QCheckBox, QAction, QGroupBox,
-QComboBox, QSpinBox, QDoubleSpinBox, QSlider, QDial, QProgressBar {
+QComboBox, QSpinBox, QDoubleSpinBox, QSlider, QDial, QProgressBar, QMenu::item {
     padding: {BTN_PADDING};
     min-width: {BTN_MIN_WIDTH};
 }

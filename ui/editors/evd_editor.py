@@ -33,14 +33,14 @@ from PyQt6.QtWidgets import (
     QMenu, QPlainTextEdit, QPushButton, QSplitter, QStackedLayout, QStyle,
     QStyledItemDelegate, QStyleOptionViewItem, QTabWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QWidget,
+    QWidget, QInputDialog
 )
 
 from core.contracts import BaseEditor
 from core.node import VfsNode
 from core.registry import Registry
 from core.handlers import evd_leaf
-from core.handlers.evd_leaf import Arg, CodeLine, EvdCompileError
+from core.handlers.evd_leaf import Arg, CodeLine, EvdCompileError, unique_label
 from core.handlers.evd_leaf import EVDHandler, EvdEditorPayload, EvdSavePayload, EvdError
 from utilities import hline
 
@@ -169,6 +169,8 @@ class EvdEditor(BaseEditor):
         self._structure_view.currentLineChanged.connect(self._on_line_selected)
         self._structure_view.toggleYieldRequested.connect(self._on_toggle_yield)
         self._structure_view.gotoLabelRequested.connect(self.goto_label)
+        self._structure_view.addLabelRequested.connect(self._on_add_label_requested)
+        self._structure_view.selectJumpTargetRequested.connect(self._on_select_jump_target_requested)
         self._structure_view.foldToggled.connect(self.toggle_fold)
         self._structure_view.valuePicked.connect(self.highlight_value)
         self._structure_view.doubleClicked.connect(self._on_row_double_clicked)
@@ -221,6 +223,58 @@ class EvdEditor(BaseEditor):
         self._validate_timer.setSingleShot(True)
         self._validate_timer.setInterval(_VALIDATE_DEBOUNCE_MS)
         self._validate_timer.timeout.connect(self._validate_now)
+
+    def _on_add_label_requested(self, target_line: int) -> None:
+        name, ok = QInputDialog.getText(self, "Add Label", "New label name:")
+        if ok and name:
+            indent = self._insert_indent(target_line)
+            text = f"{' ' * indent}label ({name})"
+
+            # Inject the new label line and re-apply
+            merged = self._lines[:target_line - 1] + evd_leaf.parse_code(text) + self._lines[target_line - 1:]
+            code = evd_leaf.render_code(merged)
+            self._apply_code(code, f"Add label '{name}'", select_line=target_line)
+
+    def _on_select_jump_target_requested(self, target_line: int) -> None:
+        # Gather all currently valid labels in the file
+        labels = [name for name, _ in evd_leaf.iter_labels(self._lines)]
+        if not labels:
+            return
+
+        line = self._line(target_line)
+        if line is None:
+            return
+
+        # Pre-select the current target if it exists in the list
+        current_idx = labels.index(line.target_label) if line.target_label in labels else 0
+
+        # Open blocking dropdown selection menu
+        selected_label, ok = QInputDialog.getItem(
+            self,
+            "Select Jump Target",
+            "Target:",
+            labels,
+            current_idx,
+            False # False prevents the user from typing a custom string not in the list
+        )
+
+        if ok and selected_label and selected_label != line.target_label:
+            for i, arg in enumerate(line.args):
+                if not arg.key:
+                    continue
+                if arg.key in ('goto','target'):
+                    args = line.args[:i] + (Arg(key=arg.key, value=selected_label),) + line.args[i+1:]
+                    break
+
+            # if 'goto' in [arg for arg in line.args]:
+            #     key = 'goto'
+            # else:
+            #     key = 'target'
+            # arg = Arg(key=key, value=selected_label)
+            self._apply_line_args(target_line, args, 'goto')
+            # Re-render the full code with the modified line and apply the change
+            code = evd_leaf.render_code(self._lines)
+            self._apply_code(code, f"Update jump target to '{selected_label}'", select_line=target_line)
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -1115,6 +1169,8 @@ class StructureView(QListView):
     gotoLabelRequested = pyqtSignal(str)          # label name
     foldToggled = pyqtSignal(int)                 # opener line number
     valuePicked = pyqtSignal(str)                 # value key, or '' to clear
+    addLabelRequested =pyqtSignal(int)
+    selectJumpTargetRequested = pyqtSignal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1275,10 +1331,23 @@ class StructureView(QListView):
         line: CodeLine | None = index.data(Qt.ItemDataRole.UserRole)
 
         menu = QMenu(self)
+
+        add_label_action = menu.addAction('Add label here')
+        selected_target_action = None
+        if line is not None and line.target_label:
+            selected_target_action = menu.addAction('Select jump target')
+        menu.addSeparator()
+
         goto_action = None
         target = line.target_label if line is not None else None
         if target:
-            goto_action = menu.addAction(f'Go to {target}')
+            label_exists = any(name == target for name, _ in evd_leaf.iter_labels(self._model._lines))
+            if label_exists:
+                goto_action = menu.addAction(f'Go to {target}')
+            else:
+                goto_action = menu.addAction(f'Go to {target} (Not found)')
+                goto_action.setEnabled(False)
+                create_label_action = menu.addAction(f'Create missing label "{target}" here')
             menu.addSeparator()
         yield_action = None
         if line is not None and line.kind == evd_leaf.KIND_COMMAND:
@@ -1295,6 +1364,10 @@ class StructureView(QListView):
         chosen = menu.exec(e.globalPos())
         if chosen is None:
             return
+        if chosen is add_label_action:
+            self.addLabelRequested.emit(number)
+        elif selected_target_action is not None and chosen is selected_target_action:
+            self.selectJumpTargetRequested.emit(number)
         if chosen is delete_action:
             self.deleteRequested.emit(number)
         elif goto_action is not None and chosen is goto_action and target:

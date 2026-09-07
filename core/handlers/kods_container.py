@@ -299,7 +299,7 @@ class KodsHandler(ContainerHandler):
                 offsets[i] = slot_offsets[i]
                 next_value = offsets[i]
             else: # Original real was not found -> Alias
-                logger.warning(f'{node} segment {i} not found in new payload. Treating as zero-size alias.')
+                logger.warning(f'{node} matching segment {i} not found in new payload. Treating as zero-size alias.')
                 offsets[i] = next_value
 
         # Resolve shift
@@ -378,7 +378,7 @@ class KodsHandler(ContainerHandler):
             new_offset, new_size = new_slot
             orig_segment = self.payload_view[orig_offset : orig_offset + orig_size].tobytes()
             new_segment  = new_payload[new_offset : new_offset + new_size]
-            dummy_node = VfsNode(name=f'slot {slot_index:02d}', offset=0, size=len(orig_segment))
+            dummy_node = VfsNode(name=f'slot {slot_index:02d}', offset=0, size=len(orig_segment), extension='.Kods')
             if node.parent is None:
                 raise TypeError(f'No parent for {node}')
             with KodsHandler(orig_segment, node.parent) as slot_handler:
