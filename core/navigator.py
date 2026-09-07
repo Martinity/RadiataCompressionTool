@@ -112,9 +112,9 @@ class VfsNavigator:
                 on_done(True, node)
             return  event
         if not is_owner:
-            logger.debug(f'Expansion already in-flight for {node.name} {node.hierarchical_id}; queued waiter.')
+            logger.debug(f'Expansion already in-flight for {node}; queued waiter.')
             return event
-        logger.debug(f'Claimed expansion for {node.name} {node.hierarchical_id}')
+        logger.debug(f'Claimed expansion for {node}')
         self.expansion_callback(node, event)
         return event
 
@@ -158,9 +158,9 @@ class VfsNavigator:
 
     def unwrap_chain(self, node: VfsNode) -> bytes:
         '''For traveling through the VFS from physical layer to depths'''
-        chain = self._build_chain(node)
+        chain = node.chain_to_physical_source()
         if not chain:
-            logger.error(f'No physical source for node: {node.name} {node.hierarchical_id_str}. Data will be zeroed!')
+            logger.error(f'No physical source for node: {node}. Data will be zeroed!')
             return b''
         return self._walk_chain(chain)
 
@@ -210,7 +210,7 @@ class VfsNavigator:
         on_success does not continue to expand on failure, see _drill_down_to'''
         self.resolve_ghost_node(target_hid, lambda node: self._deep_unpack_layer([node], [], on_success))
 
-    def rollup_nodes(self, staged_nodes: list[VfsNode], task_handle: 'TaskHandle') -> list[VfsNode]:
+    def rollup_nodes(self, staged_nodes: list[VfsNode], task_handle: TaskHandle) -> list[VfsNode]:
         '''For Rebuilding the VFS from deepest layer to physical (children -> parent)'''
         current_queue: set[VfsNode] = set(staged_nodes)
         while not all(node.is_physical for node in current_queue): # deepest -> physical layer
@@ -274,7 +274,7 @@ class VfsNavigator:
         task_handle.log_message.emit('Virtual node roll-up complete')
         return list(current_queue)
 
-    def precompute_datacenter(self, staged_nodes: list[VfsNode], task_handle: 'TaskHandle') -> list[VfsNode]:
+    def precompute_datacenter(self, staged_nodes: list[VfsNode], task_handle: TaskHandle) -> list[VfsNode]:
         '''Cache payload/headers that are not located sequentially on disk'''
         nonseq_nodes: set[VfsNode] = set()
         staged_sorted = sorted(staged_nodes, key=lambda node: node.hierarchical_id)
@@ -283,7 +283,7 @@ class VfsNavigator:
             current_node = node
             while current_node is not None:
                 if current_node.target and current_node.parent:
-                    task_handle.log_message.emit(f'Sending {node.hierarchical_id} to cached roll-up')
+                    task_handle.log_message.emit(f'Sending {node} to cached roll-up')
                     nonseq_nodes.add(node)
                     break
                 current_node = current_node.parent if current_node.is_physical is False else None
@@ -322,7 +322,7 @@ class VfsNavigator:
             event = self.request_expansion(ancestor)
             if not event.wait(timeout=self.EXPANSION_TIMEOUT):
                 raise ExpansionTimeoutError(
-                    f'Timeout ({self.EXPANSION_TIMEOUT}s) expanding {ancestor.name} {ancestor.hierarchical_id}: Aborted'
+                    f'Timeout ({self.EXPANSION_TIMEOUT}s) expanding {ancestor}: Aborted'
                 )
 
     def _drill_down_to(
@@ -397,19 +397,6 @@ class VfsNavigator:
         on_success(expanded)
 
     ###-------------------- Chain Traversal --------------------###
-
-    def _build_chain(self, node: VfsNode) -> list[VfsNode]:
-        chain:   list[VfsNode]  = []
-        current: VfsNode | None = node
-        while current:
-            chain.append(current)
-            if current.is_physical:
-                break
-            current = current.parent
-        if not chain or not chain[-1].is_physical:
-            return []
-        chain.reverse()
-        return chain
 
     def _walk_chain(self, chain: list[VfsNode]) -> bytes:
         '''helper to walk the path from the physical source to virtual requested file'''

@@ -20,9 +20,15 @@ QTableView::item:hover, QListWidget::item:hover {
 QTreeView:focus, QListView:focus, QTableView:focus {
     outline: none;
 }
+QTreeView::item:selected, QListView::item:selected,
+QTableView::item:selected, QListWidget::item:selected {
+    background-color: {BG_SELECTED};
+    color: {TEXT_SELECTED};
+}
 QTreeView::item:selected:hover, QListView::item:selected:hover,
 QTableView::item:selected:hover, QListWidget::item:selected:hover {
-    background-color: {ACCENT_HOVER};
+    background-color: {BG_HOVER};
+    color: {TEXT_SELECTED};
 }
 
 QFrame#HLine {
@@ -94,14 +100,24 @@ QPushButton, #BtnSurface {
     border: none;
     border-radius: 4px;
 }
-QPushButton:hover, #BtnSurface:hover {
+QPushButton:hover, #BtnSurface:hover, QRadioButton:hover {
     background-color: {INTERACTIVE_HOVER};
 }
-QPushButton:pressed, #BtnSurface:pressed {
+QPushButton:pressed, #BtnSurface:pressed, QRadioButton:pressed {
     background-color: {ACCENT};
 }
-QPushButton:disabled, #BtnSurface:disabled {
+QPushButton:disabled, #BtnSurface:disabled, QRadioButton:disabled {
     color: {TEXT_MUTED};
+}
+QRadioButton::indicator:unchecked {
+    border: 1px solid {TEXT};
+    border-radius: 8px;
+    background: {BG_WINDOW};
+}
+QRadioButton::indicator:checked {
+    border: 1px solid {TEXT};
+    border-radius: 8px;
+    background: {ACCENT};
 }
 
 #BtnLarge {

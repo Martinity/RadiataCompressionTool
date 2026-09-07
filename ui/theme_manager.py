@@ -10,10 +10,12 @@ logger = logging.getLogger(f'radiata.{__name__}')
 class DarkTheme:
     BG_WINDOW         = '#202020'
     BG_SURFACE        = '#161616'
+    BG_SELECTED       = '#242424'
     BG_HOVER          = '#1a1a1a'
     BORDER            = '#333333'
     TEXT              = '#dcddde'
     TEXT_MUTED        = '#999999'
+    TEXT_SELECTED     = '#ffffff'
     ACCENT            = '#7f6df2'
     ACCENT_HOVER      = '#8875ff'
     INTERACTIVE       = '#2a2a2a'
@@ -28,10 +30,12 @@ class DarkTheme:
 class LightTheme:
     BG_WINDOW         = '#ffffff'
     BG_SURFACE        = '#f2f3f5'
+    BG_SELECTED       = '#dcdcdc'
     BG_HOVER          = '#e6e6e6'
     BORDER            = '#dddddd'
     TEXT              = '#2e3338'
     TEXT_MUTED        = '#888888'
+    TEXT_SELECTED     = '#1f2328'
     ACCENT            = '#705dcf'
     ACCENT_HOVER      = '#7a6ae6'
     INTERACTIVE       = '#cccccc'
@@ -88,10 +92,12 @@ class ThemeManager:
         replacements = {
             '{BG_WINDOW}':         theme.BG_WINDOW,
             '{BG_SURFACE}':        theme.BG_SURFACE,
+            '{BG_SELECTED}':       theme.BG_SELECTED,
             '{BG_HOVER}':          theme.BG_HOVER,
             '{BORDER}':            theme.BORDER,
             '{TEXT}':              theme.TEXT,
             '{TEXT_MUTED}':        theme.TEXT_MUTED,
+            '{TEXT_SELECTED}':     theme.TEXT_SELECTED,
             '{ACCENT}':            theme.ACCENT,
             '{ACCENT_HOVER}':      theme.ACCENT_HOVER,
             '{INTERACTIVE}':       theme.INTERACTIVE,

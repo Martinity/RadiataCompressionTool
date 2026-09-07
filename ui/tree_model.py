@@ -1,4 +1,4 @@
-'''Holds all models for workspace. In other words takes nodes and converts their data into file browser like formats.
+'''Holds all models for the filebrowser. Takes nodes and converts their data into file browser tree displayable formats.
 VfsTreeModel - QAbstractItemModel, the hierarchical tree
 SearchModel - QAbstractListModel, the search list. List due to recursive hierarchical searching chugging UI
 TreeProxyModel - QSortFilterProxyModel, only gets applied to the tree. Search is hardcoded to avoid hidden nodes'''
@@ -28,6 +28,9 @@ class VfsTreeModel(QAbstractItemModel):
         # Catch VfsManager signals for updating tree
         self.vfs_manager.insert_start.connect(self._on_insert_start)
         self.vfs_manager.insert_finished.connect(self._on_insert_finished)
+        self.vfs_manager.remove_start.connect(self._on_remove_start)
+        self.vfs_manager.remove_finished.connect(self._on_remove_finished)
+        self.vfs_manager.node_dataChanged.connect(self._on_node_dataChanged)
 
     ###---------------------------------------- Qt API --------------------------------------###
 
@@ -124,6 +127,21 @@ class VfsTreeModel(QAbstractItemModel):
 
     def _on_insert_finished(self):
         self.endInsertRows()
+
+    def _on_remove_start(self, parent: VfsNode, first: int, last: int) -> None:
+        parent_index = self.index_for_node(parent)
+        self.beginRemoveRows(parent_index, first, last)
+
+    def _on_remove_finished(self) -> None:
+        self.endRemoveRows()
+
+    def _on_node_dataChanged(self, node: VfsNode) -> None:
+        '''Trigger a UI repaint for a specific node.'''
+        top_left = self.index_for_node(node)
+        if not top_left.isValid():
+            return
+        bottom_right = self.index(node.row(), self.columnCount() - 1, top_left.parent())
+        self.dataChanged.emit(top_left, bottom_right)
 
     def index_for_node(self, target_node: VfsNode) -> QModelIndex:
         '''Get the QModelIndex for a node'''

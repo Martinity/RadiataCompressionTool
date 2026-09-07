@@ -44,10 +44,10 @@ import platform
 import json
 import subprocess
 import os
-from enum import IntEnum
+from enum import IntEnum, Enum, auto
 from pathlib import Path
 
-from core.dispatcher import Dispatcher, RebuildCoordinator, LogChannel
+from core.dispatcher import Dispatcher, RebuildCoordinator, LogChannel, ConflictChoice
 from core.metadata_manager import NodeMetadataStore
 from core.node import VfsNode
 from core.version import __version__
@@ -57,14 +57,15 @@ from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardIt
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenuBar,
     QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QTextEdit, QWidgetAction,
-    QTreeView, QVBoxLayout, QWidget, QTabWidget, QLineEdit, QComboBox, QSizePolicy, QCheckBox
+    QTreeView, QVBoxLayout, QWidget, QTabWidget, QLineEdit, QComboBox, QSizePolicy, QCheckBox,
+    QRadioButton, QDialogButtonBox
 )
 from ui.editor_page import EditorPage
 from ui.file_browser_page import FileBrowserBehavior, FileBrowserPage
 from ui.settings import AppSettings, Shortcuts, Shortcut
 from ui.staging_page import StagingPage
 from ui.theme_manager import ThemeManager
-from utilities import get_resource_path, human_size
+from utilities import get_resource_path, human_size, ConflictResolverDialog
 
 logger = logging.getLogger(f'radiata.{__name__}')
 
@@ -86,6 +87,7 @@ class MainWindow(QMainWindow):
     Serves as the root container for the application stack, managing the QSettings,
     theme state, and cross-component signal routing.
     """
+    conflict_choice_made = pyqtSignal(VfsNode, ConflictChoice)
 
     def __init__(self, dispatcher: Dispatcher, is_test: bool = False) -> None:
         super().__init__(parent=None)
@@ -187,6 +189,9 @@ class MainWindow(QMainWindow):
         # Generic task routing
         self.dispatcher.relay.log.connect(self._route_task_log)
         self.dispatcher.relay.progress.connect(self._route_task_progress)
+
+        self.dispatcher.conflict_prompt.connect(self._on_conflict_detected)
+        self.conflict_choice_made.connect(self.dispatcher.resolve_conflict_choice)
 
     def _route_task_log(self, channel: LogChannel, message: str) -> None:
         if channel is LogChannel.REBUILD:
@@ -313,6 +318,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'Build Failed', message)
         self.stack.setCurrentWidget(self.file_browser_page)
 
+    def _on_conflict_detected(self, new_node: VfsNode, old_nodes: str, reason: str) -> None:
+        '''
+        Triggered when ModTracker detects a file modification conflict.
+        Instantiates the resolution dialog and emits the user's choice.
+        '''
+        dialog = ConflictResolverDialog(new_node, old_nodes, reason, parent=self)
+        dialog.exec()
+        choice = dialog.selected_choice()
+        self.conflict_choice_made.emit(new_node, choice)
+
     ###------------------------------------- Lifecycle --------------------------------------###
 
     def closeEvent(self, a0: QCloseEvent | None) -> None:
@@ -333,7 +348,6 @@ class WelcomePage(QWidget):
     """
     Initial landing page prompting the user to load a source ISO.
     """
-
     request_open = pyqtSignal(Path)
 
     def __init__(self, settings, parent=None) -> None:
@@ -385,7 +399,7 @@ class DeviceOrIsoDialog(QWidget):
         self.last_dir = last_dir
         self.selected_path: Path | None = None
         self.setFixedWidth(600)
-        self.setFixedHeight(300)
+        self.setFixedHeight(330)
         self.setObjectName('SurfaceTabPanel')
         layout = QVBoxLayout(self)
         # Tabs for selecting between the two types of media inputs
@@ -1002,7 +1016,6 @@ class Toast(QWidget):
 
 ###------------------------------------------- File Legend ------------------------------------------###
 
-
 def build_legend_tree(theme) -> QStandardItemModel:
     """
     Contructs the QStandardItemModel for the file type legend window.
@@ -1160,7 +1173,7 @@ class LegendModel(QTreeView):
         self.setHeaderHidden(False)
         self.expandAll()
         self.setRootIsDecorated(True)
-        self.setIndentation(12)
+        self.setIndentation(4)
         self.resizeColumnToContents(0)
         self.resizeColumnToContents(1)
         self.resizeColumnToContents(2)

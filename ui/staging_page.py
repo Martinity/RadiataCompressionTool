@@ -372,7 +372,7 @@ class StagingPage(QWidget):
         self._selected_node = node
         new_data = node.pending_data or b''
         orig_data = self.tracker.get_original(node)
-        self.diff_panel.load_diff(f'{node.name}  ({node.hierarchical_id_str})', new_data, orig_data)
+        self.diff_panel.load_diff(f'{node}', new_data, orig_data)
 
     def _on_stage(self) -> None:
         for item in self.unstaged_list.selectedItems():

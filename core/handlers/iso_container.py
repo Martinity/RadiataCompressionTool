@@ -12,6 +12,7 @@ import abc
 import logging
 import array
 import struct
+import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, BinaryIO, Any
@@ -369,6 +370,8 @@ class IsoHandler(PhysicalHandler):
 
     def get_raw_node(self, node: VfsNode) -> bytes:
         """Public call for the raw data of a physical node"""
+        if node.pending_data is not None:
+            return node.pending_data
         return self.handle.pread(node.offset, node.size)
 
     ###------------------------------------ Extract ISO ------------------------------------###

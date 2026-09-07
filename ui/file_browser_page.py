@@ -474,7 +474,7 @@ class FileBrowserBehavior(QObject):
         kwargs: dict = {}
         match action_def.action_type:
             case ActionType.EXPORT:
-                path, _ = QFileDialog.getSaveFileName(self.view, action_def.name, '', 'All Files (*)')
+                path, _ = QFileDialog.getSaveFileName(self.view, action_def.name, f'{node.name}{node.extension}', 'All Files (*)')
                 if not path:
                     return
                 kwargs['file_path'] = Path(path)

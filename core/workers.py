@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 import itertools
+import inspect
 import time
 from pathlib import Path
 from enum import auto, Enum, Flag
@@ -21,9 +22,10 @@ from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot, QRunnable, QThreadPool, 
 from core.contracts import LeafHandler, ContainerHandler
 from core.native.block_device import BlockDevice
 if TYPE_CHECKING:
-    from core.node import VfsNode
+    from core.node import VfsNode, ModTracker
     from core.contracts import BaseHandler, PhysicalHandler
     from core.handlers.iso_container import IsoHandler
+    from core.handlers.kods_container import KodsHandler
     from core.navigator import VfsNavigator
     from core.dispatcher import Dispatcher
 
@@ -109,9 +111,25 @@ class EditorPayload:
 class LoadIsoResult(NamedTuple):
     '''Payload for _on_iso_loaded. PhysicalHandler and ISO handling are always dedicated logically.'''
     success: bool
-    handler: PhysicalHandler | None = None
+    handler: IsoHandler | None = None
     root:    VfsNode         | None = None
     error:   str             | None = None
+
+def validate_task_signature(fn, args: tuple, kwargs: dict) -> None:
+    signature = inspect.signature(fn)
+    try: signature.bind(*args, **kwargs)
+    except TypeError as e:
+        pos_details = [f"  [{i}] {type(arg).__name__}: {repr(arg)[:40]}" for i, arg in enumerate(args)]
+        kw_details = [f"  {k} ({type(v).__name__}): {repr(v)[:40]}" for k, v in kwargs.items()]
+        diagnostic = (
+            f"\nTarget Function : {fn.__module__}.{fn.__qualname__}"
+            f"\nExpected Sig    : {fn.__name__}{signature}"
+            f"\nPositional Args ({len(args)}):\n" + ("\n".join(pos_details) if pos_details else "  (none)") +
+            f"\nKeyword Args    ({len(kwargs)}):\n" + ("\n".join(kw_details) if kw_details else "  (none)") +
+            f"\nError Details   : {e}"
+        )
+        logger.error(diagnostic)
+        raise TypeError(diagnostic) from e
 
 ###---------------------------------------- Tasks ------------------------------------------###
 
@@ -134,6 +152,7 @@ class GenericTask(QRunnable):
         )
         self.handle.mark_running()
         try:
+            validate_task_signature(self.fn, self.args, self.kwargs)
             result = self.fn(*self.args, **self.kwargs)
             self.handle.complete(result)
         except InterruptedError as e:
@@ -439,9 +458,9 @@ class Actions:
                 task_handle.checkpoint()
                 action_def = Registry.get_action(node, action_name)
                 if not action_def:
-                    task_handle.log_message.emit(f'Warning: No action found for {action_name} on {node.name} ({node.hierarchical_id_str})')
+                    task_handle.log_message.emit(f'Warning: No action found for {action_name} on {node}')
                     continue
-                task_handle.log_message.emit(f'Applying patch {action_name} to {node.name} ({node.hierarchical_id_str})')
+                task_handle.log_message.emit(f'Applying patch {action_name} to {node}')
                 result = Actions.dispatch(action_def, node, navigator, task_handle)
                 if result.status is ActionStatus.SUCCESS:
                     if isinstance(result.payload, (bytes, bytearray)):
@@ -449,11 +468,28 @@ class Actions:
                         touched.append(node)
                     else:
                         task_handle.log_message.emit(
-                            f'{action_name} on {node.name} {node.hierarchical_id} did not return bytes payload  - Skipping'
+                            f'{action_name} on {node} did not return bytes payload  - Skipping'
                         )
                 else:
-                    task_handle.log_message.emit(f'{action_name} failed on {node.name}: {result.message}')
+                    task_handle.log_message.emit(f'{action_name} failed on {node}: {result.message}')
         return touched
+
+    @staticmethod
+    def propogate_virtual_mutations(
+        nodes:       list[VfsNode],
+        navigator:   VfsNavigator,
+        task_handle: TaskHandle
+    ) -> bool:
+        '''
+        Initiate a virtual roll-up/rebuild for one toc entry. Deadcode from pcsx2 live testing.
+        Kept since this has a decent chance of having some use, however it is very primitive and
+        should be adjusted if reimplemented in the future.
+        '''
+        result = navigator.rollup_nodes(nodes, task_handle)
+        if 0 < len(result) > 2:  # rollup on a single virtual mutation should never result in more than a physical node + datacenter rebuild
+            return False
+        task_handle.checkpoint()
+        return True
 
     ### Editor
     @staticmethod
@@ -529,7 +565,7 @@ class Actions:
         from core.registry import Registry
         handler_class = Registry.get_handler(node) # resolve handler
         if not handler_class:
-            raise ValueError(f'No handler registered for node: {node.name} {node.hierarchical_id}')
+            raise ValueError(f'No handler registered for node: {node}')
         task_handle.checkpoint()
         # Datacenter verification
         header_bytes = None
@@ -781,6 +817,58 @@ class Actions:
                 message=str(e),
             )
 
+    @staticmethod
+    def complex_import(
+        node:          VfsNode,
+        target_node:   VfsNode,
+        handler_class: type[KodsHandler],
+        tracker:       ModTracker,
+        resolver:      Callable[[VfsNode], bytes],
+        inner_nodes:   list[VfsNode],
+        file_path:     Path,
+        task_handle:   TaskHandle,
+    ) -> ActionResult:
+        '''
+        Import a new raw payload for a datacenter node. This means that the Kods imported is actually
+        missing it's header.
+
+        In the future depending on how we end up resolving these imports we should add some dialog or
+        checks to see if the datacenter header can be or is uploaded.
+        '''
+        try:
+            task_handle.log_message.emit(f'Importing {file_path.name} as datacenter file...')
+            # Build the new headers for the payload
+            new_payload = file_path.read_bytes()
+            orig_payload = resolver(node)
+            orig_header = resolver(target_node)
+            child_headers = {(node.hierarchical_id[-1] % 10) - 1: resolver(node) for node in inner_nodes if node.size > 8}
+            if not node.parent:
+                raise ValueError(f'No parent for node {node}')
+            with handler_class(orig_payload, node.parent) as handler:
+                new_header_outer, new_headers_inner = handler.complex_import(node, orig_header, new_payload, child_headers)
+            task_handle.checkpoint()
+            # Apply the computed headers to the appropriate nodes
+            tracker.mark_modified(node, new_payload, orig_payload)
+            tracker.mark_modified(target_node, new_header_outer, orig_header)
+            for inner_node in inner_nodes:
+                slot_index = (inner_node.hierarchical_id[-1] % 10) - 1
+                if slot_index in new_headers_inner:
+                    tracker.mark_modified(inner_node, new_headers_inner[slot_index], resolver(inner_node))
+            return ActionResult(
+                action_name='Complex Import',
+                node=node,
+                status=ActionStatus.SUCCESS,
+                payload=new_payload
+            )
+        except Exception as e:
+            logger.error(f'Complex Import failed: {e}', exc_info=True)
+            return ActionResult(
+                action_name='Complex Import',
+                node=node,
+                status=ActionStatus.FAILURE,
+                message=str(e),
+            )
+
     ### Handler actions
     @staticmethod
     def run_handler_action(
@@ -798,7 +886,7 @@ class Actions:
         execute action with handle
         '''
         if action_name != 'Properties':
-            task_handle.log_message.emit(f'Starting "{action_name}" on node: {node.name} ({node.hierarchical_id_str})...')
+            task_handle.log_message.emit(f'Starting "{action_name}" on node: {node}...')
         try:
             node_bytes   = navigator.unwrap_chain(node)
             header_bytes = navigator.resolve_data_from_hid(node.target)
@@ -809,7 +897,7 @@ class Actions:
                 setattr(handler, 'datacenter_header', header_bytes)
                 payload = handler.execute_action(node, action_name, **kwargs)
             if action_name != 'Properties':
-                task_handle.log_message.emit(f'Finished "{action_name}" on node: {node.name} ({node.hierarchical_id_str}).')
+                task_handle.log_message.emit(f'Finished "{action_name}" on node: {node}.')
             return ActionResult(
                 action_name=action_name,
                 node=node,

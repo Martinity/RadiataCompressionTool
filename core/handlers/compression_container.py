@@ -92,7 +92,7 @@ class CompressorHandler(ContainerHandler):
     def get_raw_node(self, node: VfsNode) -> bytes:
         '''Return a specific raw node'''
         if not isinstance(node.parent_header, CompressorHandler.SlzHeader):
-            raise TypeError(f'Expected SlzHeader, got {type(node.parent_header)} for {node.name} ({node.hierarchical_id_str})')
+            raise TypeError(f'Expected SlzHeader, got {type(node.parent_header)} for {node}')
 
         compressed_size = node.parent_header.compressed_size
         compressed_view = self.raw_source[node.offset : node.offset + compressed_size + 16]
@@ -107,7 +107,7 @@ class CompressorHandler(ContainerHandler):
         new_compressed_file = b''
         for i, child in enumerate(node.children):
             if not isinstance(child.parent_header, CompressorHandler.SlzHeader):
-                raise TypeError(f'Expected SlzHeader, got {type(child.parent_header)} for {child.name} ({child.hierarchical_id_str})')
+                raise TypeError(f'Expected SlzHeader, got {type(child.parent_header)} for {child}')
             is_final_payload = i == len(node.children) - 1
             if child in staged_nodes and child.parent_header: # Modified child
                 if child.pending_data is None:

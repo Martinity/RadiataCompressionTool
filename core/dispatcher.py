@@ -5,8 +5,13 @@ Functions as a signal proxy
 from __future__ import annotations
 
 import functools
+import tempfile
 import threading
 import platform
+import subprocess
+import uuid
+import xxhash
+from enum import Enum, auto
 from struct import unpack_from
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +20,7 @@ from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
 from PyQt6.QtWidgets import QWidget, QFileDialog
 
 from core.registry import Registry
-from core.node import VfsManager, ModTracker, VfsNode
+from core.node import VfsManager, ModTracker, VfsNode, NodeConflictError
 from core.workers import (
     TaskCoordinator, ActionStatus, ActionResult, Actions, ActionType, TaskHandle, LogChannel,
     IsoRebuildFlags, ActionDef, EditorPayload
@@ -30,6 +35,17 @@ if TYPE_CHECKING:
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
+
+class ConflictChoice(Enum):
+    '''
+    UI-facing resolution for a NodeConflictError, chosen via
+    ConflictResolverDialog. ModTracker only detects and raises.
+    Dispatcher is what interprets a choice and acts on it using
+    ModTracker's API (revert_node+retry, or apply_modification(force=True)).
+    '''
+    KEEP_OLD  = auto()
+    KEEP_NEW  = auto()
+    KEEP_BOTH = auto()
 
 ###------------------------------------------------- Task signal relay ---------------------------------------------------###
 
@@ -56,10 +72,10 @@ class Dispatcher(QObject):
     Dispatcher does not need to now what an action needs to execute.
     '''
     # Tree / Tracker
-    iso_loaded        = pyqtSignal(bool, object)     # (success, result[root | error_msg])
-    expand_requested  = pyqtSignal(VfsNode, object)  # (VfsNode, wait_event)
-    node_changed      = pyqtSignal(VfsNode)          # Update for TreeView
-    tracking_update   = pyqtSignal(int, int)         # (modified_count, staged_count)
+    iso_loaded        = pyqtSignal(bool, object)      # (success, result[root | error_msg])
+    expand_requested  = pyqtSignal(VfsNode, object)   # (VfsNode, wait_event)
+    tracking_update   = pyqtSignal(int, int)          # (modified_count, staged_count)
+    conflict_prompt   = pyqtSignal(VfsNode, str, str) # (new_node, other node(s), reason)
     # ISO verification
     iso_verified = pyqtSignal(str)                   # Build string. Used for get_build and verify_iso with the difference being specificity
     # Generic node actions
@@ -71,19 +87,18 @@ class Dispatcher(QObject):
         super().__init__()
         self._main_thread_id = threading.get_ident()
         self.vfs:                    VfsManager | None = None
-        self.active_handler:        BaseHandler | None = None
+        self.active_handler:         IsoHandler | None = None
         self.nav:                  VfsNavigator | None = None
         self._metadata_store: NodeMetadataStore | None = None
         self.tracker          = ModTracker()
         self.task_coordinator = TaskCoordinator()
         self.relay            = TaskRelay()
         self._active_channel  = LogChannel.BROWSER
+        self._pending_conflict_choice: ConflictChoice | None = None
         self._setup_connections()
 
     def _setup_connections(self) -> None:
         '''Relay tracker signals to UI'''
-        self.tracker.node_modified.connect(self.node_changed.emit)
-        self.tracker.node_reverted.connect(self.node_changed.emit)
         self.tracker.state_changed.connect(self._relay_tracking_state)
         self.expand_requested.connect(self._handle_expand_requested, Qt.ConnectionType.QueuedConnection) # type: ignore this is valid
         self.ghost_node_confirmed_missing.connect(self._handle_ghost_node_confirmed_missing, Qt.ConnectionType.QueuedConnection) # type: ignore this is valid
@@ -155,20 +170,60 @@ class Dispatcher(QObject):
     def get_node_data(self, node: VfsNode) -> bytes:
         '''Return the raw bytes of the requested node, unwrapping virtual to the physical source.
         Actual tree navigation/resolution happens in VfsNavigator.'''
-        pending = node.pending_data
-        if pending is not None:
-            return pending
+        if node.pending_data is not None:
+            return node.pending_data
         if node.is_physical:
             handler = self.active_handler
             if handler is None:
-                logger.error(f'No physical handler for node: {node.hierarchical_id_str}')
+                logger.error(f'No physical handler for: {node}')
                 return b''
             return handler.get_raw_node(node)
-        nav = self.nav
-        if nav is None:
-            logger.error(f'No VfsNavigator initialized. Cannot resolve node: {node.hierarchical_id_str}')
+        if self.nav is None:
+            logger.error(f'No VfsNavigator initialized. Cannot resolve node: {node}')
             return b''
-        return nav.unwrap_chain(node)
+        return self.nav.unwrap_chain(node)
+
+    def _apply_modifications_with_conflict_prompt(
+        self,
+        node:         VfsNode,
+        new_data:     bytes,
+        data_sources: Callable[[VfsNode], bytes]
+    ) -> bytes | None:
+        '''
+        Wraps ModTracker.apply_modification with conflict resolution: on
+        NodeConflictError, emits conflict_prompt and blocks for a decision,
+        then acts on it using only ModTracker's public API.
+        '''
+        assert threading.get_ident() == self._main_thread_id, (
+            '_apply_modification_with_conflict_prompt relies on a same-thread, '
+            'direct signal connection to block for the UI\'s answer.'
+        )
+        try:
+            return self.tracker.apply_modification(node, new_data, data_sources)
+        except NodeConflictError as conflict:
+            self._pending_conflict_choice = None
+            self.conflict_prompt.emit(conflict.node, conflict.others_str, conflict.reason)
+            choice = self._pending_conflict_choice
+            self._pending_conflict_choice = None
+            if choice is None:
+                logger.error(f'No conflict resolution received for {node}: doing nothing.')
+                return None
+            if choice == ConflictChoice.KEEP_OLD:
+                logger.info(f'Conflict on {node}: kept {len(conflict.others)} existing modification(s), new edit discarded.')
+                return None
+            if choice == ConflictChoice.KEEP_NEW:
+                logger.info(f'Conflict on {node}: importing new data, discarding pending edits on: {conflict.others}.')
+                for _node in conflict.others:
+                    self.tracker.revert_node(_node)
+                for child in node.children_snapshot:
+                    self.vfs.remove_node(child)
+                return self.tracker.apply_modification(node, new_data, data_sources)
+            logger.warning(f'Conflict on {node}: keeping both, will be flagged during staging.')
+            return self.tracker.apply_modification(node, new_data, data_sources, force=True)
+
+    def resolve_conflict_choice(self, node: VfsNode, choice: ConflictChoice) -> None:
+        '''Connected to MainWindow.conflict_choice_made. Recorde the choice.'''
+        self._pending_conflict_choice = choice
 
     def apply_edit(
         self,
@@ -181,9 +236,14 @@ class Dispatcher(QObject):
         '''Pushes changes to the tracker.
         If data is not bytes, dispatches to a background worker to decode the payload
         Notifies the editor when finished'''
-        if isinstance(data, bytes): # Bytes type payload passthrough
-            original = self.get_node_data(node) if node not in self.tracker._originals else b''
-            self.tracker.mark_modified(node, data, original)
+        if isinstance(data, bytes):
+            # Doesn't go through an editor, this is a much more dangerous mutation which
+            # can invalidate children and corrupt the tree. With the added complexity of
+            # datacenter headers newly imported data should also be parsed upon entry to
+            # ensure dependent nodes are also updated to match the new payload.
+            previous_content = self._apply_modifications_with_conflict_prompt(node, data, self.get_node_data)
+            if not previous_content:
+                return
             logger.info(f'Modified: "{node.name}" added to rebuild queue.')
             if on_success:
                 on_success()
@@ -242,7 +302,7 @@ class Dispatcher(QObject):
         return task_handle
 
     def execute_node_action(self, node: VfsNode, action_name: str, **kwargs) -> None:
-        '''Route action through Actions.dispatch. '''
+        '''Route action through Actions.dispatch or the appropriate Action.*custom_action*'''
         if not self.nav:
             logger.error('Navigator not initialised')
             return
@@ -252,9 +312,10 @@ class Dispatcher(QObject):
                 action_name=action_name,
                 node=node,
                 status=ActionStatus.FAILURE,
-                message=f'No ActionDef registered for "{action_name}" on node: {node.hierarchical_id_str}'
+                message=f'No ActionDef registered for "{action_name}" on node: {node}'
             ))
             return
+
         if action_def.action_type is ActionType.TREE_EXPAND:
             if node.last_expansion_success is not None:  # Already expanded (dedup)
                 self.action_complete.emit(ActionResult(
@@ -266,6 +327,12 @@ class Dispatcher(QObject):
                 return
             self.nav.request_expansion(node, lambda success, _node: None)
             return
+
+        if action_def.action_type is ActionType.IMPORT and node.target:
+            self._execute_complex_import(node, action_def, **kwargs)
+            return
+
+        # Standard Action
         task_handle = self._start(
             Actions.dispatch,
             action_def,
@@ -276,6 +343,49 @@ class Dispatcher(QObject):
             **kwargs
             )
         task_handle.finished.connect(self._on_action_complete)
+
+    def _execute_complex_import(self, node: VfsNode, action_def: ActionDef, **kwargs) -> None:
+        '''Complex import helper: resolves unresolved nodes needed for import and start the worker.'''
+        if self.vfs is None or not node.target:
+            return
+        self.vfs.remove_node_children(node)
+        handler_class = Registry.get_handler(node)
+        def _start_import(target_node: VfsNode) -> None:
+            if not self._metadata_store:
+                return
+            # check the metadata store to verify if we are dealing with an entity pack
+            base_idx = node.hierarchical_id_str
+            metadata = []
+            for i in range(10):
+                metadata.append(self._metadata_store.get(base_idx + '.' + str(i)))
+            child_headers = []
+            for entry in metadata:
+                if entry and entry.target_hid:
+                    child_headers.append(self.vfs.get_vfs_node_by_id(entry.target_hid)) # type: ignore The child always has to be previously registered at this point
+            task_handle = self._start(
+                Actions.complex_import,
+                node,
+                target_node,
+                handler_class,
+                self.tracker,
+                self.get_node_data,
+                child_headers,
+                channel=LogChannel.TOAST,
+                label=action_def.name,
+                **kwargs
+            )
+            task_handle.finished.connect(self._on_action_complete)
+
+        target_node = self.vfs.get_vfs_node_by_id(node.target) if self.vfs else None
+        if target_node is not None:
+            _start_import(target_node)
+            return
+        if not self.nav:
+            logger.error(f'No navigator available to resolve {node.target} for {node}')
+            return
+        self.nav.resolve_ghost_node(node.target, _start_import)
+        return
+
 
     def start_iso_rebuild(self, request: RebuildRequest, output_path: Path) -> TaskHandle | None:
         '''
@@ -376,7 +486,7 @@ class Dispatcher(QObject):
 
     ###------------------------------ Helpers --------------------------------###
 
-    def _load_physical(self, handler: IsoHandler) -> TaskHandle:
+    def _load_physical(self, handler: IsoHandler) -> TaskHandle | None:
         '''Send ISO loading to a worker thread'''
         if self.active_handler:
             self.active_handler.close()
@@ -405,7 +515,7 @@ class Dispatcher(QObject):
         logger.info(f'Migration complete: {count} target entries written to {store._path.name}')
         logger.info('Re-enrichment pass complete - datacenter nodes have .kods extension.')
 
-    ###------------------------ Callback -----------------------###
+    ###------------------------ Callbacks and Signals -----------------------###
     def _on_expand_requested(self, parent: VfsNode, wait_event: threading.Event) -> None:
         '''
         Cross-thread callback for VfsNavigator. Blocking on node.begin_expansion()
@@ -427,7 +537,7 @@ class Dispatcher(QObject):
             if self.nav:
                 self.nav.complete_expansion(node, True)
             return
-        logger.debug(f'Expanding: {node.name} {node.hierarchical_id}')
+        logger.debug(f'Expanding: {node}')
         task_handle = self._start(
             Actions.dispatch,
             action_def,
@@ -448,7 +558,7 @@ class Dispatcher(QObject):
             logger.error('_on_expansion_task_done called from non-main thread')
         self._on_action_complete(success, result)  # inserts children into VFS
         if not success:
-            logger.error(f'Expansion failed for {node.name} {node.hierarchical_id}: {result}')
+            logger.error(f'Expansion failed for {node}: {result}')
         if self.nav:
             # Runs after on_action_complete so waiters see node.children
             self.nav.complete_expansion(node, success)
@@ -492,7 +602,7 @@ class Dispatcher(QObject):
 
         header: bytes = self.get_node_data(node)[:0x30]
         if len(header.replace(b'\x00', b'')) < 16:
-            logger.debug(f'Header too short: {len(header.replace(b"\\x00", b""))} bytes, node {node.name} ({node.hierarchical_id_str}) applying .bin')
+            logger.debug(f'Header too short: {len(header.replace(b"\\x00", b""))} bytes. {node} applying .bin')
             ext = '.bin'
         else:
             ext = lookup_extension(header, _check_pk(header))
@@ -512,25 +622,29 @@ class Dispatcher(QObject):
             self.iso_loaded.emit(False, msg)
             return
         handler, root = result.handler, result.root
-        if not root:
-            msg = 'ISO load succeeded but no root node was returned'
+        if not root or not handler:
+            msg = 'ISO load succeeded but no root or handler was returned'
             self.iso_loaded.emit(False, msg)
             return
+
         self.active_handler = handler
         self.vfs = VfsManager(
             root,
-            root.children[-1],
             node_enricher=(self._metadata_store.enrich if self._metadata_store else None)
         )
+        # Connect signals
+        self.tracker.node_modified.connect(self.vfs.update_node)
+        self.tracker.node_reverted.connect(self.vfs.update_node)
         self.vfs.request_extension.connect(self._handle_extension_request)
+
         self.vfs.enrich_initial_tree() # This populates node names/categories/extensions from metadata, thus is now crucial
         self.nav = VfsNavigator(self.vfs, self.get_node_data, self._on_expand_requested, self._on_ghost_node_confirmed_missing)
+
         if handler is not None:
             # I think doing this on mainthread is fine since when this fires it is not possible for there to be any node registration
-            build = handler.get_region(root)  # type: ignore
+            build = handler.get_region(root)
             QTimer.singleShot(0, lambda: self.iso_verified.emit(build))
         # self._migrate_targets_if_needed()   # Uncomment for building metadata from scratch
-
         self.iso_loaded.emit(True, root)
 
     def _handle_verify_hash(self) -> None:
@@ -581,7 +695,7 @@ class Dispatcher(QObject):
                         logger.warning(f'TREE_EXPAND action returned unexpected payload type: {type(result.payload)}')
                     if new_nodes:
                         self.vfs.insert_children(result.node, new_nodes)
-                        logger.debug(f'Inserted {len(new_nodes)} nodes into: {result.node.hierarchical_id_str}')
+                        logger.debug(f'Inserted {len(new_nodes)} nodes into: {result.node}')
             case _:
                 pass # PROCESS / DIALOG / EXPORT -- UI handled via action_complete
 
@@ -601,8 +715,9 @@ class Dispatcher(QObject):
         if threading.get_ident() != self._main_thread_id:
             logger.error("_on_decode_done ran off the main thread")
         if success and isinstance(result, bytes):
-            original = self.get_node_data(node) if node not in self.tracker._originals else b''
-            self.tracker.mark_modified(node, result, original)
+            previous_content = self._apply_modifications_with_conflict_prompt(node, result, self.get_node_data)
+            if not previous_content:
+                return
             logger.info(f'Modified: "{node.name}" added to rebuild queue.')
             if on_success:
                 on_success()
