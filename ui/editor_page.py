@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from typing import Any, Callable, TYPE_CHECKING
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, QTimer
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QStackedWidget, QMessageBox, QApplication
 from PyQt6.QtGui import QShortcut
 from PyQt6 import sip
@@ -353,8 +353,14 @@ class EditorPage(QWidget):
         if self._current_session and self._current_session.state == 'ready':
             focus_widget = QApplication.focusWidget()
             if focus_widget:
-                logger.debug('Focus cleared before saving.')
                 focus_widget.clearFocus()
+                QTimer.singleShot(0, self._do_save)
+            else:
+                self._do_save()
+            self._current_session.apply_changes()
+
+    def _do_save(self) -> None:
+        if self._current_session and self._current_session.state == 'ready':
             self._current_session.apply_changes()
 
     def _on_revert(self) -> None:

@@ -48,11 +48,7 @@ class HexEditorWidget(BaseEditor):
         self.undo_stack = QUndoStack(self)
         self.undo_stack.canUndoChanged.connect(self._on_history_changed)
         self.undo_stack.canRedoChanged.connect(self._on_history_changed)
-        # Bandaid: get the state then push on the next event cycle to fix freeze
-        # The source of the dirty state freeze needs more research
-        self.undo_stack.cleanChanged.connect(
-            lambda clean: QTimer.singleShot(0, lambda c=clean: self.set_dirty(not c))
-        )
+        self.undo_stack.cleanChanged.connect(lambda clean: self.set_dirty(not clean))
         self._setup_ui()
         self._setup_shortcuts()
 
