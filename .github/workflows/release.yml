@@ -43,8 +43,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo wget -O /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-          echo "a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0  /usr/local/bin/appimagetool" | sha256sum --check
-          sudo chmod +x /usr/local/bin/appimagetool
+          if ! echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /usr/local/bin/appimagetool" | sha256sum --check; then          sudo chmod +x /usr/local/bin/appimagetool
+            echo "ERROR: Checksum mismatch! Actual checksum: "
+            sha256sum /user/local/bin/appimagetool
+            exit 1
+          fi
+        sudo chmod +x /user/local/bin/appimagetool
       - name: Package (Linux)
         if: runner.os == 'Linux'
         env:
@@ -66,7 +70,7 @@ jobs:
         run: |
           Get-ChildItem *.zip | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-            "$hash  $($_.Name)" | Out-File -FilePath SHA256SUM-windows-x64.txt -Overwrite
+            "$hash  $($_.Name)" | Out-File -FilePath SHA256SUM-windows-x64.txt -Append
           }
       - name: Generate SHA-256 Checksums (Linux)
         if: runner.os == 'Linux'
