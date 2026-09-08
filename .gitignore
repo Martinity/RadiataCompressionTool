@@ -221,3 +221,8 @@ core/_version.py
 *.AppImage
 RadiataModdingTool-*.zip
 RadiataModdingTool-*.tar.gz
+
+# Local regeneration tooling for the EVD format section and symbol assets.
+# Both outputs are checked in; these only matter if you maintain their sources.
+scripts/vendor_evd_tool.py
+scripts/split_symbols.py

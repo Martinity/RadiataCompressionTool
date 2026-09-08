@@ -5,18 +5,20 @@ import wave
 from pathlib import Path
 from io import BytesIO
 from typing import Any
-from PyQt6.QtCore import QTimer, Qt, QIODevice, QSettings
+from PyQt6.QtCore import QTimer, Qt, QIODevice, QSettings, QByteArray, QSize
 from PyQt6.QtWidgets import (
-    QWidget, QFrame, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, 
+    QWidget, QFrame, QVBoxLayout, QLabel, QHBoxLayout, QPushButton,
     QCheckBox, QSlider, QMessageBox, QFileDialog, QStyle, QStyleOptionSlider,
-    QStackedLayout,
+    QStackedLayout
 )
-from PyQt6.QtGui import QPainter, QPen
+from PyQt6.QtGui import QPainter, QPen, QIcon, QPixmap
 from PyQt6.QtMultimedia import QAudioSink, QAudioFormat
+from PyQt6.QtSvg import QSvgRenderer
 from core.contracts import BaseViewer
 from core.node import VfsNode
 from core.registry import Registry
 from core.handlers.tac_leaf import TacEditorPayload, TacHandler, TacInfo, decode_tac_to_wav
+from utilities import svg_to_icon
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -42,8 +44,9 @@ class TacError(RuntimeError):
     extensions=('.020',)
 )
 class TacAudioEditor(BaseViewer):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, data_resolver=None) -> None:
         super().__init__(parent)
+        self._data_resolver = data_resolver
         self._raw: bytes = b""
         self._wav: bytes | None = None
         self._pcm: bytes | None = None
@@ -75,50 +78,51 @@ class TacAudioEditor(BaseViewer):
 
         self._stack.addWidget(self._status_label)
         self._stack.addWidget(editor_widget)
- 
+
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("EditorToolbar")
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(10, 5, 10, 5)
- 
+
         self._btn_export  = QPushButton("Export WAV")
         self._btn_export.setEnabled(False)
         self._btn_export.clicked.connect(self._export_wav)
- 
+
         lay.addStretch()
         lay.addWidget(self._btn_export)
         return bar
- 
+
     def _build_info_panel(self) -> QFrame:
         frame  = QFrame()
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
- 
+
         controls = QHBoxLayout()
         controls.setSpacing(8)
- 
-        self._btn_play_pause = QPushButton("▶")
-        self._btn_play_pause.setFixedSize(34, 28)
+
+        self._btn_play_pause = QPushButton()
+        self._btn_play_pause.setIcon(svg_to_icon('play'))
+        self._btn_play_pause.setIconSize(QSize(34, 28))
         self._btn_play_pause.setToolTip("Play/Pause")
         self._btn_play_pause.setEnabled(False)
         self._btn_play_pause.clicked.connect(self._toggle_playback)
- 
+
         self._time_label  = QLabel("0:00 / 0:00")
         self._time_label.setMinimumWidth(88)
- 
+
         self._seek_slider = LoopSeekSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setRange(0, 0)
         self._seek_slider.sliderPressed.connect(self._begin_seek)
         self._seek_slider.sliderReleased.connect(self._finish_seek)
         self._seek_slider.sliderMoved.connect(self._preview_seek)
- 
+
         self._loop_checkbox = QCheckBox("Loop")
         self._loop_checkbox.setEnabled(False)
         self._loop_checkbox.setVisible(False)
         self._loop_checkbox.toggled.connect(self._on_loop_toggled)
- 
+
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
         settings = QSettings('RadiataModding', 'Tool')
@@ -126,7 +130,7 @@ class TacAudioEditor(BaseViewer):
         self._volume_slider.setValue(saved_volume)
         self._volume_slider.setFixedWidth(120)
         self._volume_slider.valueChanged.connect(self._set_volume)
- 
+
         controls.addWidget(self._btn_play_pause)
         controls.addWidget(self._seek_slider, stretch=1)
         controls.addWidget(self._time_label)
@@ -134,7 +138,7 @@ class TacAudioEditor(BaseViewer):
         controls.addWidget(QLabel("Volume:"))
         controls.addWidget(self._volume_slider)
         layout.addLayout(controls)
- 
+
         self._info_rows: dict[str, QLabel] = {}
         for key in (
             "Sample rate", "Channels", "Frames", "Samples",
@@ -147,7 +151,7 @@ class TacAudioEditor(BaseViewer):
             row.addWidget(value, stretch=1)
             layout.addLayout(row)
             self._info_rows[key] = value
- 
+
         return frame
 
     def begin_loading(self, node: VfsNode) -> None:
@@ -177,7 +181,7 @@ class TacAudioEditor(BaseViewer):
             self.show_load_error(f'PCM load failed: {e}')
             logger.error(f'TacAudioEditor PCM load failed: {e}', exc_info=True)
             return
-        
+
         self._populate_info(result.info)
         has_loop: bool = result.info.loop_sample is not None
         self._loop_checkbox.setEnabled(has_loop)
@@ -210,13 +214,13 @@ class TacAudioEditor(BaseViewer):
         self._seek_slider.setRange(0, 0)
         self._seek_slider.set_loop_position(None)
         self._time_label.setText("0:00 / 0:00")
-        self._btn_play_pause.setText("▶")
+        self._btn_play_pause.setIcon(svg_to_icon('play'))
         self._loop_checkbox.setChecked(False)
         self._loop_checkbox.setEnabled(False)
         self._loop_checkbox.setVisible(False)
         for lbl in self._info_rows.values():
             lbl.setText("-")
-    
+
     def _set_controls_enabled(self, enabled: bool) -> None:
         self._btn_export.setEnabled(enabled)
         self._btn_play_pause.setEnabled(enabled)
@@ -256,13 +260,13 @@ class TacAudioEditor(BaseViewer):
             sample_rate  = src.getframerate()
             frame_count  = src.getnframes()
             pcm          = src.readframes(frame_count)
- 
+
         if channels != TAC_CHANNELS or sample_width != 2 or sample_rate != TAC_SAMPLE_RATE:
             raise TacError(
                 f"Unexpected PCM format: {channels}ch, "
                 f"{sample_width * 8}-bit, {sample_rate} Hz"
             )
- 
+
         self._pcm          = pcm
         self._audio_device = PcmLoopDevice(
             pcm, sample_rate, channels, sample_width,
@@ -284,19 +288,19 @@ class TacAudioEditor(BaseViewer):
     def _on_loop_toggled(self, checked: bool) -> None:
         if self._audio_device:
             self._audio_device.set_loop_enabled(checked)
- 
+
     def _begin_seek(self) -> None:
         self._seeking = True
- 
+
     def _preview_seek(self, position: int) -> None:
         self._update_time_label(position, self._duration_ms())
- 
+
     def _finish_seek(self) -> None:
         self._seeking = False
         if self._audio_device:
             self._audio_device.set_position_ms(self._seek_slider.value())
             self._sync_playback_ui()
- 
+
     def _start_playback(self) -> None:
         if not self._audio_device:
             return
@@ -307,18 +311,18 @@ class TacAudioEditor(BaseViewer):
             self._audio_sink.setVolume(self._volume_slider.value() / 100)
         self._audio_sink.start(self._audio_device)
         self._is_playing = True
-        self._btn_play_pause.setText("⏸")
+        self._btn_play_pause.setIcon(svg_to_icon('pause'))
         self._playback_timer.start()
- 
+
     def _pause_playback(self) -> None:
         if self._audio_sink:
             self._audio_sink.stop()
             self._audio_sink.deleteLater()
             self._audio_sink = None
         self._is_playing = False
-        self._btn_play_pause.setText('▶')
+        self._btn_play_pause.setIcon(svg_to_icon('play'))
         self._playback_timer.stop()
- 
+
     def _stop_playback(self) -> None:
         self._playback_timer.stop()
         if self._audio_sink:
@@ -329,8 +333,8 @@ class TacAudioEditor(BaseViewer):
             self._audio_device.close()
             self._audio_device.set_position_ms(0)
         self._is_playing = False
-        self._btn_play_pause.setText("▶")
- 
+        self._btn_play_pause.setIcon(svg_to_icon('play'))
+
     def _sync_playback_ui(self) -> None:
         if not self._audio_device:
             return
@@ -340,39 +344,39 @@ class TacAudioEditor(BaseViewer):
         self._update_time_label(position, self._duration_ms())
         if self._audio_device.at_end() and not self._loop_checkbox.isChecked():
             self._pause_playback()
- 
+
     def _set_volume(self, value: int) -> None:
         settings = QSettings('RadiataModding', 'Tool')
         settings.setValue('volume', value)
         if self._audio_sink:
             self._audio_sink.setVolume(value / 100)
- 
+
     def _audio_format(self) -> QAudioFormat:
         fmt = QAudioFormat()
         fmt.setSampleRate(TAC_SAMPLE_RATE)
         fmt.setChannelCount(TAC_CHANNELS)
         fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
         return fmt
- 
+
     def _duration_ms(self) -> int:
         if self._audio_device:
             return self._audio_device.duration_ms()
         if self._info:
             return round(self._info.duration_seconds * 1000)
         return 0
- 
+
     def _loop_position_ms(self) -> int | None:
         if not self._info or self._info.loop_sample is None:
             return None
         return round((self._info.loop_sample / TAC_SAMPLE_RATE) * 1000)
- 
+
     def _update_time_label(self, position: int, duration: int) -> None:
         self._time_label.setText(f"{_format_ms(position)} / {_format_ms(duration)}")
- 
+
     def cleanup(self) -> None:
         self._stop_playback()
         super().cleanup()
- 
+
     def closeEvent(self, a0) -> None:
         self._stop_playback()
         super().closeEvent(a0)

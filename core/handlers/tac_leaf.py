@@ -1,15 +1,12 @@
 """TAC audio support for Radiata Stories audio streams."""
 
 from __future__ import annotations
+from os import name
 
 import ctypes
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-import platform
-import shutil
-import subprocess
-import sys
 import wave
 from typing import Any, NamedTuple
 
@@ -17,9 +14,9 @@ from core.node import VfsNode
 from core.registry import Registry
 from core.contracts import LeafHandler
 from core.workers import ActionDef, ActionType
+from core.native.native_registry import NativeLibrary, NativeRegistry
 
 import logging
-
 logger = logging.getLogger(f"radiata.{__name__}")
 
 ###----------------------------------------------- Constants -----------------------------------------------###
@@ -110,135 +107,15 @@ def parse_tac_header(data: bytes) -> TacInfo:
 
 ###--------------------------------------------- Native Decoder ----------------------------------------------###
 
-def _native_root() -> Path:
-    return Path(__file__).resolve().parents[1] / "tac"
+TAC_MODULE = NativeLibrary(
+    name='tac_codec',
+    root_dir=Path(__file__).resolve().parent.parent / 'native',
+    sources=['tac_lib.c'],
+    link_args=['-lm'],
+)
 
 
-def _source_map(root: Path) -> list[tuple[Path, str]]:
-    return [
-        (root / "tac_lib.c", "tac_lib.c"),
-        (root / "tac_lib.h", "tac_lib.h"),
-        (root / "tac_data.h", "tac_data.h"),
-        (root / "tac_ops.h", "tac_ops.h"),
-    ]
-
-
-def _native_library_name() -> str:
-    if sys.platform.startswith("win"):
-        return "tac_codec.dll"
-    if sys.platform == "darwin":
-        return "libtac_codec.dylib"
-    return "libtac_codec.so"
-
-
-def _platform_tag() -> tuple[str, str]:
-    if sys.platform.startswith("win"):
-        osname = "windows"
-    elif sys.platform == "darwin":
-        osname = "macos"
-    else:
-        osname = "linux"
-    return osname, platform.machine().lower()
-
-
-def _prebuilt_tac_paths() -> list[Path]:
-    name = _native_library_name()
-    osname, arch = _platform_tag()
-    dirs: list[Path] = []
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        base = Path(meipass)
-        dirs += [base / "native", base]
-    root = _native_root()
-    dirs += [root / "prebuilt" / f"{osname}-{arch}", root / "prebuilt" / osname]
-    return [d / name for d in dirs]
-
-
-def _find_c_compiler() -> str | None:
-    if sys.platform.startswith("win"):
-        return shutil.which("gcc")
-    return shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
-
-
-def _build_command(compiler: str, source_path: Path, output_path: Path) -> list[str]:
-    platform_flags = ["-static-libgcc"] if sys.platform.startswith("win") else ["-fPIC"]
-    cmd = [
-        compiler,
-        "-shared",
-        "-O2",
-        "-std=c99",
-        "-Wall",
-        "-Wextra",
-        *platform_flags,
-        "-o",
-        str(output_path),
-        str(source_path),
-        "-lm",
-    ]
-    return cmd
-
-
-def _build_needed(library_path: Path, sources: list[tuple[Path, str]], force: bool) -> bool:
-    if force or not library_path.exists():
-        return True
-    library_mtime = library_path.stat().st_mtime
-    return any(src.stat().st_mtime > library_mtime for src, _ in sources)
-
-
-def ensure_native_decoder(force_rebuild: bool = False) -> Path:
-    # Tier 1: a prebuilt lib bundled with the app (works frozen, no compiler needed).
-    for cand in _prebuilt_tac_paths():
-        if cand.exists():
-            return cand
-
-    # Frozen bundles have no compiler and a read-only payload — give a clear error.
-    if getattr(sys, "frozen", False):
-        raise TacError("TAC native library missing from bundle")
-
-    # Tier 2: compile from the shipped source (developers running from source).
-    root = _native_root()
-    build_dir = root / ".tac_build"
-    library_path = build_dir / _native_library_name()
-    sources = _source_map(root)
-
-    for src, _ in sources:
-        if not src.exists():
-            raise TacError(f"Missing TAC decoder source: {src.name}")
-
-    if not _build_needed(library_path, sources, force_rebuild):
-        return library_path
-
-    compiler = _find_c_compiler()
-    if not compiler:
-        raise TacError(
-            "No C compiler was found on PATH. Install MinGW/MSYS2 on Windows, "
-            "build-essential on Linux, or Xcode command line tools on macOS."
-        )
-
-    build_dir.mkdir(exist_ok=True)
-    for src, dst_name in sources:
-        shutil.copyfile(src, build_dir / dst_name)
-
-    if library_path.exists():
-        try:
-            library_path.unlink()
-        except PermissionError as exc:
-            raise TacError(
-                f"Cannot rebuild TAC native decoder because {library_path.name} is in use. "
-                "Close any running copy of the tool and try again."
-            ) from exc
-
-    cmd = _build_command(compiler, build_dir / "tac_lib.c", library_path)
-    result = subprocess.run(cmd, cwd=build_dir, text=True, capture_output=True)
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout).strip()
-        raise TacError(f"Failed to build TAC native decoder:\n{details}")
-
-    return library_path
-
-
-def load_decoder(library_path: Path) -> ctypes.CDLL:
-    lib     = ctypes.CDLL(str(library_path))
+def _bindings(lib: ctypes.CDLL) -> ctypes.CDLL:
     u8_ptr  = ctypes.POINTER(ctypes.c_uint8)
     s16_ptr = ctypes.POINTER(ctypes.c_int16)
 
@@ -280,9 +157,10 @@ def _error_name(code: int) -> str:
     return names.get(code, f"decoder error {code}")
 
 
-def decode_tac_to_wav(data: bytes, *, force_rebuild: bool = False) -> tuple[bytes, TacInfo]:
-    library_path = ensure_native_decoder(force_rebuild)
-    lib = load_decoder(library_path)
+def decode_tac_to_wav(data: bytes) -> tuple[bytes, TacInfo]:
+    lib = NativeRegistry.load(TAC_MODULE, _bindings)
+    if not lib:
+        raise TacError("Failed to load TAC decoder")
 
     first_block, first_size = _read_block(data, 0)
     if not first_block:
@@ -353,8 +231,8 @@ def decode_tac_to_wav(data: bytes, *, force_rebuild: bool = False) -> tuple[byte
 ###--------------------------------------------- TAC Handler ----------------------------------------------------------###
 
 @Registry.register(
-    name='TAC Audio Handler', 
-    extensions=('.020',), 
+    name='TAC Audio Handler',
+    extensions=('.020',),
     supported_actions=(
         ActionDef('Properties', ActionType.DIALOG),
         ActionDef('Export as WAV', ActionType.EXPORT),

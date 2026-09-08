@@ -16,12 +16,12 @@ jobs:
           - { os: macos-14,       label: macos-arm64,  arch: arm64 }
           # - { os: macos-13,       label: macos-x86_64, arch: x86_64 }
           - { os: windows-latest, label: windows-x64,  arch: x64 }
-          - { os: ubuntu-22.04,   label: linux-x86_64, arch: x86_64 }
+          - { os: ubuntu-24.04,   label: linux-x86_64, arch: x86_64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - name: Inject version from tag
         shell: bash
         run: echo "__version__ = \"${GITHUB_REF_NAME#v}\"" > core/_version.py
@@ -42,7 +42,8 @@ jobs:
       - name: Install appimagetool (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo wget -O /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          sudo wget -O /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0  /usr/local/bin/appimagetool" | sha256sum --check
           sudo chmod +x /usr/local/bin/appimagetool
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -58,14 +59,14 @@ jobs:
       - name: Generate SHA-256 Checksums (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: shasum -a 256 *.dmg *.zip *.tar.gz 2>/dev/null > SHA256SUM-macos-${{ matrix.arch }}.txt || true
+        run: shasum -a 256 *.dmg 2>/dev/null > SHA256SUM-macos-${{ matrix.arch }}.txt || true
       - name: Generate SHA-256 Checksums (Windows)
-        if: runner.os  == 'Windows'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Get-ChildItem *.zip | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-            "$hash  $($_.Name)" | Out-File -FilePath SHA256SUM-windows-x64.txt -Append
+            "$hash  $($_.Name)" | Out-File -FilePath SHA256SUM-windows-x64.txt -Overwrite
           }
       - name: Generate SHA-256 Checksums (Linux)
         if: runner.os == 'Linux'
@@ -77,7 +78,6 @@ jobs:
           files: |
             *.AppImage
             *.dmg
-
             *.zip
             SHA256SUM-*
           body: |
@@ -104,6 +104,6 @@ jobs:
 
             ### Integrity Verification (Optional)
             Verify your downloads match the compile-time binary fingerprints:
-            - **macOS:** `shasum -a 256 -c SHA256SUM-macos-x64.txt`
+            - **macOS:** `shasum -a 256 -c SHA256SUM-macos-arm64.txt`
             - **Linux:** `sha256sum -c SHA256SUM-linux-x86_64.txt`
             - **Windows (PowerShell):** `Get-FileHash .\RadiataModdingTool-*.zip` compare to `SHA256SUM-windows-x64.txt`

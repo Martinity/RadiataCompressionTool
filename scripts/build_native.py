@@ -32,7 +32,8 @@ def build(src: Path, out: Path, extra: list[str]) -> None:
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     build(ROOT / "core/native/radiata_compressor.c", OUT / lib_name("radiata_compressor"), [])
-    build(ROOT / "core/tac/tac_lib.c", OUT / lib_name("tac_codec"), ["-lm"])
+    build(ROOT / "core/native/tac_lib.c", OUT / lib_name("tac_codec"), ["-lm"])
+    build(ROOT / "core/native/block_device.c", OUT / lib_name("block_device"), [])
     print("native_build contents:", [p.name for p in OUT.iterdir()])
 
 if __name__ == "__main__":

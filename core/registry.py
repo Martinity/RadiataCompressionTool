@@ -276,10 +276,31 @@ class Registry:
 
     @classmethod
     def get_handler(cls, source: VfsNode | Path) -> type[BaseHandler] | None:
-        '''Return handler class for source type'''
+        '''
+        Return the first matching handler for the source.
+        Performs platform-specific checks for physical drives to force IsoHandler.
+        '''
         if isinstance(source, Path):
-            p = cls._handler_by_ext.get(source.suffix.lower())
-            return p[0].handler_class if p else None
+            import platform
+            path_str = str(source)
+            is_physical_drive = False
+            if platform.system() == 'Windows':
+                is_physical_drive = path_str.startswith(r'\\\\.\\')
+            else:
+                try:
+                    is_physical_drive = source.exists() and (source.is_block_device() or source.is_char_device())
+                except OSError:
+                    pass  # Permissions errors are logged to the ui or features should be already disabled
+            if is_physical_drive:
+                # Force IsoHandler for physical drives
+                p = cls._handler_by_ext.get('.iso')
+                return p[0].handler_class if p else None
+            if source.is_file():
+                # Identify standard Path file extensions
+                p = cls._handler_by_ext.get(source.suffix.lower())
+                return p[0].handler_class if p else None
+            # Not a valid Path
+            return None
         profile = cls.get_handler_profile(source)
         return profile.handler_class if profile else None
 
@@ -326,7 +347,7 @@ class Registry:
         return profile.handler_class
 
     @classmethod
-    def get_action(cls, node: 'VfsNode', action_name: str) -> ActionDef | None:
+    def get_action(cls, node: VfsNode, action_name: str) -> ActionDef | None:
         '''Resolve ActionDef from action_name for a given node.
         Checks node's HandlerProfile first falling back to global actions.'''
         profile = cls.get_handler_profile(node)
@@ -334,7 +355,7 @@ class Registry:
             action = profile.get_action(action_name)
             if action:
                 return action
-        return _GLOBAL_ACTIONS_BY_NAME.get(action_name)
+        return _GLOBAL_ACTIONS_BY_NAME.get(action_name, None)
 
     ###----------------------------------- Diagnostics ---------------------------------------###
     @classmethod
@@ -389,8 +410,19 @@ def discover_all() -> None:
     all_errors = handler_errors + editor_errors
 
     if all_errors:
+        import traceback
         error_count = len(all_errors)
-        error_details = '\n'.join(f'    {mod}: {err}' for mod, err in all_errors)
+
+        # Use python traceback to get detailed discovery registration errors.
+        detailed_errors = []
+        for mod, err in all_errors:
+            if getattr(err, '__traceback__', None):
+                tb_lines = traceback.format_exception(type(err), err, err.__traceback__)
+                tb_str = ''.join(tb_lines).replace('\n', '\n      ').strip()
+                detailed_errors.append(f'    {mod}:\n      {tb_str}')
+            else:
+                detailed_errors.append(f'    {mod}: {err}')
+        error_details = '\n'.join(detailed_errors)
         fatal_msg = f'Application startup failed at discovery. Discovered {error_count} plugin errors:\n{error_details}'
         logger.critical(fatal_msg)
         raise RuntimeError(fatal_msg)

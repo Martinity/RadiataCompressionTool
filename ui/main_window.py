@@ -7,32 +7,32 @@ to the log console even when on a different page.
 
 Here is a visual breakdown of the widget hierarchy with ISO loading/rebuild as example:
 =========================================================================================
-  VISUAL HIERARCHY (Main GUI Thread)         |   CONCURRENCY & TASKS (Worker Threads)
+  VISUAL HIERARCHY (Main GUI Thread)       |   CONCURRENCY & TASKS (Worker Threads)
 =========================================================================================
-                                             |
-[MainWindow]                                 |   [Dispatcher] (Task Coordinator)
- ├── MainMenuBar                             |    │
- ├── QStatusBar                              |    │
- │                                           |    │
- └── QStackedWidget                          |    ├── Async Task: Load ISO
-      │                                      |    │    └── Returns: TaskHandle
-      ├── [0] WelcomePage                    |    │
-      │                                      |    └── Async Task: Rebuild ISO
-      ├── [1] FileBrowserPage                |         ├── emit rebuild_progress
-      │    ├── [0] tree_view                 |         └── emit rebuild_log
-      │    ├── [1] search_view               |
-      │    ├── FileMetadataPanel             |
-      │    ├── SearchOverlay                 |
-      │    └── log_console (Toggleable)      |
-      │                                      |
-      ├── [2] StagingPage                    |
-      │    └── HexDiffModel                  |
-      │                                      |
-      ├── [3] RebuildStatusPage              |
-      │    ├── QProgressBar ◄────────────────┼─── receive rebuild_progress
-      │    └── QTextEdit ◄───────────────────┼─── receive rebuild_log
-      │                                      |
-      └── [4] EditorPage                     |
+                                           |
+[MainWindow]                               |   [Dispatcher] (Task Coordinator)
+├── MainMenuBar                            |    ├── TaskRelay - generic pooled tasks
+├── QStatusBar                             |    │    (tree expand, node actions, editor
+│                                          |    │     prep/decode, verify hash...)
+└── QStackedWidget                         |    │    tagged with LogChannel, routed by
+    │                                      |    │    MainWindow._route_task_log/progress
+    ├── [0] WelcomePage                    |    │
+    │                                      |    └── Async Task: Load ISO
+    ├── [1] FileBrowserPage                |         └── Returns: TaskHandle
+    │    ├── [0] tree_view                 |
+    │    ├── [1] search_view               |   [RebuildCoordinator] (dedicated, not pooled)
+    │    ├── FileMetadataPanel             |    ├── owns stage->path->run->complete lifecycle
+    │    ├── SearchOverlay                 |    ├── emit progress / log / finished
+    │    └── log_console (Toggleable)      |    └── flips Dispatcher's active TaskRelay
+    │                                      |         channel to REBUILD for the duration
+    ├── [2] StagingPage                    |
+    │    └── HexDiffModel                  |
+    │                                      |
+    ├── [3] RebuildStatusPage              |
+    │    ├── QProgressBar ◄────────────────┼─── receive RebuildCoordinator.progress
+    │    └── QTextEdit ◄───────────────────┼─── receive RebuildCoordinator.log
+    │                                      |
+    └── [4] EditorPage                     |
            └── *Plugin-specific
 """
 
@@ -40,38 +40,43 @@ from __future__ import annotations
 
 import logging
 import threading
-from enum import IntEnum
+import platform
+import json
+import subprocess
+import os
+from enum import IntEnum, Enum, auto
 from pathlib import Path
 
-from core.dispatcher import Dispatcher
+from core.dispatcher import Dispatcher, RebuildCoordinator, LogChannel, ConflictChoice
 from core.metadata_manager import NodeMetadataStore
 from core.node import VfsNode
 from core.version import __version__
-from core.workers import TaskHandle
-from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardItemModel, QKeySequence
+from core.workers import TaskHandle, IsoRebuildFlags
+from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint
+from PyQt6.QtGui import QAction, QCloseEvent, QColor, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenuBar,
-    QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QTextEdit,
-    QTreeView, QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QPushButton, QStackedWidget, QStatusBar, QTextEdit, QWidgetAction,
+    QTreeView, QVBoxLayout, QWidget, QTabWidget, QLineEdit, QComboBox, QSizePolicy, QCheckBox,
+    QRadioButton, QDialogButtonBox
 )
 from ui.editor_page import EditorPage
 from ui.file_browser_page import FileBrowserBehavior, FileBrowserPage
-from ui.settings import AppSettings
+from ui.settings import AppSettings, Shortcuts, Shortcut
 from ui.staging_page import StagingPage
 from ui.theme_manager import ThemeManager
-from utilities import get_resource_path
+from utilities import get_resource_path, human_size, ConflictResolverDialog
 
 logger = logging.getLogger(f'radiata.{__name__}')
 
 
 # Enums for page stack idx
 class AppPage(IntEnum):
-    WELCOME   = 0
-    WORKSPACE = 1
-    STAGING   = 2
-    REBUILD   = 3
-    EDITOR    = 4
+    WELCOME     = 0
+    FILEBROWSER = 1
+    STAGING     = 2
+    REBUILD     = 3
+    EDITOR      = 4
 
 
 ###---------------------------------------------- Main Window ----------------------------------------###
@@ -82,6 +87,7 @@ class MainWindow(QMainWindow):
     Serves as the root container for the application stack, managing the QSettings,
     theme state, and cross-component signal routing.
     """
+    conflict_choice_made = pyqtSignal(VfsNode, ConflictChoice)
 
     def __init__(self, dispatcher: Dispatcher, is_test: bool = False) -> None:
         super().__init__(parent=None)
@@ -100,29 +106,31 @@ class MainWindow(QMainWindow):
         )
         self.metadata_store.load()
         self.dispatcher.set_metadata_store(self.metadata_store)
+        self.rebuild_coordinator = RebuildCoordinator(self.dispatcher, self)
         # Setup View
-        self.stack           = QStackedWidget()
-        self.welcome_page    = WelcomePage(self.app_settings)
-        self.workspace_page  = FileBrowserPage(self.metadata_store)
-        self.staging_page    = StagingPage(self.dispatcher)
-        self.rebuild_page    = RebuildStatusPage()
-        self.editor_page     = EditorPage()
+        self.stack              = QStackedWidget()
+        self.welcome_page       = WelcomePage(self.app_settings)
+        self.file_browser_page  = FileBrowserPage(self.metadata_store)
+        self.staging_page       = StagingPage(self.dispatcher, self.rebuild_coordinator)
+        self.rebuild_page       = RebuildStatusPage()
+        self.editor_page        = EditorPage()
         self._setup_ui()
 
         # Behavior controllers
         self.controller = FileBrowserBehavior(
-            self.workspace_page,
+            self.file_browser_page,
             self.editor_page,
             self.dispatcher,
             self.metadata_store,
         )
         self.menu_manager = MainMenuBar(
             self,
-            self.workspace_page,
+            self.file_browser_page,
             self.dispatcher,
             self.metadata_store,
             self.app_settings,
         )
+        self.toast = Toast(self)
         self._setup_statusbar()
         self._connect_signals()
         self._restore_layout()
@@ -137,7 +145,7 @@ class MainWindow(QMainWindow):
         """Initializes the central widget stack and default window properties."""
         self.setCentralWidget(self.stack)
         self.stack.addWidget(self.welcome_page)
-        self.stack.addWidget(self.workspace_page)
+        self.stack.addWidget(self.file_browser_page)
         self.stack.addWidget(self.staging_page)
         self.stack.addWidget(self.rebuild_page)
         self.stack.addWidget(self.editor_page)
@@ -152,7 +160,7 @@ class MainWindow(QMainWindow):
         return bar
 
     def _setup_statusbar(self) -> None:
-        self.status_bar.showMessage('Ready', 3000)
+        self.status_bar.showMessage('Ready')
 
     def _on_worker_log(self, msg: str) -> None:
         """
@@ -161,25 +169,45 @@ class MainWindow(QMainWindow):
         """
         if threading.get_ident() != self._main_thread_id:
             logger.error('_on_worker_log ran off the main thread!')
-        self.status_bar.showMessage(msg, 0)
 
     def _connect_signals(self) -> None:
         """Routes main window state signals between UI pages or dispatcher"""
         self.welcome_page.request_open.connect(self.attempt_load_iso)
-        self.workspace_page.btn_review.clicked.connect(lambda: self.stack.setCurrentIndex(AppPage.STAGING))
-        self.staging_page.request_workspace.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
-        self.editor_page.back_requested.connect(lambda: self.stack.setCurrentIndex(AppPage.WORKSPACE))
+        self.file_browser_page.btn_review.clicked.connect(lambda: self.stack.setCurrentIndex(AppPage.STAGING))
+        self.staging_page.request_file_browser.connect(lambda: self.stack.setCurrentIndex(AppPage.FILEBROWSER))
+        self.editor_page.back_requested.connect(lambda: self.stack.setCurrentIndex(AppPage.FILEBROWSER))
 
         self.dispatcher.iso_loaded.connect(self._on_iso_loaded)
-        self.dispatcher.rebuild_requested.connect(self.start_rebuild)
-        self.dispatcher.rebuild_progress.connect(self.rebuild_page.update_progress)
-        self.dispatcher.rebuild_log.connect(self.rebuild_page.append_log)
-        self.dispatcher.rebuild_complete.connect(self.on_rebuild_complete)
-        self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(f'Build: {build}', 0))
-        self.dispatcher.io_progress.connect(lambda val, msg: self.status_bar.showMessage(msg))
-        self.dispatcher.io_complete.connect(self._handle_io_completion)
+        self.dispatcher.iso_verified.connect(lambda build: self.status_bar.showMessage(build))
 
-        self.dispatcher.file_browser_log.connect(self.workspace_page.append_log)
+        self.rebuild_coordinator.preparing_build.connect(self._on_rebuild_prep_started)
+        self.rebuild_coordinator.started.connect(self._on_rebuild_started)
+        self.rebuild_coordinator.progress.connect(self.rebuild_page.update_progress)
+        self.rebuild_coordinator.log.connect(self.rebuild_page.append_log)
+        self.rebuild_coordinator.finished.connect(self.on_rebuild_complete)
+
+        # Generic task routing
+        self.dispatcher.relay.log.connect(self._route_task_log)
+        self.dispatcher.relay.progress.connect(self._route_task_progress)
+
+        self.dispatcher.conflict_prompt.connect(self._on_conflict_detected)
+        self.conflict_choice_made.connect(self.dispatcher.resolve_conflict_choice)
+
+    def _route_task_log(self, channel: LogChannel, message: str) -> None:
+        if channel is LogChannel.REBUILD:
+            self.rebuild_page.append_log(message)
+        else:
+            self.file_browser_page.append_log(message)
+
+    def _route_task_progress(self, channel: LogChannel, percentage: int, label: str) -> None:
+        '''Where to send progress. label is optional upstream used by toast but not rebuild.'''
+        match channel:
+            case LogChannel.REBUILD:
+                self.rebuild_page.update_progress(percentage)
+            case LogChannel.TOAST:
+                self.toast.show_progress(percentage, label)
+            case LogChannel.BROWSER:
+                pass
 
     ###------------------------------- Appearance ----------------------------------###
     def _restore_layout(self) -> None:
@@ -188,11 +216,11 @@ class MainWindow(QMainWindow):
         if s.geometry:
             self.restoreGeometry(s.geometry)
         if s.h_splitter:
-            self.workspace_page.h_splitter.restoreState(s.h_splitter)
+            self.file_browser_page.h_splitter.restoreState(s.h_splitter)
         if s.v_splitter:
-            self.workspace_page.v_splitter.restoreState(s.v_splitter)
+            self.file_browser_page.v_splitter.restoreState(s.v_splitter)
         self._apply_theme()
-        self.workspace_page.log_console.setVisible(s.show_log_console)
+        self.file_browser_page.log_console.setVisible(s.show_log_console)
         logging.getLogger('radiata').setLevel(
             logging.DEBUG if self.app_settings.verbose_logging else logging.INFO
         )
@@ -220,6 +248,19 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self.app_settings.theme_name = theme_name
 
+    def resizeEvent(self, event: QResizeEvent) -> None: # type: ignore
+        '''Repositions the toast progress bar when the window is resized.'''
+        super().resizeEvent(event)
+        if self.toast.progress.isVisible():
+            self.toast._reposition()
+
+    def _toggle_menu_actions(self, has_iso: bool) -> None:
+        '''Toggle menu options based on the iso loaded state'''
+        self.menu_manager.open_action.setEnabled(not has_iso)
+        self.menu_manager.close_action.setEnabled(has_iso)
+        self.menu_manager.verify_hash.setEnabled(has_iso)
+        self.menu_manager.apply_patches.setEnabled(has_iso)
+
     ###----------------------------------- ISO ----------------------------------###
 
     def attempt_load_iso(self, path: Path) -> None:
@@ -228,7 +269,7 @@ class MainWindow(QMainWindow):
         ISO processing happens on a background thread.
         If dispatcher returns without a handle the ISO failed to load and the UI resets.
         """
-        self.app_settings.last_iso_dir = str(path.parent)
+        self.app_settings.last_iso_dir = str(path)
         self.status_bar.showMessage(f'Loading {path.name}...')
         self.welcome_page.set_loading(True)
         task_handle = self.dispatcher.load_source(path)
@@ -238,33 +279,40 @@ class MainWindow(QMainWindow):
             return
         task_handle.log_message.connect(self._on_worker_log)
 
-    def start_rebuild(self, staged_nodes: list[VfsNode]) -> None:
-        """Transitions UI and asks for save location before kicking off background thread"""
-        file_path, _ = QFileDialog.getSaveFileName(self, 'Save Modified ISO', '', 'ISO Files (*.iso)')
+    def _on_rebuild_prep_started(self) -> None:
+        self.stack.setCurrentIndex(AppPage.REBUILD)
+        self.rebuild_page.header.setText('Preparing build...')
+        self.rebuild_page.log_output.clear()
+        self.rebuild_page.progress_bar.setValue(0)
+        self.rebuild_page._cancel_btn.setEnabled(False) # No task handle to cancel, UX potential improvement
 
-        if not file_path:  # User canceled the save dialog, stay on staging page
-            return
-
+    def _on_rebuild_started(self, handle: TaskHandle) -> None:
+        '''
+        Purely UI;
+        Rebuilding pipeline is now managed by the dedicated RebuildCoordinator.
+        Transitions the rebuild page after RebuildCoordinator has a save path and an active task.
+        '''
         self.stack.setCurrentWidget(self.rebuild_page)
         self.rebuild_page.log_output.clear()
         self.rebuild_page.progress_bar.setValue(0)
-        handle = self.dispatcher.start_iso_rebuild(Path(file_path))
-        if handle:
-            self.rebuild_page.set_task_handle(handle)
+        self.rebuild_page.header.setText('Rebuilding ISO...')
+        self.rebuild_page.set_task_handle(handle)
 
-    def _on_iso_loaded(self, nodes: list | None) -> None:
+    def _on_iso_loaded(self, success: bool, result: VfsNode | str) -> None:
         self.welcome_page.set_loading(False)
-        if nodes is None:
-            QMessageBox.critical(self, 'Load Error', 'Invalid ISO.')
+        if not success:
+            msg = f'Failed to load ISO:\n{result}'
+            QMessageBox.critical(self, 'Load Error', msg)
+            logger.error(msg)
+            self.status_bar.clearMessage()
             return
-        root_node = nodes[0]
-        self.controller.init_file_tree(root_node)
-        self.stack.setCurrentIndex(AppPage.WORKSPACE)
-        self.workspace_page.setFocus()
-        self.status_bar.showMessage('ISO loaded - verifying build...')
-        has_iso = bool(nodes)
-        self.menu_manager.open_action.setEnabled(not has_iso)
-        self.menu_manager.close_action.setEnabled(has_iso)
+        has_iso = isinstance(result, VfsNode)
+        if not has_iso:
+            return
+        self.controller.init_file_tree(result)
+        self.stack.setCurrentIndex(AppPage.FILEBROWSER)
+        self.file_browser_page.setFocus()
+        self._toggle_menu_actions(has_iso)
 
     def on_rebuild_complete(self, success: bool, message: str) -> None:
         """Handles the completion signal from the background thread"""
@@ -273,13 +321,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, 'Success', message)
         else:
             QMessageBox.critical(self, 'Build Failed', message)
-        self.stack.setCurrentWidget(self.workspace_page)
+        self.stack.setCurrentWidget(self.file_browser_page)
 
-    def _handle_io_completion(self, success: bool, msg: str):
-        if success:
-            self.status_bar.showMessage(msg, 5000)
-        else:
-            QMessageBox.warning(self, 'Task Error', msg)
+    def _on_conflict_detected(self, new_node: VfsNode, old_nodes: str, reason: str) -> None:
+        '''
+        Triggered when ModTracker detects a file modification conflict.
+        Instantiates the resolution dialog and emits the user's choice.
+        '''
+        dialog = ConflictResolverDialog(new_node, old_nodes, reason, parent=self)
+        dialog.exec()
+        choice = dialog.selected_choice()
+        self.conflict_choice_made.emit(new_node, choice)
 
     ###------------------------------------- Lifecycle --------------------------------------###
 
@@ -287,8 +339,8 @@ class MainWindow(QMainWindow):
         """Saves current UI layout parameters before destroying the window."""
         s = self.app_settings
         s.geometry = self.saveGeometry()
-        s.h_splitter = self.workspace_page.h_splitter.saveState()
-        s.v_splitter = self.workspace_page.v_splitter.saveState()
+        s.h_splitter = self.file_browser_page.h_splitter.saveState()
+        s.v_splitter = self.file_browser_page.v_splitter.saveState()
         s.sync()
         self.dispatcher.close()
         return super().closeEvent(a0)
@@ -301,41 +353,218 @@ class WelcomePage(QWidget):
     """
     Initial landing page prompting the user to load a source ISO.
     """
-
     request_open = pyqtSignal(Path)
 
     def __init__(self, settings, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(50, 50, 50, 50)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch()
 
         subtitle = QLabel('Select a Radiata Stories ISO')
         subtitle.setObjectName('TextSubtitle')
-
-        self.button = QPushButton()
-        self.button.setObjectName('BtnLarge')
-        self.set_loading(False)
-        self.button.clicked.connect(self.open_file_dialog)
-
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
-        layout.addWidget(self.button)
 
-    def open_file_dialog(self) -> None:
-        start_dir = self.settings.last_iso_dir or ''
-        path, _ = QFileDialog.getOpenFileName(self, 'Open ISO', start_dir, 'ISO Files (*.iso);;All Files (*)')
-        if path:
-            self.settings.last_iso_dir = str(Path(path).parent)
-            self.request_open.emit(Path(path))
+        self.device_widget = DeviceOrIsoDialog(
+            parent=self,
+            last_dir=self.settings.last_iso_dir or ''
+        )
+        self.device_widget.source_selected.connect(self._on_source_selected)
+        layout.addWidget(self.device_widget, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch()
+
+        self.set_loading(False)
+
+    def _on_source_selected(self, path: Path) -> None:
+        if path.is_file() or path.is_dir():
+            self.settings.last_iso_dir = str(path)
+        self.request_open.emit(path)
 
     def set_loading(self, is_loading: bool) -> None:
         if is_loading:
-            self.button.setText('Loading...')
-            self.button.setEnabled(False)
+            self.device_widget.btn_confirm.setText('Loading...')
+            self.device_widget.btn_confirm.setEnabled(False)
         else:
-            self.button.setText('Open ISO')
-            self.button.setEnabled(True)
+            self.device_widget.btn_confirm.setText('Open ISO')
+            self.device_widget.btn_confirm.setEnabled(True)
+
+
+class DeviceOrIsoDialog(QWidget):
+    '''
+    A custom file dialog widget that allows the user to select either an existing ISO file
+    from the pc's file browser or a physical block device/optical drive.
+    Cross-platform compatible.
+    '''
+    source_selected = pyqtSignal(Path)
+
+    def __init__(self, parent=None, last_dir: str = '') -> None:
+        super().__init__(parent)
+        self.last_dir = last_dir
+        self.selected_path: Path | None = None
+        self.setFixedWidth(600)
+        self.setFixedHeight(330)
+        self.setObjectName('SurfaceTabPanel')
+        layout = QVBoxLayout(self)
+        # Tabs for selecting between the two types of media inputs
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName('SurfaceTabPanel')
+        self.tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.tabs.addTab(self._create_iso_tab(), 'ISO Image File')
+        self.tabs.addTab(self._create_device_tab(), 'Physical Disk')
+        layout.addWidget(self.tabs)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.btn_confirm = QPushButton()
+        self.btn_confirm.setObjectName('BtnLarge')
+        self.btn_confirm.clicked.connect(self._on_confirm)
+
+        btn_layout.addWidget(self.btn_confirm)
+        layout.addLayout(btn_layout)
+
+    def _check_elevation(self) -> bool:
+        if platform.system() != 'Windows' and self.selected_path:
+            return os.access(self.selected_path, os.R_OK)
+        return True
+
+    def _create_iso_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(QLabel('Select a .iso file:'))
+        h_layout = QHBoxLayout()
+        self.iso_path_input = QLineEdit()
+        self.iso_path_input.setPlaceholderText('Path to .iso file')
+        if self.last_dir:
+            self.iso_path_input.setText(self.last_dir)
+        browse_btn = QPushButton('Browse...')
+        browse_btn.clicked.connect(self._browse_iso)
+        h_layout.addWidget(self.iso_path_input)
+        h_layout.addWidget(browse_btn)
+        layout.addLayout(h_layout)
+        return widget
+
+    def _create_device_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(QLabel('Select a physical optical drive or block device:'))
+        self.device_combo = QComboBox()
+        self._populate_device_combo()
+        layout.addWidget(self.device_combo)
+        refresh_btn = QPushButton('Refresh Device List')
+        refresh_btn.clicked.connect(self._populate_device_combo)
+        layout.addWidget(refresh_btn)
+        return widget
+
+    def _browse_iso(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            'Select ISO',
+            self.last_dir,
+            'ISO Files (*.iso);;All Files (*)'
+        )
+        if path:
+            self.iso_path_input.setText(path)
+
+    def _populate_device_combo(self) -> None:
+        self.device_combo.clear()
+        system = platform.system()
+        try:
+            if system == 'Windows':
+                # bitmask of active logical drives
+                import ctypes, string
+                bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+                for i, letter in enumerate(string.ascii_uppercase):
+                    if bitmask & (1 << i):
+                        drive_root = f'{letter}:\\'
+                        if ctypes.windll.kernel32.GetDriveTypeW(drive_root) == 5:
+                            device_path = f'\\\\.\\{letter}:'
+                            self.device_combo.addItem(f'{letter} Optical Drive ({device_path})', userData=device_path)
+            elif system == 'Linux':
+                result = subprocess.run(
+                    ['lsblk', '-J', '-o', 'NAME,SIZE,TYPE,PATH,MOUNTPOINT'],
+                    capture_output=True, text=True, check=True,
+                )
+                data = json.loads(result.stdout)
+                for device in data.get('blockdevices', []):
+                    self._parse_lsblk_node(device)
+            elif system == 'Darwin':
+                result = subprocess.run(
+                    ['diskutil', 'list', '-plist'],
+                    capture_output=True, check=True,
+                )
+                if result.stdout:
+                    import plistlib
+                    plist = plistlib.loads(result.stdout)
+                    for device in plist.get('AllDisksAndPartitions', []):
+                        self._parse_diskutil_node(device)
+        except Exception as e:
+            self.device_combo.addItem(f'Error enumerating devices: {e}', userData='')
+        if self.device_combo.count() == 0:
+            self.device_combo.addItem('No Optical Drive found.', userData='')
+
+    def _parse_lsblk_node(self, device: dict) -> None:
+        dtype = device.get('type', '')
+        if dtype != 'rom':
+            return
+        path  = device.get('path') or f"/dev/{device.get('name')}"
+        size  = device.get('size', '')
+        mount = device.get('mountpoint' , '')
+        label = f'{path} - {dtype.upper()} ({size})'
+        if mount:
+            label += f' [Mounted: {mount}]'
+        if dtype == 'rom':
+            label = f'[Optical Drive] {path} ({size})'
+        self.device_combo.addItem(label, userData=path)
+
+    def _parse_diskutil_node(self, device: dict) -> None:
+        dev_id = device.get('DeviceIdentifier', '')
+        if not dev_id:
+            return
+        # Filter out non-optical drive devices
+        try:
+            info_proc = subprocess.run(['diskutil', 'info', '-plist', dev_id], capture_output=True, text=True)
+            import plistlib
+            info_plist = plistlib.loads(info_proc.stdout)
+            if not info_plist.get('OpticalDrive'):
+                return
+        except Exception:
+            return
+
+        # Construct raw disk path
+        path = f'/dev/r{dev_id}'
+        size_bytes = device.get('Size', 0)
+        if size_bytes > 0:
+            size = human_size(size_bytes)
+        else:
+            size = 'Unknown Size'
+        # Plist structures
+        volume_name = device.get('VolumeName', '')
+        label = f'[Optical Drive] {path} ({size})'
+        if volume_name:
+            label += f' - {volume_name}'
+        self.device_combo.addItem(label, userData=path)
+
+    def _on_confirm(self) -> None:
+        if not self._check_elevation():
+            raise PermissionError('Insufficient permissions for optical drive access.')
+        if self.tabs.currentIndex() == 0:
+            path_str = self.iso_path_input.text().strip()
+            if not path_str:
+                QMessageBox.warning(self, 'Invalid Path', 'Please specify a valid ISO file.')
+                return
+            self.selected_path = Path(path_str)
+        else:
+            path_str = self.device_combo.currentData()
+            if not path_str:
+                QMessageBox.warning(self, 'Invalid Device', 'Please select a valid optical drive.')
+                return
+            self.selected_path = Path(path_str)
+        self.source_selected.emit(self.selected_path)
 
 
 ###------------------------------------- Rebuilding Page -----------------------------------###
@@ -414,20 +643,21 @@ class MainMenuBar:
 
     def __init__(
         self,
-        main_window:    MainWindow,
-        workspace_page: FileBrowserPage,
-        dispatcher:     Dispatcher,
-        metadata_store: NodeMetadataStore,
-        app_settings:   AppSettings,
+        main_window:       MainWindow,
+        file_browser_page: FileBrowserPage,
+        dispatcher:        Dispatcher,
+        metadata_store:    NodeMetadataStore,
+        app_settings:      AppSettings,
     ) -> None:
-        self.window     = main_window
-        self.workspace  = workspace_page
-        self.dispatcher = dispatcher
-        self._store     = metadata_store
-        self.settings   = app_settings
+        self.window        = main_window
+        self.file_browser  = file_browser_page
+        self.dispatcher    = dispatcher
+        self._store        = metadata_store
+        self.settings      = app_settings
 
         self._build_file_menu()
         self._build_view_menu()
+        self._build_patches_menu()
         self._build_info_menu()
 
     @property
@@ -444,15 +674,20 @@ class MainMenuBar:
         self.dump_metadata.triggered.connect(self._handle_meta_dump)
         file_menu.addAction(self.dump_metadata)
 
+        self.verify_hash = QAction('Verify hash', self.window)
+        self.verify_hash.triggered.connect(self._handle_verify_hash)
+        self.verify_hash.setEnabled(False)
+        file_menu.addAction(self.verify_hash)
+
         file_menu.addSeparator()
 
         self.open_action = QAction('Open ISO', self.window)
-        self.open_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_action.setShortcut(Shortcuts.sequence(Shortcut.OPEN))
         self.open_action.triggered.connect(self._handle_open)
         file_menu.addAction(self.open_action)
 
         self.close_action = QAction('Close ISO', self.window)
-        self.close_action.setShortcut(QKeySequence.StandardKey.Close)
+        self.close_action.setShortcut(Shortcuts.sequence(Shortcut.CLOSE))
         self.close_action.setEnabled(False)
         self.close_action.triggered.connect(self._handle_close)
         file_menu.addAction(self.close_action)
@@ -460,7 +695,7 @@ class MainMenuBar:
         file_menu.addSeparator()
 
         exit_action = QAction('Exit', self.window)
-        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        exit_action.setShortcut(Shortcuts.sequence(Shortcut.QUIT))
         exit_action.triggered.connect(self._handle_exit)
         file_menu.addAction(exit_action)
 
@@ -485,9 +720,9 @@ class MainMenuBar:
         zoom_in  = QAction('Zoom In', self.window)
         zoom_out = QAction('Zoom out', self.window)
         zoom_rst = QAction('Reset Zoom', self.window)
-        zoom_in.setShortcut(QKeySequence.StandardKey.ZoomIn)
-        zoom_out.setShortcut(QKeySequence.StandardKey.ZoomOut)
-        zoom_rst.setShortcut('Ctrl+0')
+        zoom_in.setShortcut(Shortcuts.sequence(Shortcut.ZOOM_IN))
+        zoom_out.setShortcut(Shortcuts.sequence(Shortcut.ZOOM_OUT))
+        zoom_rst.setShortcut(Shortcuts.sequence(Shortcut.ZOOM_RESET))
         zoom_in.triggered.connect(lambda: self.window.adjust_zoom(+1))
         zoom_out.triggered.connect(lambda: self.window.adjust_zoom(-1))
         zoom_rst.triggered.connect(lambda: self.window.reset_zoom())
@@ -517,6 +752,35 @@ class MainMenuBar:
         toggle_hidden.triggered.connect(self._handle_toggle_hidden)
         view_menu.addAction(toggle_hidden)
 
+    def _build_patches_menu(self) -> None:
+        '''
+        Rather than use QActions this menu uses QWidgetAction + QCheckBox for patches.
+        The reason being UX: QActions collapse the parent QMenu.
+        "Apply patches" uses the standard QAction to close the menu when start the patching process.
+
+        Each checkbox is tied to a IsoRebuildFlags flag
+        '''
+        patches_menu = self.menu_bar.addMenu('Patches')
+        assert patches_menu is not None
+
+        self._patch_flags: list[tuple[QCheckBox, IsoRebuildFlags]] = []
+        def add_patch_box(title: str, tooltip: str, flag: IsoRebuildFlags) -> None:
+            action = QWidgetAction(patches_menu)
+            checkbox = QCheckBox(title, self.window)
+            checkbox.setToolTip(tooltip)
+            action.setDefaultWidget(checkbox)
+            patches_menu.addAction(action)
+            self._patch_flags.append((checkbox, flag))
+
+        add_patch_box('Slimmed rebuild', 'Save 1GB by trimming out unused disk space.', IsoRebuildFlags.SLIMMED)
+        # add_patch_box('Cutscene skipper', 'Patch all story scripts to complete ASAP.', IsoRebuildFlags.CUTSCENE_SKIPPER)
+
+        patches_menu.addSeparator()
+        self.apply_patches = QAction('Apply patches', self.window)
+        self.apply_patches.setEnabled(False)
+        self.apply_patches.triggered.connect(self._handle_patches)
+        patches_menu.addAction(self.apply_patches)
+
     def _build_info_menu(self) -> None:
         info_menu = self.menu_bar.addMenu('Info')
         assert info_menu is not None
@@ -539,6 +803,9 @@ class MainMenuBar:
             path += '.json'
         self.window.metadata_store.dump_metadata(Path(path))
 
+    def _handle_verify_hash(self) -> None:
+        self.window.dispatcher._handle_verify_hash()
+
     def _handle_open(self) -> None:
         start_dir = self.settings.last_iso_dir or ''
         path, _ = QFileDialog.getOpenFileName(
@@ -550,10 +817,11 @@ class MainMenuBar:
 
     def _handle_close(self) -> None:
         self.dispatcher.close()
-        self.open_action.setEnabled(True)
-        self.close_action.setEnabled(False)
+        self.window._toggle_menu_actions(has_iso=False)
+        self.verify_hash.setEnabled(False)
         self.window.welcome_page.set_loading(False)
         self.window.stack.setCurrentIndex(AppPage.WELCOME)
+        self.window.status_bar.clearMessage()
 
     def _handle_exit(self) -> None:
         QApplication.quit()
@@ -568,7 +836,7 @@ class MainMenuBar:
         self.window.set_theme(theme_name)
 
     def _handle_toggle_log(self, checked: bool) -> None:
-        self.workspace.log_console.setVisible(checked)
+        self.file_browser.log_console.setVisible(checked)
         self.settings.show_log_console = checked
 
     def _handle_toggle_verbose(self, checked: bool) -> None:
@@ -584,13 +852,174 @@ class MainMenuBar:
         if self.window.controller.proxy_model:  # Prevent crashing when no proxy_model is live
             self.window.controller.proxy_model.set_show_hidden(checked)
 
+    def _handle_patches(self) -> None:
+        '''Trigger a rebuild of the unmodified source with the checked flags'''
+        build_flags = IsoRebuildFlags.NONE
+        for checkbox, flag in self._patch_flags:
+            if checkbox.isChecked():
+                build_flags |= flag
+        self.window.rebuild_coordinator.request_rebuild([], build_flags=build_flags)
+
     def _handle_legend(self) -> None:
         theme_name = self.window.current_theme
         LegendView(ThemeManager.THEMES.get(theme_name), self.window).exec()
 
 
-###------------------------------------------- File Legend ------------------------------------------###
+###------------------------------------------- Toasts ------------------------------------------###
 
+
+class Toast(QWidget):
+    '''
+    All toast notifications popus for non-blocking user feedback.
+    Handles temporary text messages and action progress bars.
+    Animates upwards upon creation and recedes downwards automatically or manually.
+    '''
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.SubWindow | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setObjectName('Popup')
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
+        self.label = QLabel()
+        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        layout.addWidget(self.label)
+        layout.addWidget(self.progress)
+
+        # Timer for auto-dismissal
+        self._is_active = False
+        self.dismiss_timer = QTimer(self)
+        self.dismiss_timer.setSingleShot(True)
+        self.dismiss_timer.timeout.connect(self.dismiss)
+
+        # Timer before progres is revealed (stop 0.1s or less tasks)
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setSingleShot(True)
+        self._reveal_timer.timeout.connect(self._reveal_progress)
+        self._pending_progress: tuple[int, str] | None = None
+
+        # Timer for dismissing progress after suspected failure
+        self.timeout_timer = QTimer(self)
+        self.timeout_timer.setSingleShot(True)
+        self.timeout_timer.timeout.connect(lambda: self.show_message(f'Error: "{self.label.text()}" timed out.', duration_ms=3000))
+        self._last_progress_value = -1
+
+        self.hide()
+
+    def show_message(self, message: str, duration_ms: int = 3000) -> None:
+        '''Display a temporary text-only notification.'''
+        self._reveal_timer.stop()
+        self.timeout_timer.stop()
+        self._pending_progress = None
+        logger.info(message)
+        self.label.setText(message)
+        self.progress.hide()
+        self._slide_up(duration_ms)
+
+    def show_progress(self, value: int, title: str = '') -> None:
+        '''
+        Display or update a persistent progress bar.
+        Automatically fades out if value reaches 100.
+        '''
+        self._pending_progress = (value, title)
+        if value != self._last_progress_value:
+            self._last_progress_value = value
+            if value < 100:
+                self.timeout_timer.start(5000)
+            else:
+                self.timeout_timer.stop()
+
+        if self._is_active:
+            if title:
+                self.label.setText(title)
+            self.progress.show()
+            self.progress.setValue(value)
+            if value >= 100:
+                self.dismiss_timer.start(2500)
+                self._reveal_timer.stop()
+                self._pending_progress = None
+            else:
+                self.dismiss_timer.stop()
+        else:
+            if value < 100 and not self._reveal_timer.isActive():
+                self._reveal_timer.start(100)
+
+    def _reveal_progress(self) -> None:
+        if self._pending_progress is None or self._is_active:
+            return
+        value, title = self._pending_progress
+        if title:
+            self.label.setText(title)
+        self.progress.show()
+        self.progress.setValue(value)
+        self._slide_up(display_duration=0)
+
+    def dismiss(self) -> None:
+        '''Force the toast to slide down and hide'''
+        self._reveal_timer.stop()
+        self.timeout_timer.stop()
+        self._pending_progress = None
+        self._last_progress_value = -1
+        if not self._is_active:
+            return
+
+        self.dismiss_timer.stop()
+        self.anim = QPropertyAnimation(self, b'pos')
+        self.anim.setDuration(300)
+        self.anim.setStartValue(self.pos())
+        self.anim.setEndValue(self.hidden_pos)
+        self.anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        self.anim.finished.connect(self.hide)
+        self.anim.finished.connect(lambda: setattr(self, '_is_active', False))
+        self.anim.start()
+
+    def _calculate_position(self) -> tuple[QPoint, QPoint]:
+        '''Determines the display anchor and off-screen anchor point from window geometry.'''
+        parent = self.parentWidget()
+        if not parent:
+            return QPoint(0, 0), QPoint(0, 0)
+
+        parent_rect   = parent.rect()
+        padding_x  = 30
+        padding_y = 40
+        self.adjustSize()
+        x = parent_rect.right() - self.width() - padding_x
+        y = parent_rect.bottom() - self.height() - padding_y
+        target_pos = QPoint(x, y)
+        hidden_pos = QPoint(x, parent_rect.height())
+        return target_pos, hidden_pos
+
+    def _reposition(self) -> None:
+        if not self.parentWidget():
+            return
+        self.target_pos, self.hidden_pos = self._calculate_position()
+        if self._is_active:
+            self.move(self.target_pos)
+
+    def _slide_up(self, display_duration: int) -> None:
+        '''Slide upward animation. Start auto-dismiss timer if duration > 0.'''
+        self.target_pos, self.hidden_pos = self._calculate_position()
+        if self._is_active:
+            self.move(self.target_pos)
+        else:
+            self.move(self.hidden_pos)
+            self.show()
+            self.raise_()
+            self.anim = QPropertyAnimation(self, b'pos')
+            self.anim.setDuration(350)
+            self.anim.setStartValue(self.hidden_pos)
+            self.anim.setEndValue(self.target_pos)
+            self.anim.setEasingCurve(QEasingCurve.Type.InCubic)
+            self.anim.start()
+            self._is_active = True
+        if display_duration > 0:
+            self.dismiss_timer.start(display_duration)
+
+###------------------------------------------- File Legend ------------------------------------------###
 
 def build_legend_tree(theme) -> QStandardItemModel:
     """
@@ -659,7 +1088,7 @@ def build_legend_tree(theme) -> QStandardItemModel:
 
     ### Event
     event = add_category('Event')
-    add_item(event, '.evd', 'Event VM dispatcher data', '---')
+    add_item(event, '.evd', 'Event VM dispatcher data', 'Supported: \'Open in EVD Script Editor\'')
 
     ### Animation
     anim = add_category('Animation')
@@ -690,7 +1119,7 @@ def build_legend_tree(theme) -> QStandardItemModel:
     scene = add_category('Scene')
     add_item(scene, '.rbad', 'Map object references')
     add_item(scene, '.rlf', 'Scene data')
-    add_item(scene, '.rmf', 'Scene data')
+    add_item(scene, '.rmf', 'Scene data', 'Experimentally Supported: \'Open in RMF Message Data Editor\'')
     add_item(scene, '.ndnc', 'Scene data')
     add_item(scene, '.xbdc', 'Scene data')
     add_item(scene, '.pcdc', 'Scene data')
@@ -749,7 +1178,7 @@ class LegendModel(QTreeView):
         self.setHeaderHidden(False)
         self.expandAll()
         self.setRootIsDecorated(True)
-        self.setIndentation(12)
+        self.setIndentation(4)
         self.resizeColumnToContents(0)
         self.resizeColumnToContents(1)
         self.resizeColumnToContents(2)

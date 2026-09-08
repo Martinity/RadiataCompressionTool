@@ -50,7 +50,7 @@ if __name__ == '__main__':
     qt_log_handler = setup_logging()
     dispatcher = Dispatcher()
     window = MainWindow(dispatcher, is_test=self_test)
-    qt_log_handler.log_signal.connect(window.workspace_page.log_console.append_log)
+    qt_log_handler.log_signal.connect(window.file_browser_page.log_console.append_log)
 
     if self_test:
         # CI smoke: construct everything, do not enter the interactive loop.

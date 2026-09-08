@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from core.node import ModTracker, VfsNode
+from core.workers import IsoRebuildFlags
+from ui.settings import Shortcut, Shortcuts
+
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QKeySequence, QShortcut
+from PyQt6.QtGui import QBrush, QColor, QShortcut
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -203,13 +207,15 @@ class HexDiffPanel(QWidget):
 class StagingPage(QWidget):
     """UI for managing the filesystem vs Staging Area"""
 
-    request_workspace = pyqtSignal()
+    request_file_browser = pyqtSignal()
 
-    def __init__(self, dispatcher, parent=None) -> None:
+    def __init__(self, dispatcher, rebuild_coordinator, parent=None) -> None:
         super().__init__(parent)
         self.dispatcher = dispatcher
+        self.rebuild_coordinator = rebuild_coordinator
         self.tracker: ModTracker = self.dispatcher.tracker
         self._selected_node: VfsNode | None = None
+        self._build_flags = IsoRebuildFlags.NONE
         self._setup_ui()
         self._connect_signals()
         self._setup_shortcuts()
@@ -282,10 +288,10 @@ class StagingPage(QWidget):
         action_bar = QHBoxLayout()
         action_bar.setContentsMargins(6, 6, 6, 6)
         self.btn_back = QPushButton('< Back')
-        self.slim_toggle = QPushButton('Slimmed Rebuild')
-        self.slim_toggle.setCheckable(True)
+        self.btn_back.setToolTip(Shortcuts.text(Shortcut.BACK))
+        self.slim_toggle = QCheckBox('Slimmed Rebuild')
         self.slim_toggle.setToolTip(
-            'Removes padding from empty disk sectors.\nMeant for digital only rebuilds.'
+            'Removes all non-essential disk data.\nMeant for digital use only.'
         )
         self.btn_confirm = QPushButton('Build New ISO')
         self.btn_confirm.setObjectName('BtnImportant')
@@ -293,6 +299,7 @@ class StagingPage(QWidget):
         action_bar.addWidget(self.btn_back)
         action_bar.addStretch()
         action_bar.addWidget(self.slim_toggle)
+        action_bar.addSpacing(24)
         action_bar.addWidget(self.btn_confirm)
         top_layout.addLayout(action_bar)
 
@@ -305,7 +312,7 @@ class StagingPage(QWidget):
         root.addWidget(v_split)
 
     def _connect_signals(self) -> None:
-        self.btn_back.clicked.connect(self.request_workspace.emit)
+        self.btn_back.clicked.connect(self.request_file_browser.emit)
         self.btn_stage.clicked.connect(self._on_stage)
         self.btn_stage_all.clicked.connect(self._on_stage_all)
         self.btn_unstage.clicked.connect(self._on_unstage)
@@ -314,13 +321,26 @@ class StagingPage(QWidget):
         self.btn_revert_all.clicked.connect(self._on_revert_all)
 
         self.tracker.state_changed.connect(self.refresh_lists)
-        self.btn_confirm.clicked.connect(self.tracker.confirm_and_rebuild)
+        self.btn_confirm.clicked.connect(self._on_confirm)
+        self.slim_toggle.stateChanged.connect(self._on_slim_toggled)
 
         self.unstaged_list.currentItemChanged.connect(self._on_item_changed)
         self.staged_list.currentItemChanged.connect(self._on_item_changed)
 
+    def _on_confirm(self) -> None:
+        if not self.tracker.rebuild_queue:
+            return
+        self.rebuild_coordinator.request_rebuild(list(self.tracker.rebuild_queue), self._build_flags)
+
+    def _on_slim_toggled(self) -> None:
+        if self.slim_toggle.isChecked():
+            self._build_flags |= IsoRebuildFlags.SLIMMED
+        else:
+            self._build_flags &= ~IsoRebuildFlags.SLIMMED
+
+
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence.StandardKey.Cancel, self).activated.connect(self.request_workspace.emit)
+        QShortcut(Shortcuts.sequence(Shortcut.BACK), self).activated.connect(self.request_file_browser.emit)
 
     def refresh_lists(self) -> None:
         """Modifies the list of modified nodes"""
@@ -352,7 +372,7 @@ class StagingPage(QWidget):
         self._selected_node = node
         new_data = node.pending_data or b''
         orig_data = self.tracker.get_original(node)
-        self.diff_panel.load_diff(f'{node.name}  ({node.hierarchical_id_str})', new_data, orig_data)
+        self.diff_panel.load_diff(f'{node}', new_data, orig_data)
 
     def _on_stage(self) -> None:
         for item in self.unstaged_list.selectedItems():

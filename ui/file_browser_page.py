@@ -20,14 +20,14 @@ from core.workers import ActionDef, ActionResult, ActionStatus, ActionType, Edit
 from PyQt6 import sip
 from PyQt6.QtCore import (
     QEasingCurve, QEvent, QModelIndex, QObject, QPoint,
-    QPropertyAnimation, Qt, QTimer, pyqtSignal,
+    QPropertyAnimation, Qt, QTimer, pyqtSignal
 )
 from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTextEdit, QTreeView,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget
 )
 from ui.editor_page import EditorPage, EditorSession
 from ui.logger import LoggingWindow
@@ -77,7 +77,7 @@ class FileBrowserPage(QWidget):
         self.sidebar_stack.addWidget(self.search_results_view)
 
         self.metadata_panel = FileMetadataPanel(self.metadata_store)
-        self.log_console = LoggingWindow()
+        self.log_console    = LoggingWindow()
 
     def _assemble_layout(self) -> None:
         """Build the layout using nested QSplitters for user-adjustable panels."""
@@ -126,7 +126,7 @@ class FileBrowserPage(QWidget):
         self.log_console.append_log(f'{message}', 1)
 
 
-###-------------------------------------------- Workspace Signals -------------------------###
+###-------------------------------------------- File Browser Signals -------------------------###
 
 
 class FileBrowserBehavior(QObject):
@@ -138,17 +138,18 @@ class FileBrowserBehavior(QObject):
 
     def __init__(
         self,
-        workspace: FileBrowserPage,
-        editor_page: EditorPage,
-        dispatcher: Dispatcher,
+        file_browser:   FileBrowserPage,
+        editor_page:    EditorPage,
+        dispatcher:     Dispatcher,
         metadata_store: NodeMetadataStore,
     ) -> None:
-        super().__init__(parent=workspace)
+        super().__init__(parent=file_browser)
         self._main_thread_id = threading.get_ident()
-        self.view            = workspace
+        self.view            = file_browser
         self.editor_page     = editor_page
         self.dispatcher      = dispatcher
         self.metadata_store  = metadata_store
+        self.window: QWidget | None = self.view.window()
 
         # Model references
         self.tree_model:     VfsTreeModel | None = None
@@ -197,9 +198,9 @@ class FileBrowserBehavior(QObject):
         self.proxy_model.setSourceModel(self.tree_model)
 
         ### State Memory
-        main_window: QWidget | None = self.view.window()
-        if main_window is not None and hasattr(main_window, 'app_settings'):
-            self.proxy_model.set_show_hidden(main_window.app_settings.show_hidden_files)
+        self.window: QWidget | None = self.view.window()
+        if self.window is not None and hasattr(self.window, 'app_settings'):
+            self.proxy_model.set_show_hidden(self.window.app_settings.show_hidden_files)  # type: ignore
 
         ### Tree View
         self.view.tree_view.setModel(self.proxy_model)
@@ -342,7 +343,7 @@ class FileBrowserBehavior(QObject):
             hid = tuple(map(int, entry.hid_str.split('.')))
             ancestor = self.dispatcher.vfs.find_nearest_ancestor(hid)
             if ancestor is not None:
-                node = self.dispatcher.vfs.get_node_by_id(hid)
+                node = self.dispatcher.vfs.get_vfs_node_by_id(hid)
         if node is None:
             logger.warning(f'No node found for id:({entry.hid_str})')
             return
@@ -385,7 +386,7 @@ class FileBrowserBehavior(QObject):
         hid   = tuple(map(int, entry.hid_str.split('.')))
         if not node and self.dispatcher.vfs:
             self.dispatcher.resolve_ghost_node(hid, self._handle_goto)
-            node = self.dispatcher.vfs.get_node_by_id(hid)
+            node = self.dispatcher.vfs.get_vfs_node_by_id(hid)
         if not node:
             logger.error(f'No node found for ({hid})')
             return
@@ -473,7 +474,7 @@ class FileBrowserBehavior(QObject):
         kwargs: dict = {}
         match action_def.action_type:
             case ActionType.EXPORT:
-                path, _ = QFileDialog.getSaveFileName(self.view, action_def.name, '', 'All Files (*)')
+                path, _ = QFileDialog.getSaveFileName(self.view, action_def.name, f'{node.name}{node.extension}', 'All Files (*)')
                 if not path:
                     return
                 kwargs['file_path'] = Path(path)
@@ -522,10 +523,8 @@ class FileBrowserBehavior(QObject):
                     if editor_classes:
                         self.launch_editor(result.node, editor_classes[0])
             case ActionType.EXPORT:
-                ToastNotification(
-                    parent=self.view,
-                    message=f'Successfully exported: {result.message if result.message else result.node.name}',
-                )
+                if hasattr(self.window, 'toast'):
+                    self.window.toast.show_message(f'{result.message if result.message else result.node.name}') # type: ignore
             case ActionType.IMPORT:
                 pass  # Review bar updates automatically for user feedback (on_tracking_update)
 
@@ -558,7 +557,7 @@ class FileBrowserBehavior(QObject):
         """
         if self._current_session and not self._current_session.is_done():
             self._current_session.cancel()
-        new_editor = editor_class()
+        new_editor = editor_class(data_resolver=self.dispatcher)
 
         # Build the dispatch funtion that will close confirm/reject callbacks
         def dispatch_fn(node: VfsNode, data: Any) -> None:
@@ -576,11 +575,10 @@ class FileBrowserBehavior(QObject):
         self.editor_page.load_editor(session)
 
         # Open the editor
-        window: QWidget | None = self.view.window()
-        if window is not None and isinstance(window, QMainWindow) and hasattr(window, 'stack'):
+        if hasattr(self.window, 'stack'):
             from ui.main_window import AppPage
 
-            window.stack.setCurrentIndex(AppPage.EDITOR)
+            self.window.stack.setCurrentIndex(AppPage.EDITOR) # type: ignore
 
         # Start the data processing for the editor
         task_handle = self.dispatcher.open_editor(node, new_editor)
@@ -625,7 +623,7 @@ class FileBrowserBehavior(QObject):
             )
             return
         # Data passed all guards, finalize the editor initialization
-        session.complete(payload.data, self.dispatcher.get_node_data)
+        session.complete(payload.data)
         logger.debug(f'{session} populated successfully.')
 
     ###-------------------- Search --------------------###

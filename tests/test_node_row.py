@@ -70,6 +70,9 @@ def _make_manager(root: VfsNode) -> VfsManager:
 def test_insert_children_sets_row(qtbot):
     """VfsManager.insert_children must set _row correctly."""
     root = VfsNode(name='root')
+    vfs_entry = VfsNode(name='vfs_entry')
+    vfs_entry.is_boundary = True
+    root.append_child(vfs_entry)
     mgr = VfsManager(root)
 
     new_nodes = [VfsNode(name=f'n{i}', size=1, offset=i) for i in range(6)]
@@ -84,6 +87,9 @@ def test_insert_children_sets_row(qtbot):
 def test_insert_children_appended_after_existing(qtbot):
     """Row indices are offset correctly when children already exist."""
     root = VfsNode(name='root')
+    vfs_entry = VfsNode(name='vfs_entry')
+    vfs_entry.is_boundary = True
+    root.append_child(vfs_entry)
     mgr = VfsManager(root)
 
     first_batch = [VfsNode(name=f'first{i}', size=1, offset=i) for i in range(3)]

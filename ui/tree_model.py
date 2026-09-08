@@ -1,4 +1,4 @@
-'''Holds all models for workspace. In other words takes nodes and converts their data into file browser like formats.
+'''Holds all models for the filebrowser. Takes nodes and converts their data into file browser tree displayable formats.
 VfsTreeModel - QAbstractItemModel, the hierarchical tree
 SearchModel - QAbstractListModel, the search list. List due to recursive hierarchical searching chugging UI
 TreeProxyModel - QSortFilterProxyModel, only gets applied to the tree. Search is hardcoded to avoid hidden nodes'''
@@ -28,6 +28,9 @@ class VfsTreeModel(QAbstractItemModel):
         # Catch VfsManager signals for updating tree
         self.vfs_manager.insert_start.connect(self._on_insert_start)
         self.vfs_manager.insert_finished.connect(self._on_insert_finished)
+        self.vfs_manager.remove_start.connect(self._on_remove_start)
+        self.vfs_manager.remove_finished.connect(self._on_remove_finished)
+        self.vfs_manager.node_dataChanged.connect(self._on_node_dataChanged)
 
     ###---------------------------------------- Qt API --------------------------------------###
 
@@ -91,7 +94,7 @@ class VfsTreeModel(QAbstractItemModel):
             if col == 0:
                 return node.hierarchical_id_str
             if col == 1:
-                return node.name + node.extension
+                return node.name + node.extension if node.extension else node.name
             if col == 2:
                 return human_size(node.size)
 
@@ -125,6 +128,21 @@ class VfsTreeModel(QAbstractItemModel):
     def _on_insert_finished(self):
         self.endInsertRows()
 
+    def _on_remove_start(self, parent: VfsNode, first: int, last: int) -> None:
+        parent_index = self.index_for_node(parent)
+        self.beginRemoveRows(parent_index, first, last)
+
+    def _on_remove_finished(self) -> None:
+        self.endRemoveRows()
+
+    def _on_node_dataChanged(self, node: VfsNode) -> None:
+        '''Trigger a UI repaint for a specific node.'''
+        top_left = self.index_for_node(node)
+        if not top_left.isValid():
+            return
+        bottom_right = self.index(node.row(), self.columnCount() - 1, top_left.parent())
+        self.dataChanged.emit(top_left, bottom_right)
+
     def index_for_node(self, target_node: VfsNode) -> QModelIndex:
         '''Get the QModelIndex for a node'''
         if target_node is None or target_node == self.root_node:
@@ -137,7 +155,6 @@ class TreeProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.show_hidden  = False
-        # self.setDynamicSortFilter(True)
         self.setRecursiveFilteringEnabled(True)
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
@@ -179,16 +196,18 @@ class TreeProxyModel(QSortFilterProxyModel):
 _RANK_EXACT_NAME  = 100
 _RANK_HID         = 90
 _RANK_NAME_PREFIX = 80
+_RANK_EXTENSION   = 70
 _RANK_NAME        = 60
 _RANK_TAG         = 40
 _RANK_DESCRIPTION = 10
 
 @dataclass
 class _SearchEntry:
-    '''Stores: node*, name, hid, tokens, base_rank, tags. Calculates score.'''
+    '''Stores: node*, name, hid, ext, tokens, base_rank, tags. Calculates score.'''
     node:       VfsNode | None
     hid_str:    str
     name_lower: str
+    ext_lower:  str
     desc_lower: str
     tags_lower: tuple[str, ...]
     tokens:     frozenset[str]
@@ -208,6 +227,10 @@ class _SearchEntry:
             val = val.lower().strip()
             if not val:
                 return 0
+            if prefix in ('ext', 'extension'): # Extension filter
+                clean_val = val.lower().strip()
+                clean_ext = self.ext_lower.lstrip('.')
+                return _RANK_EXTENSION + self.base_rank if clean_ext and clean_val == clean_ext else 0
             if prefix in ('tag', 'tags'): # Tag filter
                 return _RANK_TAG + self.base_rank if any(val in t for t in self.tags_lower) else 0
             if prefix in ('desc', 'description'): # Description filter
@@ -235,7 +258,7 @@ class _SearchEntry:
         for token in self.tokens:
             if query == token: # Exact token match
                 return _RANK_TAG + self.base_rank if self.base_rank > 0 else _RANK_DESCRIPTION
-            if token.startswith(query): # Patial token match
+            if token.startswith(query): # Partial token match
                 return _RANK_DESCRIPTION + self.base_rank
         return 0
 
@@ -286,9 +309,10 @@ class FlatSearchModel(QAbstractListModel):
             if entry.node:
                 return f'{entry.node.name}{entry.node.extension} ({entry.hid_str})'
             else:
-                meta = self._store.get(entry.hid_str)
-                title = meta.title if (meta and meta.title) else f'Unresolved ({entry.hid_str})'
-                return f'{title}  ({entry.hid_str})'
+                meta    = self._store.get(entry.hid_str)
+                title   = meta.title if (meta and meta.title) else f'Unresolved ({entry.hid_str})'
+                ext_str = meta.extension if meta and meta.extension else ''
+                return f'{title}{ext_str} ({entry.hid_str})'
         if role == Qt.ItemDataRole.UserRole: # Node
             return entry
         if role == self.TagsRole: # Tags
@@ -405,7 +429,7 @@ class FlatSearchModel(QAbstractListModel):
         if hid_str in self._hid_to_idx:
             self._on_entry_updated(hid_str)
             return
-        node = self._vfs.get_node_by_id(tuple(map(int, hid_str.split('.'))))
+        node = self._vfs.get_vfs_node_by_id(tuple(map(int, hid_str.split('.'))))
         entry = (
             self._build_entry(node)
             if node and not node.is_hidden
@@ -449,9 +473,10 @@ class FlatSearchModel(QAbstractListModel):
 
     def _build_entry(self, node: VfsNode) -> _SearchEntry:
         '''Build an instantiated entry from live VFS'''
-        meta       = self._store.get(node.hierarchical_id_str)
+        meta            = self._store.get(node.hierarchical_id_str)
         name_lower: str = node.name.lower()
         hid_str: str    = node.hierarchical_id_str
+        ext_lower: str  = node.extension.lower() if node.extension else (meta.extension.lower() if meta and meta.extension else '')
         desc_lower: str = ''
         tags_lower: tuple[str, ...] = ()
         base_rank  = 0
@@ -459,6 +484,8 @@ class FlatSearchModel(QAbstractListModel):
         tokens: set[str] = set(name_lower.split())
         tokens.add(hid_str)
         tokens.update(c.lower() for c in node.category)
+        if ext_lower:
+            tokens.add(ext_lower.lstrip('.'))
 
         if meta:
             if meta.title:
@@ -474,6 +501,7 @@ class FlatSearchModel(QAbstractListModel):
         return _SearchEntry(
             node=node,
             name_lower=name_lower,
+            ext_lower=ext_lower,
             hid_str=hid_str,
             desc_lower=desc_lower,
             tags_lower=tags_lower,
@@ -484,13 +512,16 @@ class FlatSearchModel(QAbstractListModel):
     def _build_uninstantiated_entry(self, hid_str: str, meta: Any) -> _SearchEntry:
         '''Build an for a metadata entry, a node not yet in the VFS'''
         name_lower = (meta.title if meta.title else f'Unresolved ({hid_str})').lower()
-        tags_lower  = tuple(t.lower() for t in meta.tags)
+        tags_lower = tuple(t.lower() for t in meta.tags)
+        ext_lower  = meta.extension.lower() if meta and meta.extension else ''
         desc_lower = ''
         base_rank  = 0
 
         tokens: set[str] = set(name_lower.split())
         tokens.add(hid_str)
         tokens.update(tags_lower)
+        if ext_lower:
+            tokens.add(ext_lower.lstrip('.'))
 
         if meta.title:
             base_rank += 20
@@ -502,6 +533,7 @@ class FlatSearchModel(QAbstractListModel):
         return _SearchEntry(
             node=None,
             name_lower=name_lower,
+            ext_lower=ext_lower,
             hid_str=hid_str,
             desc_lower=desc_lower,
             tags_lower=tags_lower,

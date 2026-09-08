@@ -10,136 +10,27 @@ in RadiCompressor.
 from __future__ import annotations
 
 import ctypes
-import platform
 from pathlib import Path
-import shutil
-import subprocess
-import sys
 import threading
+from core.native.native_registry import NativeRegistry, NativeLibrary
 
 import logging
-
 logger = logging.getLogger(f"radiata.{__name__}")
-
-_SOURCE_NAME = "radiata_compressor.c"
-_BUILD_DIR_NAME = ".compressor_build"
 
 _lib: ctypes.CDLL | None = None
 _load_attempted = False
 _lock = threading.Lock()
 
 
-###--------------------------------------------- Build ---------------------------------------------###
+###-------------------------------------------- C-Types Bindings ---------------------------------------------###
 
-def _native_root() -> Path:
-    return Path(__file__).resolve().parent
+_LIBRARY_DEF = NativeLibrary(
+    name="radiata_compressor",
+    root_dir=Path(__file__).resolve().parent,
+    sources=['radiata_compressor.c'],
+)
 
-
-def _library_name() -> str:
-    if sys.platform.startswith("win"):
-        return "radiata_compressor.dll"
-    if sys.platform == "darwin":
-        return "libradiata_compressor.dylib"
-    return "libradiata_compressor.so"
-
-
-def _platform_tag() -> tuple[str, str]:
-    if sys.platform.startswith("win"):
-        osname = "windows"
-    elif sys.platform == "darwin":
-        osname = "macos"
-    else:
-        osname = "linux"
-    return osname, platform.machine().lower()
-
-
-def _prebuilt_lib_paths() -> list[Path]:
-    """Candidate locations for a CI-built lib, in priority order.
-
-    Covers both the frozen app bundle (PyInstaller's _MEIPASS) and a
-    prebuilt/ directory shipped alongside the source. macOS ships a single
-    universal2 lib, so the arch-less directory is also searched.
-    """
-    name = _library_name()
-    osname, arch = _platform_tag()
-    dirs: list[Path] = []
-
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:  # running inside a PyInstaller bundle
-        base = Path(meipass)
-        dirs += [base / "native", base]
-
-    root = _native_root()
-    dirs += [root / "prebuilt" / f"{osname}-{arch}", root / "prebuilt" / osname]
-
-    return [d / name for d in dirs]
-
-
-def _find_c_compiler() -> str | None:
-    if sys.platform.startswith("win"):
-        return shutil.which("gcc")
-    return shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
-
-
-def _build_command(compiler: str, source_path: Path, output_path: Path) -> list[str]:
-    platform_flags = ["-static-libgcc"] if sys.platform.startswith("win") else ["-fPIC"]
-    return [
-        compiler,
-        "-shared",
-        "-O2",
-        "-std=c99",
-        "-Wall",
-        "-Wextra",
-        *platform_flags,
-        "-o",
-        str(output_path),
-        str(source_path),
-    ]
-
-
-def _build_needed(library_path: Path, source_path: Path, force: bool) -> bool:
-    if force or not library_path.exists():
-        return True
-    return source_path.stat().st_mtime > library_path.stat().st_mtime
-
-
-def _ensure_built(force_rebuild: bool = False) -> Path:
-    root = _native_root()
-    source_path = root / _SOURCE_NAME
-    build_dir = root / _BUILD_DIR_NAME
-    library_path = build_dir / _library_name()
-
-    if not source_path.exists():
-        raise FileNotFoundError(f"Missing compressor source: {source_path}")
-
-    if not _build_needed(library_path, source_path, force_rebuild):
-        return library_path
-
-    compiler = _find_c_compiler()
-    if not compiler:
-        raise RuntimeError(
-            "No C compiler found on PATH (install Xcode CLT on macOS, "
-            "build-essential on Linux, or MinGW/MSYS2 on Windows)."
-        )
-
-    build_dir.mkdir(exist_ok=True)
-    staged_source = build_dir / _SOURCE_NAME
-    shutil.copyfile(source_path, staged_source)
-
-    if library_path.exists():
-        library_path.unlink()
-
-    cmd = _build_command(compiler, staged_source, library_path)
-    result = subprocess.run(cmd, cwd=build_dir, text=True, capture_output=True)
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout).strip()
-        raise RuntimeError(f"Failed to build native compressor:\n{details}")
-
-    return library_path
-
-
-def _bind(library_path: Path) -> ctypes.CDLL:
-    lib = ctypes.CDLL(str(library_path))
+def _bindings(lib: ctypes.CDLL) -> ctypes.CDLL:
     u8_ptr = ctypes.POINTER(ctypes.c_uint8)
 
     lib.radiata_decompress.argtypes = [
@@ -163,34 +54,6 @@ def _bind(library_path: Path) -> ctypes.CDLL:
 
     return lib
 
-
-def _load_native() -> ctypes.CDLL | None:
-    """Resolve the native compressor across three tiers: prebuilt -> compile -> none."""
-    # Tier 1: a CI-built lib bundled with the app (zero setup, no compiler).
-    for cand in _prebuilt_lib_paths():
-        if cand.exists():
-            try:
-                lib = _bind(cand)
-                logger.info("Native SLZ/SLE compressor loaded (prebuilt): %s", cand)
-                return lib
-            except Exception as exc:  # noqa: BLE001 - try the next candidate/tier
-                logger.warning("Prebuilt compressor %s failed to load: %s", cand.name, exc)
-
-    # Tier 2: compile from the shipped source (developers running from source).
-    # Skipped in a frozen bundle, which has no compiler and a read-only payload.
-    if not getattr(sys, "frozen", False):
-        try:
-            library_path = _ensure_built()
-            lib = _bind(library_path)
-            logger.info("Native SLZ/SLE compressor compiled and loaded: %s", library_path.name)
-            return lib
-        except Exception as exc:  # noqa: BLE001 - fall through to Python
-            logger.warning("Could not build native compressor: %s", exc)
-
-    # Tier 3: caller falls back to the pure-Python compressor.
-    return None
-
-
 def get_compressor() -> ctypes.CDLL | None:
     """Return the loaded native compressor, or None if it is unavailable.
 
@@ -203,11 +66,10 @@ def get_compressor() -> ctypes.CDLL | None:
         if _load_attempted:
             return _lib
         _load_attempted = True
-        _lib = _load_native()
+        _lib = NativeRegistry.load(_LIBRARY_DEF, _bindings)
         if _lib is None:
             logger.warning("Using pure-Python SLZ/SLE compressor (native unavailable).")
         return _lib
-
 
 ###----------------------------------------- High-level wrappers -----------------------------------------###
 

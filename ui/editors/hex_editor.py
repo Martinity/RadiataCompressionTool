@@ -7,9 +7,10 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox, QStackedLayout,
     QWidget, QMenu, QApplication, QLineEdit, QFrame
 )
-from PyQt6.QtCore import Qt, QModelIndex, pyqtSignal, QItemSelectionModel
-from PyQt6.QtGui import QShortcut, QKeySequence, QColor, QBrush, QAction, QUndoCommand, QUndoStack, QClipboard
+from PyQt6.QtCore import Qt, QModelIndex, pyqtSignal, QItemSelectionModel, QTimer
+from PyQt6.QtGui import QShortcut, QColor, QBrush, QAction, QUndoCommand, QUndoStack, QClipboard
 
+from ui.settings import Shortcut, Shortcuts
 from core.contracts import BaseEditor
 from core.handlers.generic_binary_leaf import GenericBinaryHandler
 from core.registry import Registry
@@ -39,15 +40,15 @@ class HexEditorWidget(BaseEditor):
     '''Mutable global fallback editor'''
     undo_state_changed = pyqtSignal(bool, bool)  # (can_undo, can_redo)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, data_resolver = None) -> None:
         super().__init__(parent)
+        self._data_resolver = data_resolver
         self.model: HexTableModel | None = None
 
         self.undo_stack = QUndoStack(self)
         self.undo_stack.canUndoChanged.connect(self._on_history_changed)
         self.undo_stack.canRedoChanged.connect(self._on_history_changed)
         self.undo_stack.cleanChanged.connect(lambda clean: self.set_dirty(not clean))
-
         self._setup_ui()
         self._setup_shortcuts()
 
@@ -124,8 +125,8 @@ class HexEditorWidget(BaseEditor):
         return frame
 
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence.StandardKey.Copy, self).activated.connect(lambda: self._copy('hex'))
-        QShortcut(QKeySequence.StandardKey.Find, self).activated.connect(self.search_input.setFocus)
+        QShortcut(Shortcuts.sequence(Shortcut.COPY), self).activated.connect(lambda: self._copy('hex'))
+        QShortcut(Shortcuts.sequence(Shortcut.FIND), self).activated.connect(self.search_input.setFocus)
 
     def show_error(self, message: str) -> None:
         '''Swap to the editor page in the stack and display error.'''
@@ -283,7 +284,7 @@ class HexEditorWidget(BaseEditor):
             ('As ASCII text  (SLZ. …)',      'ascii'),
         ):
             act = QAction(label, self)
-            act.triggered.connect(lambda checked=False, f=fmt: self._copy(f))
+            act.triggered.connect(lambda f=fmt: self._copy(f))
             copy_menu.addAction(act)
 
         menu.addSeparator()

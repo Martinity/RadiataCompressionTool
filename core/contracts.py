@@ -8,13 +8,15 @@ from typing import Any, Callable, NamedTuple, TYPE_CHECKING
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import pyqtSignal
 from core.node import VfsNode
+from core.native.block_device import BlockDevice
 if TYPE_CHECKING:
-    from core.workers import TaskHandle
+    from core.workers import TaskHandle, IsoRebuildFlags, EditorPayload
+    from core.dispatcher import Dispatcher
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
 
-###-------------------------------------------- Special Return --------------------------------------------------###
+###-------------------------------------------- Special Return Structs --------------------------------------------------###
 
 class RebuildResult(NamedTuple):
     '''Structured return value for handlers that mutate linked nodes (kods w/datacenter)'''
@@ -30,7 +32,7 @@ class BaseHandler(abc.ABC):
     A Handler acts as a translator between raw binary data and the VfsNode
     hierarchy. It is responsible for 'unpacking' a format's internal structure
     and 'repacking' modifications back into a valid binary stream.
-    
+
     Lifecycle:
         1. Instantiated by a Worker or Navigator with source bytes.
         2. get_file_tree() maps internal entries to VfsNodes.
@@ -39,7 +41,7 @@ class BaseHandler(abc.ABC):
     def __init__(self, parent_node: VfsNode | None = None) -> None:
         '''Initialize the root handle and provide generic resource management'''
         self.parent_node = parent_node
-        self.handle: io.IOBase | None = None
+        self.handle: io.IOBase | BlockDevice | None = None
         self.owns_handle: bool = False
         self.task_handle: TaskHandle | None = None
 
@@ -58,7 +60,7 @@ class BaseHandler(abc.ABC):
 
     def close(self):
         '''Close the stream if owned by this instance'''
-        if self.owns_handle and self.handle and not self.handle.closed:
+        if self.owns_handle and self.handle and not getattr(self.handle, 'closed', False):
             try:
                 self.handle.close()
             except Exception as e:
@@ -111,16 +113,19 @@ class BaseHandler(abc.ABC):
 ###------------------------------------------ Specialized Handler Contracts ----------------------------------------###
 
 class PhysicalHandler(BaseHandler):
-    '''Used exclusively for physical disk archives (e.g. ISO)
-    - Source must be a physical Path
+    '''Specialized ISO/BlockDevice handler
+    Currently only used for disk images if new sources are added the BlockDevice needs to match the device alignment.
+    BlockDevice is stateless and thread-safe.
+    - Source must be a BlockDevice
     - Manages file-handles directly
     - Scanning and maintaining top-level tree structures
     '''
-    def __init__(self, source_path: Path, parent_node: VfsNode | None = None) -> None:
+    def __init__(self, source: BlockDevice, parent_node: VfsNode | None = None) -> None:
         super().__init__(parent_node)
-        self.path        = source_path
-        self.handle      = open(source_path, 'rb')
+        self.source: BlockDevice = source
+        self.handle: BlockDevice = self.source
         self.owns_handle = True
+
 
     def release_handle(self) -> None:
         '''
@@ -129,17 +134,18 @@ class PhysicalHandler(BaseHandler):
         '''
         if self.handle and not self.handle.closed:
             self.handle.close()
-        self.handle = None
+        self.handle = None  # type: ignore dereference for safety
         self.owns_handle = False
 
     @abc.abstractmethod
     def rebuild_node(
         self,
-        node:         VfsNode,
+        root:         VfsNode,
         staged_nodes: list[VfsNode],
         output_path:  Path,
+        build_flags:  IsoRebuildFlags,
         task_handle:  TaskHandle,
-    ) -> bool:
+    ) -> bool:  # type: ignore
         '''Rebuild and write a collection of nodes to disk. Returns True on success'''
 
 class ContainerHandler(BaseHandler):
@@ -151,8 +157,8 @@ class ContainerHandler(BaseHandler):
     '''
     def __init__(self, source_data: bytes, parent_node: VfsNode | None = None) -> None:
         super().__init__(parent_node)
-        self.handle      = io.BytesIO(source_data)
-        self.owns_handle = True
+        self.handle: io.BytesIO = io.BytesIO(source_data)
+        self.owns_handle        = True
 
 class LeafHandler(BaseHandler):
     '''Used for individual, isolated file objects (e.g. IO)
@@ -182,12 +188,12 @@ class LeafHandler(BaseHandler):
         self.handle.seek(0)
         return self.handle.read()
 
-###---------------------------------------------- Widget contract ----------------------------------------------###
+###---------------------------------------------- Editor contract ----------------------------------------------###
 
 class _ABCMetaQtMeta(type(QWidget), abc.ABCMeta): # type: ignore
     '''Merge PyQt6 widget metaclass with ABC metaclass'''
 
-class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
+class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta): # type: ignore
     '''
     Minimum required implementation for a mutable editor:
 
@@ -210,13 +216,13 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     dataChanged = pyqtSignal(bool)              # Data changed bool
     is_mutable = True
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, data_resolver: Dispatcher | None = None):
         super().__init__(parent)
         self.current_node:      VfsNode | None = None
-        self._is_dirty:         bool           = False
-        self._original_payload: Any            = None
-        self._pending_data:     Any            = None
-        self._data_resolver:    Callable[['VfsNode'], bytes] | None = None
+        self._is_dirty:         bool = False
+        self._original_payload: Any = None
+        self._pending_data:     Any = None
+        self._data_resolver:    Dispatcher | None = data_resolver
 
     def __repr__(self) -> str:
         node_name = self.current_node.name if self.current_node else "None"
@@ -230,20 +236,19 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         '''Called when editor is open for data loading feedback, while waiting for BG thread'''
         self.current_node = node
 
-    def receive_data(self, result: Any, data_resolver: Callable[[VfsNode], bytes] | None = None) -> None:
+    def receive_data(self, result: Any) -> None:
         '''
         Called when the BG thread is done data processing
         (default) if result is bytes, stores as original data and call _populate_ui(result).
         Override for handlers that return non-bytes results.
         '''
-        self._data_resolver = data_resolver
         self._original_payload = result
         if isinstance(result, bytes):
             self.set_dirty(False)
             self._populate_ui(result)
         else:
             self.show_error(
-                f'Receive data got {type(result).__name__}, expected bytes.'
+                f'Receive data got {type(result).__name__}, expected bytes. '
                 f'Override receive_data or ensure handler.prepare_editor_data returns bytes.'
             )
 
@@ -257,6 +262,14 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
     def redo(self) -> None:
         pass
 
+    def receive_request(self, payload: Any) -> None:
+        '''Callback for a request from the data resolver
+        payload = None if the request could not be resolved
+        payload = EditorPayload if the request was resolved successfully'''
+        if payload is None:
+            logger.error('request_payload failed to resolve an EditorPayload.')
+            return
+
     ### Lifecycle
     def cleanup(self) -> None:
         '''Editor Destructor'''
@@ -266,11 +279,15 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
         self.set_dirty(False)
 
     ### Data access
-    def request_node_data(self, target_node: VfsNode) -> bytes:
-        if self._data_resolver:
-            return self._data_resolver(target_node)
-        logger.warning(f'Data resolver not initialized. Cannot fetch data for {target_node.name}')
-        return b''
+    def request_payload(self, hid: tuple[int, ...]) -> None:
+        if not isinstance(self._data_resolver, Dispatcher):
+            raise TypeError(f'Ensure to set _data_resolver during recieve_data before calling request_payload')
+        self._data_resolver.request_editor_payload(hid, callback=self.receive_request)
+
+    def request_raw_data(self, hid: tuple[int, ...]) -> None:
+        if not self._data_resolver:
+            raise TypeError(f'Ensure to set _data_resolver during recieve_data before calling request_raw_data')
+        self._data_resolver.request_raw_data(hid, callback=self.receive_request)
 
     def current_data(self) -> Any:
         '''Return the live state'''
@@ -302,6 +319,8 @@ class BaseEditor(QWidget, metaclass=_ABCMetaQtMeta):
 
     def set_dirty(self, state: bool):
         '''Track node changes'''
+        if self._is_dirty == state: # Prevent inf recursion
+            return
         self._is_dirty = state
         self.dataChanged.emit(state)
 

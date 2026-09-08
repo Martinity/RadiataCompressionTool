@@ -207,10 +207,11 @@ def test_get_handler_by_node_extension():
     assert handler_class is DummyHandler
 
 
-def test_get_handler_by_path():
+def test_get_handler_by_path(tmp_path):
     Registry.register('PathHandler', extensions=('.slz',))(DummyHandler)
 
-    path = Path('test.slz')
+    path = tmp_path / 'test.slz'
+    path.touch()
     handler_class = Registry.get_handler(path)
     assert handler_class is DummyHandler
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 from PyQt6.QtGui import QFontDatabase
 from utilities import get_resource_path
+from ui.settings import AppSettings
 
 import logging
 logger = logging.getLogger(f'radiata.{__name__}')
@@ -9,10 +10,12 @@ logger = logging.getLogger(f'radiata.{__name__}')
 class DarkTheme:
     BG_WINDOW         = '#202020'
     BG_SURFACE        = '#161616'
+    BG_SELECTED       = '#242424'
     BG_HOVER          = '#1a1a1a'
     BORDER            = '#333333'
     TEXT              = '#dcddde'
     TEXT_MUTED        = '#999999'
+    TEXT_SELECTED     = '#ffffff'
     ACCENT            = '#7f6df2'
     ACCENT_HOVER      = '#8875ff'
     INTERACTIVE       = '#2a2a2a'
@@ -27,14 +30,16 @@ class DarkTheme:
 class LightTheme:
     BG_WINDOW         = '#ffffff'
     BG_SURFACE        = '#f2f3f5'
-    BG_HOVER          = '#f5f6f8'
+    BG_SELECTED       = '#dcdcdc'
+    BG_HOVER          = '#e6e6e6'
     BORDER            = '#dddddd'
     TEXT              = '#2e3338'
     TEXT_MUTED        = '#888888'
+    TEXT_SELECTED     = '#1f2328'
     ACCENT            = '#705dcf'
     ACCENT_HOVER      = '#7a6ae6'
-    INTERACTIVE       = '#f2f3f5'
-    INTERACTIVE_HOVER = '#e9e9e9'
+    INTERACTIVE       = '#cccccc'
+    INTERACTIVE_HOVER = '#d9d9d9'
     ERROR             = '#990000'
     ERROR_HOVER       = '#bb0000'
     SCROLL_HOVER      = 'rgba(0, 0, 0, 0.2)'
@@ -46,11 +51,11 @@ class LightTheme:
 class ThemeManager:
     BASE_FONT_SIZE     = 14
     current_font_size  = 14
-    active_theme: type = DarkTheme
+    active_theme: type[DarkTheme] | type[LightTheme] = DarkTheme
     _raw_template      = None
     _app               = None
 
-    THEMES = {
+    THEMES: dict[str, type[DarkTheme] | type[LightTheme]] = {
         # 'Radiata': RadiataTheme,
         'Dark':    DarkTheme,
         'Light':   LightTheme
@@ -87,10 +92,12 @@ class ThemeManager:
         replacements = {
             '{BG_WINDOW}':         theme.BG_WINDOW,
             '{BG_SURFACE}':        theme.BG_SURFACE,
+            '{BG_SELECTED}':       theme.BG_SELECTED,
             '{BG_HOVER}':          theme.BG_HOVER,
             '{BORDER}':            theme.BORDER,
             '{TEXT}':              theme.TEXT,
             '{TEXT_MUTED}':        theme.TEXT_MUTED,
+            '{TEXT_SELECTED}':     theme.TEXT_SELECTED,
             '{ACCENT}':            theme.ACCENT,
             '{ACCENT_HOVER}':      theme.ACCENT_HOVER,
             '{INTERACTIVE}':       theme.INTERACTIVE,
@@ -101,7 +108,7 @@ class ThemeManager:
             '{FONT_SANS}':         theme.FONT_SANS,
             '{FONT_MONO}':         theme.FONT_MONO,
             '{BASE_FONT_WEIGHT}':  theme.BASE_FONT_WEIGHT,
-            
+
             '{FONT_SIZE}':         f'{fs}px',
             '{FONT_SIZE_SMALL}':   f'{fs - 2}px',
             '{FONT_SIZE_LARGE}':   f'{fs + 5}px',
