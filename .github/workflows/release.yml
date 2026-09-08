@@ -43,12 +43,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo wget -O /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-          if ! echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /usr/local/bin/appimagetool" | sha256sum --check; then          sudo chmod +x /usr/local/bin/appimagetool
+          if ! echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /usr/local/bin/appimagetool" | sha256sum --check; then
             echo "ERROR: Checksum mismatch! Actual checksum: "
-            sha256sum /user/local/bin/appimagetool
+            sha256sum /usr/local/bin/appimagetool
             exit 1
           fi
-        sudo chmod +x /user/local/bin/appimagetool
+          sudo chmod +x /usr/local/bin/appimagetool
       - name: Package (Linux)
         if: runner.os == 'Linux'
         env:
